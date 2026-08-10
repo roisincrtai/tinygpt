@@ -53,7 +53,6 @@ the two larger schemes.
 pip install -r requirements.txt
 
 ./stage1_download_data.sh          # fetch the corpora into data/download/
-./run_full.sh                      # every stage, in order
 ```
 
 Stage 1 is the only stage that reaches the network; every stage after it reads a local

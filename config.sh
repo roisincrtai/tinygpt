@@ -518,7 +518,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 # =========================================================================== #
 # Every knob, one per line, with the value in force and where it came from -- so the head of a
 # log says what produced it, without anyone having to reconstruct four layers of precedence
-# from memory. Set ZETAGPT_QUIET=1 to suppress this (run_full.sh chains nine stages).
+# from memory. Set ZETAGPT_QUIET=1 to suppress this when chaining stages.
 if [ -z "${ZETAGPT_QUIET:-}" ]; then
   echo "--- configuration ------------------------------------------------------------"
   for _v in $ZETAGPT_VARS; do
