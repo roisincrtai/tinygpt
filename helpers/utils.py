@@ -1147,78 +1147,9 @@ def _pack(path, max_words, text_column="text"):
             yield " ".join(buf)
 
 
-def _write(path, sig, st, docs_ids):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    head = {"sig": sig, "src_mtime": int(st.st_mtime), "src_size": st.st_size,
-            "lens": [len(d) for d in docs_ids]}
-    flat = array.array("I", [i for d in docs_ids for i in d])
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:                       # atomic: never leave a partial cache
-        f.write((json.dumps(head) + "\n").encode("utf-8"))
-        flat.tofile(f)
-    os.replace(tmp, path)
-
-
-def _read(path, sig, st):
-    """Cached ids, or None when the entry is missing, stale or unreadable."""
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, "rb") as f:
-            head = json.loads(f.readline().decode("utf-8"))
-            if (head.get("sig") != sig or head.get("src_size") != st.st_size
-                    or head.get("src_mtime") != int(st.st_mtime)):
-                return None
-            flat = array.array("I")
-            flat.frombytes(f.read())
-    except Exception:                                          # noqa: BLE001
-        return None
-    lens = head.get("lens") or []
-    if sum(lens) != len(flat):
-        return None                                            # truncated file
-    out, off = [], 0
-    for n in lens:
-        out.append(flat[off:off + n].tolist()); off += n
-    return out
-
-
-def corpus_bytes(files, text_column="text"):
-    """Total UNCOMPRESSED bytes of `files` -- the denominator a progress bar needs.
-
-    A parquet file's size on disk is its compressed size, which for prose is two or three
-    times smaller than the text it holds; using it would drive the bar past 100%. Parquet
-    records the uncompressed size of every row group in its FOOTER, so the true figure costs
-    a metadata read and no data. Anything else is its size on disk, which is already the
-    number of bytes that will be read.
-
-    Best-effort: a file that cannot be measured contributes its on-disk size, and a total that
-    is slightly wrong is a bar that is slightly wrong, never a failure."""
-    total = 0
-    for fp in files:
-        try:
-            if os.path.splitext(fp)[1].lower() == ".parquet":
-                import pyarrow.parquet as pq
-                md = pq.ParquetFile(fp).metadata
-                total += sum(md.row_group(i).total_byte_size
-                             for i in range(md.num_row_groups))
-            else:
-                total += os.path.getsize(fp)
-        except Exception:                                      # noqa: BLE001
-            try:
-                total += os.path.getsize(fp)
-            except OSError:
-                pass
-    return total
-
-
-def _split_token(name):
-    """The leading name token of a file: `validation-00000-of-00001.parquet` -> "validation",
-    `test_0003.txt` -> "test", `doc.0.parquet` -> "doc"."""
-    stem = os.path.splitext(name)[0]
-    for sep in ("-", "_", "."):
-        stem = stem.split(sep)[0]
-    return stem.lower()
-
+# _write / _read are gone with the single-file cache they served. Both caches now APPEND:
+# helpers/token_store.py for the corpus, attach_pair_ids below for the preference pairs.
+# Nothing in this project writes a data file by building it in memory first.
 
 def corpus_files(root, exclude_dirs=(), extensions=None):
     """Every corpus file under `root`, recursively: any file whose extension is in
