@@ -1,0 +1,15 @@
+# zetagpt -- runtime dependencies (unpinned)
+#
+#   pip install -r requirements.txt
+#
+# The model, tokenizer and training loops need only torch; tqdm drives every progress bar
+# and matplotlib/numpy draw the per-stage PDF figures. transformers is used by stage 7
+# (the gpt2-small student) and by the optional hh/shp dataset loaders, which also need
+# datasets.
+torch
+tqdm
+matplotlib
+numpy
+transformers       # the gpt2-small student of stage 9
+pyarrow            # a pretraining corpus may ship as parquet
+huggingface_hub    # used ONLY by tools/download_data.py; no trainer imports it

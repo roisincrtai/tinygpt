@@ -1,0 +1,29 @@
+"""
+helpers -- everything the stages share, and nothing any single stage owns.
+
+    helpers.utils            device resolution, tqdm progress, the cosine schedule, table
+                             printing, held-out probes, the mixed-precision optimizer, the
+                             checkpoint/history IO that resume and the figures are built on,
+                             and the on-disk token cache
+    helpers.common           the setup every stage runs: arguments, tokenizer, model factory,
+                             monitor and generation previews
+    helpers.lm               the length-normalised language-model training loop (stages 2, 3)
+    helpers.pref_dataset     every preference and instruction dataset behind one interface
+    helpers.visualization    every figure, drawn as PDF under outputs/plots/<stage>/
+
+`utils` is re-exported at package level, so the form every trainer already uses --
+
+    from helpers import progress, save_ckpt, CosineLR, MasterAdamW
+
+-- keeps working. The other four are imported explicitly:
+
+    from helpers import common, lm
+    from helpers import pref_dataset as pdset
+    from helpers import visualization as viz
+
+They are NOT imported here. helpers.common imports chat, and chat imports
+helpers.pref_dataset; pulling common in at package-initialisation time would make that a
+circular import. Importing a submodule by name is enough to load it, so nothing is lost.
+"""
+from .utils import *          # noqa: F401,F403
+from . import utils           # noqa: F401

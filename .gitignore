@@ -1,0 +1,43 @@
+__pycache__
+.ipynb_checkpoints
+logs
+cache
+*.pt
+*.pth
+*.tgz
+*.tar
+.checkpoint_*
+saved_models/
+plots/
+outputs/
+*.swp
+*.bak*
+*.tgz
+*.tar
+tmp
+results
+.DS_Store
+*.ckpt
+*.pth
+saved_models
+bak
+plots*
+checkpoints
+private*
+
+latex
+user
+tmp
+
+
+# EXTERNAL DOWNLOADS ONLY. The corpora that ship WITH the repository live in builtin_data/
+# and are tracked; data/ is where anything fetched from elsewhere lands (data/download/...),
+# and none of it belongs in git -- it is large, it is someone else's, and it is reproducible
+# from the script that fetched it.
+data/
+
+__pycache__
+
+.trash/
+cache
+config_user.yaml

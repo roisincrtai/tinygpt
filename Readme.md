@@ -1,0 +1,115 @@
+# ZetaGPT: A Positional–Encoding–Free State–Space–Attention Compact Language Models
+
+**ZetaGPT** is a compact language model with no explicit positional encoding: no position
+table and no rotation. Each block is a causal state-space module, gated multi-head
+self-attention and a feed-forward network, pre-normalised with a residual around each
+sub-layer; sequence order enters through the recurrent state rather than through a function
+of the position index. The repository provides the complete training pipeline — byte-level
+BPE tokenizer, pretraining, supervised fine-tuning, reward modelling, RLHF, chain-of-thought
+reinforcement learning, direct preference optimisation and distillation — in plain PyTorch,
+with each stage runnable on its own.
+
+## Configuration schemes
+
+The head dimension is 64 in every scheme, so width scales by adding heads. Parameter counts
+assume the induced vocabulary of 50,259 with the output head tied to the token embedding.
+
+| Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context | Embedding | Blocks | Parameters |
+|---|---|---|---|---|---|---|---|---|---|
+| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 512 | 25.7M | 35.8M | 61.5M |
+| `zetagpt-s` (default) | 16 | 8 | 512 | 64 | 4× | 512 | 25.7M | 71.5M | **97.2M** |
+| `zetagpt-m` | 16 | 12 | 768 | 64 | 4× | 1024 | 38.6M | 160.7M | 199.3M |
+| `zetagpt-l` | 24 | 16 | 1024 | 64 | 4× | 1024 | 51.5M | 428.4M | 479.9M |
+
+Select a scheme with `MODEL_SCHEME=zetagpt-m`, or override the context alone with
+`CONTEXT_WINDOW`. The **Context** column is the window each scheme is *trained* at, not a limit:
+nothing in the model refers to an absolute position. `zetagpt-tiny` and `zetagpt-s` share a
+width, a context and a corpus, differing only in depth; point `PRETRAIN_DIR` at your own for
+the two larger schemes.
+
+## Niche among compact language models
+
+| Model | Params | Architecture | Positional encoding | Pretrain context |
+|---|---|---|---|---|
+| TinyStories-1M | 3.7M | Transformer | Learned | 512 |
+| Baby GPT (character) | 10.8M | Transformer | Learned | 256 |
+| TinyStories-8M | 19.7M | Transformer | Learned | 512 |
+| TinyStories-33M | 68.5M | Transformer | Learned | 512 |
+| Pythia-70M | 70.4M | Transformer | RoPE | 2048 |
+| GPT-2 Small | 124M | Transformer | Learned | 1024 |
+| SmolLM2-135M | 134.5M | Transformer | RoPE | 8192 |
+| Gemma 3 270M | 268.1M | Transformer | RoPE | 32768 |
+| nanochat d20 | ~560M | Transformer | RoPE | 1024 |
+| Qwen3-0.6B | ~0.6B | Transformer | RoPE | 32768 |
+| TinyLlama | ~1.1B | Transformer | RoPE | 2048 |
+| **ZetaGPT-Tiny** | **61.5M** | **State–Space–Attention** | **None** | **512** |
+| **ZetaGPT-S** (default) | **97.2M** | **State–Space–Attention** | **None** | **512** |
+| **ZetaGPT-M** | **199.3M** | **State–Space–Attention** | **None** | **1024** |
+| **ZetaGPT-L** | **479.9M** | **State–Space–Attention** | **None** | **1024** |
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+
+./stage1_download_data.sh          # fetch the corpora into data/download/
+./run_full.sh                      # every stage, in order
+```
+
+Stage 1 is the only stage that reaches the network; every stage after it reads a local
+directory and stops if it is not there. Already-present datasets are skipped and an
+interrupted transfer resumes, so re-running is cheap. `./stage1_download_data.sh --list` shows
+what would be fetched and where it goes.
+
+Stages are independent and communicate only through files on disk, so each can be run,
+re-run or replaced alone. Every stage requires the tokenizer, and each later stage requires
+the checkpoint of the one it starts from.
+
+```bash
+./stage1_download_data.sh          # fetch the corpora
+./stage2_train_bpe_tokenizer.sh    # byte-level BPE
+./stage3_pretrain.sh               # pretraining
+./stage4_sft.sh                    # supervised fine-tuning (needs the pretrain checkpoint)
+./stage5_train_rlhf_reward.sh      # reward model
+./stage6_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
+./stage7_cot_aha_moment.sh         # chain of thought by GRPO
+./stage8_instruct_dpo.sh           # direct preference optimisation
+./stage9_distill.sh                # distillation into GPT-2 small
+```
+
+Equivalently, bypassing the shell layer:
+
+```bash
+python -m pretrain.run
+python -m sft.run
+python -m instruct_rlhf.run
+```
+
+Every knob is a shell variable in `config.sh`, and every default lives in
+`default_config.py`; a command-line flag beats both. Overrides apply per run:
+
+```bash
+PRETRAIN_STEPS=20000 ./stage3_pretrain.sh
+MODEL_SCHEME=zetagpt-m ./stage3_pretrain.sh
+GPU=cpu ./stage4_sft.sh
+python -m sft.run --sft_steps 5000
+```
+
+`python config_wizard.py` writes `config_user.yaml` holding only the settings you choose;
+`config.sh` reads it over its own defaults.
+
+Talk to a trained checkpoint:
+
+```bash
+python chat.py                                # the most aligned checkpoint present
+```
+
+## Citation
+
+```bibtex
+@misc{luo_zetagpt,
+  title  = {ZetaGPT: A Positional--Encoding--Free State--Space--Attention Compact Language Models},
+  author = {R\'ois\'in Luo},
+  url    = {https://github.com/roisincrtai/zetagpt}
+}
+```
