@@ -279,15 +279,22 @@ def load_pretrain_corpus(root, max_words=200, exclude_dirs=(), text_column="text
     streamed, because a tokenizer cannot be built from tokens it has not yet defined."""
     # `_pack` is imported from the MODULE, not the package: helpers/__init__ re-exports with
     # `from .utils import *`, which by definition skips underscore names.
-    from helpers import progress, corpus_files
+    from helpers import corpus_files, bar
     from helpers.utils import _pack
     files = corpus_files(root, exclude_dirs)
     docs = []
-    for fp in progress(files, desc="[corpus] scanning corpus", total=len(files)):
-        try:
-            docs.extend(_pack(fp, max_words, text_column))
-        except Exception:                                      # noqa: BLE001
-            continue
+    # The bar counts DOCUMENTS, not files. A corpus is three parquet shards now, not thirty
+    # thousand text files, so a per-file bar sits at 0/3 for minutes and says nothing about
+    # whether the scan is progressing or hung. The file counter goes in the postfix, where it
+    # answers "how much is left" without being the only thing that ever moves.
+    with bar("[corpus] scanning corpus", unit="doc") as b:
+        for i, fp in enumerate(files, 1):
+            b.set_postfix_str(f"file {i}/{len(files)} {os.path.basename(fp)[:28]}")
+            try:
+                for d in _pack(fp, max_words, text_column):
+                    docs.append(d); b.update(1)
+            except Exception:                                  # noqa: BLE001
+                continue
     return [{"prompt": "", "chosen": d, "rejected": ""} for d in docs], len(files)
 
 

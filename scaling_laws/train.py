@@ -24,11 +24,13 @@ lr(d) = lr_ref * sqrt(d_ref / d), the usual width scaling, anchored at the refer
 --lr_rule fixed disables it, which is worth having precisely to see the bend appear.
 """
 import math
+import os
 import zlib
 
 import torch
 import torch.nn.functional as F
 
+import default_config as config
 from helpers import CosineLR, MasterAdamW, progress
 from model import ZetaGPT
 
@@ -79,6 +81,32 @@ def validate(model, ids, batch, context, n_windows, device):
     return tot / max(cnt, 1)
 
 
+def _draw(point, hist, step, log=print):
+    """Redraw this point's live curve. Plotting must never kill a training run, so failures are
+    logged and swallowed -- the rule the stage monitors already follow."""
+    if not hist:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        d = os.path.join(config.PLOT_DIR, "scaling_laws")
+        os.makedirs(d, exist_ok=True)
+        xs = [h["step"] for h in hist]
+        fig, ax = plt.subplots(figsize=(6.4, 4.0))
+        ax.plot(xs, [h["train"] for h in hist], "o-", ms=3, lw=1.2, label="train")
+        ax.plot(xs, [h["val"] for h in hist], "s-", ms=3, lw=1.2, label="validation")
+        ax.set_xlabel("step"); ax.set_ylabel("loss (nats/token)")
+        ax.set_title(f"{point['id']}   N={point['N'] / 1e6:.2f}M   D={point['D'] / 1e6:.1f}M"
+                     f"   step {step:,}")
+        ax.grid(alpha=0.3); ax.legend(frameon=False)
+        fig.tight_layout()
+        fig.savefig(os.path.join(d, f"progress_{point['id'].replace('/', '-')}.pdf"))
+        plt.close(fig)
+    except Exception as e:                                     # noqa: BLE001
+        log(f"[scaling] figure skipped: {e}")
+
+
 def run_point(point, data, tok, args, device, log):
     """Train one (N, D) point from scratch. Returns the record the fit and the figure read."""
     train_ids, valid_ids = data
@@ -104,7 +132,8 @@ def run_point(point, data, tok, args, device, log):
 
     hist = []
     every = args.eval_every or max(1, steps // 10)
-    for step in progress(range(steps), desc=f"[{point['id']}]", total=steps):
+    bar = progress(range(steps), desc=f"[{point['id']}]", total=steps)
+    for step in bar:
         sched.step(step)
         seq = _batch(train_ids, point["D"], batch, ctx, gen, device)
         loss = _loss(model, seq)
@@ -112,9 +141,19 @@ def run_point(point, data, tok, args, device, log):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
+        if hasattr(bar, "set_postfix"):
+            bar.set_postfix(loss=f"{float(loss):.3f}",
+                            ppl=f"{math.exp(min(float(loss), 60)):.1f}")
         if (step + 1) % every == 0 or step + 1 == steps:
             v = validate(model, valid_ids, batch, ctx, args.val_windows, device)
             hist.append({"step": step + 1, "train": float(loss), "val": v})
+        # LIVE FIGURE, at the same --plot_every_steps cadence every other stage uses. A point
+        # of this study is a full training run of its own; without it the first curve anyone
+        # sees arrives only when the whole ladder has finished -- hours -- and a point that is
+        # diverging looks exactly like a point that is slow.
+        if getattr(args, "plot_every_steps", 0) > 0 and (step + 1) % args.plot_every_steps == 0:
+            _draw(point, hist, step + 1, log)
+    _draw(point, hist, steps, log)
 
     final = hist[-1]["val"] if hist else float("nan")
     best = min((h["val"] for h in hist), default=float("nan"))

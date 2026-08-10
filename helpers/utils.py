@@ -49,6 +49,30 @@ def progress(it, desc="", initial=0, total=None):
         return it
 
 
+def bar(desc, unit="it", total=None):
+    """A tqdm bar for work whose SIZE IS NOT KNOWN IN ADVANCE -- use it as a context manager
+    and call .update() as items are produced.
+
+    `progress` wraps an iterable and is right when the count is known. It is wrong when the
+    iterable is a handful of very large files: the bar then ticks once per file and sits still
+    for minutes, which is indistinguishable from a hang. This counts the units the work is
+    actually made of, and the caller puts the coarse position in the postfix.
+
+    Absence of tqdm must never be fatal, so a no-op stand-in with the same interface is
+    returned instead."""
+    try:
+        from tqdm import tqdm
+        return tqdm(desc=desc, unit=unit, total=total, leave=False)
+    except Exception:                                          # noqa: BLE001
+        class _Null:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def update(self, n=1): pass
+            def set_postfix_str(self, s): pass
+            def close(self): pass
+        return _Null()
+
+
 class CosineLR:
     """Cosine learning-rate schedule, shared by every trainer.
 
@@ -1242,21 +1266,31 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
                 else lambda t: tok(t, add_special_tokens=False)["input_ids"])
 
     def documents():
-        for fp in progress(files, desc=f"[{stage}] tokenizing corpus", total=len(files)):
-            for d in _pack(fp, max_words, text_column):
-                # the leading space matches Encoder's convention for a response, so a document
-                # from the stream and the same document encoded on the fly are the same ids
-                # encode_ordinary, NOT encode: a pretraining corpus is scraped text, and a
-                # document that merely MENTIONS <|endoftext|> -- any page discussing GPT-2
-                # does -- would otherwise contribute a real end-of-text in its middle. In a
-                # packed stream that is worse than a stray token: it forges a document
-                # boundary, and contiguous sampling then trains across a join that the corpus
-                # does not contain. The stream inserts its own separators; the text does not
-                # get a vote. Curated data (the SFT and preference sets, where a registered
-                # token is deliberately written) still goes through encode.
-                ids = ordinary(" " + d)
-                if ids:
-                    yield ids
+        """Every packed document of the corpus, tokenised, one at a time.
+
+        Counted in DOCUMENTS rather than files: a corpus is three parquet shards now, not
+        thirty thousand text files, so a per-file bar sits still while half a billion tokens
+        are encoded -- indistinguishable from a hang. The file position goes in the postfix.
+
+        encode_ordinary, NOT encode: a pretraining corpus is scraped text, and a document that
+        merely MENTIONS <|endoftext|> -- any page discussing GPT-2 does -- would otherwise
+        contribute a real end-of-text in its middle. In a packed stream that is worse than a
+        stray token: it forges a document boundary, and contiguous sampling then trains across
+        a join the corpus does not contain. The stream inserts its own separators; the text
+        does not get a vote. Curated data (the SFT and preference sets, where a registered
+        token is deliberately written) still goes through encode.
+
+        The leading space matches Encoder's convention for a response, so a document read from
+        the stream and the same document encoded on the fly are the same ids.
+        """
+        with bar(f"[{stage}] tokenizing corpus", unit="doc") as b:
+            for i, fp in enumerate(files, 1):
+                b.set_postfix_str(f"file {i}/{len(files)} {os.path.basename(fp)[:28]}")
+                for d in _pack(fp, max_words, text_column):
+                    b.update(1)
+                    ids = ordinary(" " + d)
+                    if ids:
+                        yield ids
 
     log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
     token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log)
