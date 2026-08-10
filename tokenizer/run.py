@@ -21,14 +21,37 @@ from .bpe import BPETokenizer
 from helpers import visualization as viz
 
 
+def with_extra_specials(tok):
+    """Register default_config.EXTRA_SPECIAL_TOKENS on a tokenizer, and return it.
+
+    Applied on every load and every build, so a token added to the configuration is present
+    everywhere without editing the tokenizer. They append AFTER the predefined ones, so adding
+    to the list never moves an existing id -- but it does grow the vocabulary, and a model
+    trained before the change needs its embedding extended, so the log says what was added."""
+    import default_config as config
+    extra = list(getattr(config, "EXTRA_SPECIAL_TOKENS", []) or [])
+    added = [t for t in extra if t not in tok.special2id]
+    for t in added:
+        tok.register_special(t)
+    if added:
+        print(f"[bpe] registered {len(added)} extra special token(s): {', '.join(added)} "
+              f"-> vocabulary {len(tok):,}", flush=True)
+    return tok
+
+
 def peek(bpe_path):
     """The saved tokenizer, or None. Lets a caller ask how many merges are already on disk
     WITHOUT assembling a training corpus -- which is how the corpus stages avoid reading
-    another stage's data just to find out whether the vocabulary needs building."""
+    another stage's data just to find out whether the vocabulary needs building.
+
+    An unreadable or truncated file returns None and is rebuilt. A file written with the OLD
+    id layout does not: BPETokenizer.load raises SystemExit, which is not an Exception and so
+    passes through here on purpose. Rebuilding silently would leave every checkpoint trained
+    against the old ids decoding as gibberish, with nothing said about it."""
     if not os.path.isfile(bpe_path):
         return None
     try:
-        return BPETokenizer.load(bpe_path)
+        return with_extra_specials(BPETokenizer.load(bpe_path))
     except Exception:                                         # noqa: BLE001
         return None
 

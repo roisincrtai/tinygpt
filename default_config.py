@@ -307,7 +307,26 @@ TRAIN = dict(
 # --------------------------------------------------------------------------- #
 # per-stage config
 # --------------------------------------------------------------------------- #
-BPE = dict(num_merges=50000)         # vocab = 3 specials + 256 bytes + num_merges
+# EXTRA SPECIAL TOKENS, registered on top of the predefined <|endoftext|> and <|pad|>.
+#
+# A registered token is an ATOM: the tokenizer emits ONE id for it and never breaks it into
+# subwords, so a later model can attach a meaning to it -- a control marker, a role tag, a
+# modality boundary.
+#
+#     EXTRA_SPECIAL_TOKENS = ["<vp>", "<|im_start|>", "<|im_end|>"]
+#     tok.encode("a <vp> b")     ->  [.., <vp>, ..]   rather than the subwords of "<vp>"
+#
+# They are appended AFTER the merges and after the predefined specials, so adding one never
+# moves an existing id: a checkpoint trained before the change only needs its embedding row
+# count raised, not retraining.
+#
+# Note the consequence: text containing those exact characters now produces the token. Corpus
+# text you do not control should be encoded with tok.encode_ordinary, which treats every
+# special as plain text.
+EXTRA_SPECIAL_TOKENS = []
+
+BPE = dict(num_merges=50000)         # vocab = 256 bytes + num_merges + specials
+                                     # (2 predefined + EXTRA_SPECIAL_TOKENS)
 
 # Step budgets are EPOCH BUDGETS in disguise: steps = ceil(epochs * examples / batch) at the
 # default batch of 16. Recompute them if the corpus or the batch size changes.

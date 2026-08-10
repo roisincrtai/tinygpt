@@ -5,19 +5,53 @@ ZetaGPT.
 The token-bag synthetic datasets used a word-level vocabulary (models.WordTokenizer). The readable
 pref_<theme>.json datasets are grammatical English sentences, so ZetaGPT needs sub-word units: a
 word-level table would be huge and share nothing across inflections. This BPE is byte-level (like
-GPT-2), so EVERY string encodes with no <unk>, and it is trained on the dataset corpus.
+GPT-2), so EVERY string encodes -- there is no unknown token to fall back to -- and it is
+trained on the dataset corpus.
 
 Interface parity with models.WordTokenizer so it is a drop-in for build_tokenizer/build_model:
     tok(text, add_special_tokens=False) -> {"input_ids": [...]}
     tok.pad_token_id / eos_token_id / unk_token_id / bos_token_id
-    len(tok)                      vocabulary size (n_special + 256 bytes + #merges)
+    len(tok)                      vocabulary size (256 bytes + #merges + #specials)
     tok.decode(ids)               bytes back to text
     tok.save(path) / BPETokenizer.load(path)
     BPETokenizer.build(texts, num_merges=...)
 
-Ids: specials [0,1,2] = <pad>,<eos>,<unk>; then the 256 raw bytes [3..258]; then the merged symbols
-in merge order. A symbol is a tuple of byte values; encoding applies the learned merges greedily by
-rank, exactly as classic BPE.
+ID LAYOUT, GPT-2's: the 256 raw bytes [0..255], then the merged symbols in merge order, then
+the SPECIALS LAST. A symbol is a tuple of byte values; encoding applies the learned merges
+greedily by rank, exactly as classic BPE.
+
+The specials sit at the end because that is the only arrangement in which REGISTERING A NEW
+ONE IS CHEAP. Put them first and every byte and every merge shifts by one the moment a token
+is added, which invalidates every checkpoint and every cached token stream ever produced with
+that vocabulary. Put them last and a new special is simply the next id: nothing already
+trained changes meaning, and a model only needs its embedding matrix extended by a row --
+which is exactly what `resize_token_embeddings` does elsewhere in the ecosystem.
+
+The predefined set follows GPT-2's naming:
+
+    <|endoftext|>   end of a document, and the bos/eos the pipeline generates against
+    <|pad|>         padding, kept DISTINCT from eos
+
+GPT-2 itself uses one token and pads with it. A separate pad costs one id and removes a real
+ambiguity: with pad == eos, a padded batch and a batch of empty completions have identical
+ids, and only the attention mask tells them apart -- so a mask bug becomes a silent training
+error rather than a loud one.
+
+There is no <unk>. A byte-level vocabulary cannot produce one: every string encodes into the
+256 byte tokens at worst. `unk_token_id` remains as an alias for eos so callers expecting the
+HuggingFace attribute keep working.
+
+REGISTERING A TOKEN makes it an ATOM of the vocabulary:
+
+    tok.register_special("<vp>")
+    tok.encode("a <vp> b")        -> [.., <vp>, ..]   one id, never split into < v p >
+
+which is what lets a later model attach a meaning to it -- a control marker, a role tag, a
+modality boundary. Matching happens on the raw string before the byte-level pre-tokenizer, so
+the token is never split and never merged with its neighbours. `encode_ordinary` is the
+escape hatch that treats specials as ordinary text, and is the right call for untrusted input:
+otherwise a scraped document containing the characters "<|endoftext|>" could insert a document
+boundary of its own.
 """
 import json
 import os
@@ -30,9 +64,14 @@ _PAT = re.compile(r"\s*\S+|\s+")
 
 
 class BPETokenizer:
-    SPECIALS = ["<pad>", "<eos>", "<unk>"]
+    # The predefined set. EOS first so that adding a special later never moves it -- the one
+    # id the generation loops, the packer and every checkpoint agree on.
+    EOS_TOKEN = "<|endoftext|>"
+    PAD_TOKEN = "<|pad|>"
+    SPECIALS = [EOS_TOKEN, PAD_TOKEN]
+    LAYOUT = "specials-last"          # written into the file; see load()
 
-    def __init__(self, merges, build_history=None):
+    def __init__(self, merges, build_history=None, specials=None):
         # merges: ordered list of (sym_a, sym_b), each sym a tuple of byte ints (priority = index)
         self.merges = [(tuple(a), tuple(b)) for a, b in merges]
         # per-merge training dynamics (empty unless this tokenizer was just build()-ed or loaded
@@ -41,18 +80,58 @@ class BPETokenizer:
         # signature of the corpus this vocabulary was trained on, when known: it is what
         # lets a later run confirm the corpus is unchanged and CONTINUE adding merges.
         self.corpus_sig = None
-        self.n_special = len(self.SPECIALS)
-        self.pad_token_id, self.eos_token_id, self.unk_token_id = 0, 1, 2
-        self.bos_token_id = self.eos_token_id                # no separate BOS; reuse EOS
-        # symbol -> id: specials, then the 256 base bytes, then the merged symbols
-        self.sym2id, nxt = {}, self.n_special
-        for b in range(256):
+        self.specials = list(specials or self.SPECIALS)
+        self._rebuild()
+
+    def _rebuild(self):
+        """(Re)derive every id table. Called on construction and after a special is registered,
+        so there is ONE description of the layout rather than two that can disagree."""
+        self.sym2id, nxt = {}, 0
+        for b in range(256):                                 # 0..255: the raw bytes
             self.sym2id[(b,)] = nxt; nxt += 1
-        for a, b in self.merges:
+        for a, b in self.merges:                             # then the merges, in rank order
             self.sym2id[a + b] = nxt; nxt += 1
+        self.n_base = nxt                                    # first special id
+        self.special2id = {s: self.n_base + i for i, s in enumerate(self.specials)}
+        self.id2special = {i: s for s, i in self.special2id.items()}
+        self.n_special = len(self.specials)
         self.id2sym = {i: s for s, i in self.sym2id.items()}
         self.ranks = {(a, b): i for i, (a, b) in enumerate(self.merges)}
-        self._size = nxt
+        self._size = self.n_base + self.n_special
+        self.eos_token_id = self.special2id[self.EOS_TOKEN]
+        self.pad_token_id = self.special2id.get(self.PAD_TOKEN, self.eos_token_id)
+        self.bos_token_id = self.eos_token_id                # no separate BOS; reuse EOS
+        # A byte-level vocabulary has no unknown token -- every string encodes into the 256
+        # byte tokens at worst. The attribute is an alias so callers written against the
+        # HuggingFace interface keep working rather than raising AttributeError.
+        self.unk_token_id = self.eos_token_id
+        # Recogniser for the specials, LONGEST FIRST so that when one token is a prefix of
+        # another the longer one wins -- with <|im|> and <|im_end|> both registered, the
+        # shorter must not claim the first four characters of the longer.
+        self._special_re = (re.compile("|".join(re.escape(t) for t in
+                                                sorted(self.specials, key=len, reverse=True)))
+                            if self.specials else None)
+
+    def register_special(self, token):
+        """Add a special token and return its id; registering an existing one returns it
+        unchanged, so this is safe to call repeatedly.
+
+        The new id is the next one after the current vocabulary, so NOTHING already trained
+        changes meaning. A model built before the call has an embedding matrix one row short:
+        extend it (and the tied output head) before using the new id, exactly as
+        resize_token_embeddings does. This is why the specials are last."""
+        if token in self.special2id:
+            return self.special2id[token]
+        if not isinstance(token, str) or not token:
+            raise ValueError("a special token must be a non-empty string")
+        # From here on encode() RECOGNISES the token: "a <vp> b" yields one id for <vp>
+        # instead of the subwords of "<", "vp", ">". That is the whole point -- an atom the
+        # model can attach a meaning to, which it cannot do with pieces that also occur in
+        # ordinary text. The cost is that any text containing the literal characters now
+        # produces the token, so untrusted input should go through encode_ordinary.
+        self.specials = list(self.specials) + [token]
+        self._rebuild()
+        return self.special2id[token]
 
     # ----- construction ----------------------------------------------------- #
     @classmethod
@@ -338,43 +417,79 @@ class BPETokenizer:
             syms = syms[:bi] + [syms[bi] + syms[bi + 1]] + syms[bi + 2:]
         return syms
 
-    def encode(self, text):
+    def encode_ordinary(self, text):
+        """Text -> ids, treating EVERY character as text. A registered special appearing in
+        the string encodes as its literal bytes and cannot be produced. tiktoken's name for
+        the same idea, and the right call for untrusted input -- a scraped document containing
+        the characters "<|endoftext|>" should not be able to insert a document boundary."""
         ids = []
         for chunk in self._pretok(text):
             syms = self._merge_word([(b,) for b in chunk.encode("utf-8")])
             ids.extend(self.sym2id[s] for s in syms)         # base bytes + merges always present
         return ids
 
-    def __call__(self, text, add_special_tokens=False):
-        ids = self.encode(text)
+    def encode(self, text, split_specials=True):
+        """Text -> ids, with registered specials RECOGNISED as single tokens.
+
+        This is what registering a token is for: after `tok.register_special("<vp>")`, the
+        string "a <vp> b" encodes with one id for <vp> rather than splitting it into "<", "vp"
+        and ">". The token becomes an atom the model can learn a meaning for -- a control
+        marker, a role tag, a modality boundary -- which it cannot if it arrives as four
+        subwords that also occur in ordinary text.
+
+        The specials are matched on the RAW STRING before the byte-level pre-tokenizer runs,
+        so they are never split and never merged with their neighbours. Pass
+        split_specials=False, or call encode_ordinary, to treat them as plain text."""
+        if not split_specials or self._special_re is None:
+            return self.encode_ordinary(text)
+        ids, pos = [], 0
+        for m in self._special_re.finditer(text):
+            if m.start() > pos:
+                ids.extend(self.encode_ordinary(text[pos:m.start()]))
+            ids.append(self.special2id[m.group(0)])
+            pos = m.end()
+        if pos < len(text):
+            ids.extend(self.encode_ordinary(text[pos:]))
+        return ids
+
+    def __call__(self, text, add_special_tokens=False, split_specials=True):
+        ids = self.encode(text, split_specials=split_specials)
         if add_special_tokens:
             ids = ids + [self.eos_token_id]
         return {"input_ids": ids}
 
     def decode(self, ids, skip_special_tokens=True):
-        buf = bytearray()
+        """Ids back to text. Specials carry no bytes; with skip_special_tokens=False they are
+        rendered in their written form, which is what makes a transcript readable when the
+        question is where the model actually emitted an end of text."""
+        buf, out = bytearray(), []
         for i in ids:
             i = int(i)
-            if i < self.n_special:                           # specials carry no bytes
+            if i >= self.n_base:                             # a special: no bytes to add
+                if not skip_special_tokens:
+                    tokn = self.id2special.get(i)
+                    if tokn:
+                        out.append(buf.decode("utf-8", errors="replace")); buf = bytearray()
+                        out.append(tokn)
                 continue
             s = self.id2sym.get(i)
             if s:
                 buf.extend(s)
-        return buf.decode("utf-8", errors="replace")
+        out.append(buf.decode("utf-8", errors="replace"))
+        return "".join(out)
 
     # ----- parity helpers --------------------------------------------------- #
     def __len__(self):
         return self._size
 
     def get_vocab(self):
-        v = {s: i for i, s in enumerate(self.SPECIALS)}
-        for s, i in self.sym2id.items():
-            v[bytes(s).decode("utf-8", "replace")] = i
+        v = {bytes(s).decode("utf-8", "replace"): i for s, i in self.sym2id.items()}
+        v.update(self.special2id)
         return v
 
     def convert_tokens_to_ids(self, t):
-        if t in self.SPECIALS:
-            return self.SPECIALS.index(t)
+        if t in self.special2id:
+            return self.special2id[t]
         ids = self.encode(t)
         return ids[0] if ids else self.unk_token_id
 
@@ -386,8 +501,8 @@ class BPETokenizer:
         exact, lossless byte sequence (null for the specials, which carry no bytes)."""
         out = []
         for i in range(self._size):
-            if i < self.n_special:
-                out.append({"id": i, "token": self.SPECIALS[i], "bytes": None})
+            if i >= self.n_base:                             # the specials, at the end
+                out.append({"id": i, "token": self.id2special[i], "bytes": None})
             else:
                 sym = self.id2sym[i]
                 out.append({"id": i, "token": bytes(sym).decode("utf-8", "replace"),
@@ -402,7 +517,8 @@ class BPETokenizer:
         json.dump({"type": "byte_bpe",
                    "vocab_size": self._size,
                    "corpus_sig": self.corpus_sig,
-                   "specials": self.SPECIALS,
+                   "layout": self.LAYOUT,        # see load(): an older file means other ids
+                   "specials": self.specials,
                    "vocab": self.vocab_records(),
                    "merges": [[list(a), list(b)] for a, b in self.merges],
                    "build_history": self.build_history},   # per-merge learning dynamics (may be [])
@@ -413,7 +529,21 @@ class BPETokenizer:
         # `merges` is the source of truth for encoding; `vocab` in the file is informational and
         # is rebuilt deterministically from the merges here.
         d = json.load(open(path, encoding="utf-8"))
+        # A FILE WITHOUT `layout` PREDATES specials-last, and its ids mean something else: the
+        # specials were 0..2 and every byte and merge sat three higher. Loading it under the
+        # current layout would not fail -- it would silently return a tokenizer that decodes
+        # every checkpoint's output shifted by three, which is far worse than refusing.
+        layout = d.get("layout")
+        if layout != cls.LAYOUT:
+            raise SystemExit(
+                f"[bpe] {path} was written with the old id layout "
+                f"({layout or 'specials-first, pre-<|endoftext|>'}), which is not compatible: "
+                f"its ids are offset by the specials.\n"
+                f"      Delete it and re-run ./stage2_train_bpe_tokenizer.sh. Any checkpoint "
+                f"or token stream built with it must be rebuilt too -- the cache directory is "
+                f"named after the tokenizer's fingerprint, so that happens by itself.")
         tok = cls([(tuple(a), tuple(b)) for a, b in d["merges"]],
-                  build_history=d.get("build_history", []))
+                  build_history=d.get("build_history", []),
+                  specials=d.get("specials"))
         tok.corpus_sig = d.get("corpus_sig")
         return tok
