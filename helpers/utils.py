@@ -923,13 +923,19 @@ def encoding_blob(tok):
     """The canonical bytes that DEFINE how this tokenizer turns corpus text into ids: its
     ordered merges, and nothing else.
 
+    The PRE-TOKENIZER VERSION is in it too. The merges alone do not determine the ids: the
+    same merges under a different chunking rule tokenise the same text differently, so a change
+    to _PAT has to invalidate the cache exactly as a retrained vocabulary does.
+
     Deliberately not the whole bpe.json. The specials are excluded because they do not
     participate in corpus tokenisation at all -- the packer calls encode_ordinary, so a
     document is bytes and merges -- and because the id of eos is 256 + len(merges), which does
     not move when a special is registered either. Registering <|im_start|> after pretraining
     must therefore leave every cached token stream valid, which is the entire point of being
     able to register one."""
-    return json.dumps([[list(a), list(b)] for a, b in tok.merges],
+    from tokenizer.bpe import PRETOK_VERSION
+    return json.dumps({"pretok": PRETOK_VERSION,
+                       "merges": [[list(a), list(b)] for a, b in tok.merges]},
                       separators=(",", ":")).encode("utf-8")
 
 

@@ -61,9 +61,33 @@ import os
 import re
 from collections import Counter
 
-# pre-tokenizer: a run of non-space with its leading whitespace (GPT-2-style leading space), or a
-# run of whitespace on its own. Splitting first keeps merges from spanning word boundaries.
-_PAT = re.compile(r"\s*\S+|\s+")
+# PRE-TOKENIZER. Text is cut into chunks before any merge is applied, and merges never span a
+# chunk, so this rule decides what the vocabulary is even able to learn. Three alternatives,
+# tried in order:
+#
+#     \s*\d           one DIGIT, with any whitespace in front of it
+#     \s*[^\s\d]+     a run of non-space non-digit, with its leading whitespace
+#     \s+             whitespace on its own
+#
+# Every character is whitespace, a digit, or neither, so the three cover the string exactly:
+# the chunks concatenate back to the input, and nothing can be dropped.
+#
+# DIGITS ARE SPLIT ONE BY ONE, as LLaMA and DeepSeek do. Left alone, BPE learns whichever
+# number strings happen to be frequent -- "2015", " 100", "42" -- and the model must then do
+# arithmetic over units that vary with the corpus rather than with the maths: 1000 is one
+# token, 1001 is two, and the relationship between them is invisible. Per-digit tokens make
+# place value explicit and uniform, which is what the chain-of-thought stage needs, since it
+# is graded on whether the arithmetic is right. The cost is a few more tokens per number.
+#
+# Whitespace still attaches to what FOLLOWS it, which is how a run of indentation can become a
+# single token -- better than GPT-2 on code, at the price of the token-boundary effect
+# DeepSeek-V3 documents for prompts that end mid-line.
+_PAT = re.compile(r"\s*\d|\s*[^\s\d]+|\s+")
+
+# Bumped whenever _PAT changes. It goes into the tokenizer's fingerprint, because the same
+# merges under a different pre-tokenizer produce different ids: without it, editing the rule
+# above would leave every cached token stream keyed as though nothing had happened.
+PRETOK_VERSION = 2
 
 
 class BPETokenizer:
