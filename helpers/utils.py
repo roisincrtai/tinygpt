@@ -1000,9 +1000,15 @@ def _tok_path(tok, src, sig):
     return os.path.join(token_cache_root(tok), f"{_mirror(src)}.{_sig_tag(sig)}.tokens")
 
 
-def _parquet_lines(path, column):
-    """Every line of every row of `column`, so a parquet corpus flows through the same packer
-    as a text one.
+def _parquet_docs(path, column):
+    """The rows of `column` as DOCUMENTS -- one list of lines per row.
+
+    Row boundaries are kept rather than flattened into one stream of lines. A parquet corpus
+    holds one document per row, exactly as a directory of .txt holds one per file, and the
+    packer must treat the two the same way: a corpus converted from text to parquet has to
+    produce the SAME training documents, or the conversion silently changed what the model
+    sees. Flattening would let a packed document begin in one article and end in another,
+    teaching the model transitions that exist nowhere in the corpus.
 
     A wrong column name is reported WITH THE FILE'S ACTUAL COLUMNS. The alternative -- a bare
     KeyError -- arrives after the scan has already opened some fraction of a 78-file corpus and
@@ -1023,32 +1029,43 @@ def _parquet_lines(path, column):
     for batch in pf.iter_batches(columns=[column]):
         for value in batch.column(0).to_pylist():
             if value:
-                yield from str(value).splitlines()
+                yield str(value).splitlines()
 
 
-def _source_lines(path, text_column):
-    """The lines of one corpus file, whatever its format."""
+def _source_documents(path, text_column):
+    """One corpus file -> its documents, each a list of lines.
+
+    A .parquet holds one document per row; every other format is one document per FILE. That
+    is the whole difference between the two, and stating it in one place is what lets the
+    packer be written once."""
     if os.path.splitext(path)[1].lower() == ".parquet":
-        return _parquet_lines(path, text_column)
+        return _parquet_docs(path, text_column)
     try:
-        return open(path, encoding="utf-8", errors="replace").read().splitlines()
+        return [open(path, encoding="utf-8", errors="replace").read().splitlines()]
     except Exception:                                          # noqa: BLE001
         return []
 
 
 def _pack(path, max_words, text_column="text"):
-    """Source file -> list of ~max_words-word documents (never crossing the file)."""
-    docs, buf, wc = [], [], 0
-    for line in _source_lines(path, text_column):
-        line = line.strip()
-        if not line:
-            continue
-        buf.append(line)
-        wc += len(line.split())
-        if wc >= max_words:
-            docs.append(" ".join(buf)); buf, wc = [], 0
-    if buf:
-        docs.append(" ".join(buf))
+    """Source file -> list of ~max_words-word documents, NEVER CROSSING A SOURCE DOCUMENT.
+
+    The boundary is the file for text and the row for parquet, so the same corpus packs
+    identically in either format. The tail of each document is kept even when it is short: a
+    remainder discarded for being under the budget would drop the end of every article in the
+    corpus, which is a systematic loss rather than a rounding one."""
+    docs = []
+    for lines in _source_documents(path, text_column):
+        buf, wc = [], 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            buf.append(line)
+            wc += len(line.split())
+            if wc >= max_words:
+                docs.append(" ".join(buf)); buf, wc = [], 0
+        if buf:
+            docs.append(" ".join(buf))
     return docs
 
 
