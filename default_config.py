@@ -325,6 +325,14 @@ TRAIN = dict(
 # special as plain text.
 EXTRA_SPECIAL_TOKENS = []
 
+# THE TOKEN CACHE. Shards exist because a corpus can be 10 TB: one file that size cannot be
+# resumed after an interruption, cannot be copied incrementally, and loses everything to a
+# single bad byte. ~100 MB is the usual compromise -- small enough that a shard is cheap to
+# re-fetch and to verify, large enough that per-file overhead does not matter. The manifest is
+# rewritten after every completed shard, so an interrupted build restarts from the last one
+# rather than from nothing.
+TOKENS = dict(shard_mb=100)
+
 BPE = dict(
     num_merges=50000,
     # A word type must occur at least this often to be counted when merges are learned.

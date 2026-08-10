@@ -1267,10 +1267,17 @@ def corpus_signature(tok, root, files, max_words, text_column):
 
 
 def corpus_stream_path(tok, root, sig):
-    """cache/tokens/<tokenizer>/<mirror of the corpus directory>.<sig>.tokens -- ONE file per corpus,
-    not one per source file. Thirty thousand cache entries is the problem the corpus itself
-    already had; a single stream is opened once and paged in by the OS."""
-    return os.path.join(token_cache_root(tok), f"{_mirror(root)}.{_sig_tag(sig)}.tokens")
+    """The DIRECTORY holding a corpus's token shards:
+
+        cache/tokens/<tokenizer>/<mirror of the corpus dir>/<name>_<sig>/
+
+    A directory rather than a single file because a corpus can be 10 TB, and one file that
+    size cannot be resumed after an interruption, cannot be copied incrementally, and loses
+    everything to one bad byte. Named after the corpus AND the packing signature, so two
+    packings of the same corpus sit side by side instead of one overwriting the other."""
+    mirror = _mirror(root)
+    name = os.path.basename(os.path.normpath(mirror)) or "corpus"
+    return os.path.join(token_cache_root(tok), mirror, f"{name}_{_sig_tag(sig)}")
 
 
 def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
@@ -1332,7 +1339,9 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
             b.set_postfix_str(f"file {len(files)}/{len(files)}, {n_docs:,} docs")
 
     log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
-    token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log)
+    token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log,
+                      shard_bytes=int(getattr(config, "TOKENS", {}).get("shard_mb", 100))
+                      * 1024 * 1024)
     return token_store.TokenStream(path), len(files)
 
 

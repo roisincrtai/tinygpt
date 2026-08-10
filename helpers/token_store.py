@@ -1,52 +1,59 @@
 """
-token_store.py -- the pre-tokenised corpus as ONE memory-mapped file per corpus.
+token_store.py -- the pre-tokenised corpus as a directory of memory-mapped SHARDS.
 
-    build(path, sig, documents, eos, vocab, log)   write it, streaming, once
-    TokenStream(path)                              open it; nothing is read into memory
+    build(dir, sig, documents, eos, vocab, log)    write it, streaming, once
+    TokenStream(dir)                               open it; nothing is read into memory
     stream.batch(B, T, generator, device)          (ids, attn, rmask) for one training step
 
-WHY. The corpus used to be a Python list of lists of ints, built at startup and held for the
-whole run. A Python int is a 28-byte object and a list of them costs another 8 bytes per
-slot, so 2 billion tokens -- the budget ZetaGPT-S is trained on -- would want something like
-70 GB of RAM to represent 4 GB of data. No amount of tuning fixes a representation that is
-twenty times the size of what it represents. This module stores tokens as a flat array of
-machine integers in a file and lets the OS page in the parts being read, which is what every
-large-scale pretraining pipeline does (GPT-2's and nanoGPT's .bin, Megatron's indexed
-dataset, the mmap'd shards of GPT-NeoX). Resident memory becomes a function of the batch,
-not of the corpus.
+WHY MEMORY-MAPPED. The corpus used to be a Python list of lists of ints, built at startup and
+held for the whole run. A Python int is a 28-byte object and a list of them costs another 8
+bytes per slot, so 2 billion tokens -- the budget ZetaGPT-S is trained on -- would want
+something like 70 GB of RAM to represent 4 GB of data. This module stores tokens as flat
+arrays of machine integers and lets the OS page in the parts being read, which is what every
+large-scale pretraining pipeline does (GPT-2's and nanoGPT's .bin, Megatron's indexed dataset,
+the mmap'd shards of GPT-NeoX). Resident memory becomes a function of the batch, not of the
+corpus.
+
+WHY SHARDS, AND NOT ONE FILE. A corpus can be 10 TB. One file that size is a single point of
+failure in every sense: an interrupted build starts again from nothing, a copy that fails at
+99% copies nothing, no filesystem or transfer tool likes it, and it cannot be produced or
+consumed in parallel. A directory of ~100 MB pieces is resumable (a completed shard is never
+rebuilt), copyable incrementally, and checkable one piece at a time. The layout is
+
+    <dir>/<name>_<sig>_00000.tokens     shard 0
+    <dir>/<name>_<sig>_00001.tokens     shard 1
+    <dir>/<name>_<sig>_index.json       the manifest: dtype, eos, per-shard counts
+
+SAMPLING CROSSES SHARD BOUNDARIES. A window that begins near the end of a shard is completed
+from the head of the next one, so the shard size is invisible to training. Drawing the shard
+first and then an offset inside it would have been simpler and slightly wrong: the last T
+positions of every shard would never start a window, which is a small bias that grows as the
+shards get smaller and that nothing downstream could detect.
 
 uint16 WHEN THE VOCABULARY ALLOWS IT. A byte-level BPE with 50,000 merges has 50,259 tokens,
-which fits in 16 bits with room to spare, so every token costs 2 bytes instead of 4. That is
-not a micro-optimisation: it halves the file, halves the page cache the corpus occupies, and
-halves the bytes moved per step. The dtype is chosen from the vocabulary size and recorded in
-the header, so a larger vocabulary silently widens to uint32 rather than wrapping around --
-a wrapped token id is a silent corruption that would train the model on the wrong words.
+which fits in 16 bits, so every token costs 2 bytes instead of 4 -- half the file, half the
+page cache, half the bytes moved per step. The dtype is chosen from the vocabulary size and
+recorded, so a larger vocabulary silently widens to uint32 rather than wrapping around, which
+would be a silent corruption.
 
-CONTIGUOUS, EOS-SEPARATED SAMPLING, the GPT-2/nanoGPT/Megatron arrangement. Documents are
-concatenated with an end-of-sequence token between them and a sample is T+1 tokens from a
-random offset. There is no padding at all, so every position in every batch carries a
-gradient; the alternative -- one document per row, padded to T -- spends 20-40% of a batch
-on padding at T=512 and lets short documents dominate the step count. A sample may straddle
-a document boundary, and the EOS sitting at that boundary is precisely what teaches the model
-where a document ends; a model that never saw the join would not know how to stop.
+CONTIGUOUS, EOS-SEPARATED, the GPT-2/nanoGPT/Megatron arrangement: documents concatenated with
+an end-of-sequence token between them, a sample being T+1 tokens from a random offset. There
+is no padding, so every position in every batch carries a gradient; one document per row
+padded to T would spend 20-40% of a batch on padding at T=512. A sample may straddle a
+document boundary, and the EOS sitting there is precisely what teaches the model where a
+document ends.
 
-THE FILE IS SELF-DESCRIBING and there is only one of it -- no sidecar index:
-
-    line 1        JSON header, newline-terminated: dtype, counts, eos, signature, offsets
-    offsets       (n_docs + 1) x uint64, the start of each document in tokens
-    tokens        n_tokens x uint16 (or uint32)
-
-The offsets are kept even though contiguous sampling does not need them, because the corpus
-statistics, the generation previews and any future document-aligned sampler all want to know
-where documents begin, and recovering that by scanning several billion tokens for EOS is a
-poor trade against 8 bytes per document.
+EACH SHARD IS SELF-DESCRIBING -- a JSON header line, then its document offsets, then its
+tokens -- so a shard can be inspected alone, and the manifest is a convenience rather than the
+only thing that knows the format.
 """
 import json
 import os
 import shutil
 
 MAGIC = "zetagpt-tokens"
-VERSION = 1
+VERSION = 2
+SHARD_BYTES = 100 * 1024 * 1024          # ~100 MB of tokens per shard
 
 
 def dtype_for(vocab_size):
@@ -63,120 +70,231 @@ def _np():
                          f"         pip install numpy") from e
 
 
+def _tag(path):
+    """<name>_<sig> -- the stem every file in the directory shares."""
+    return os.path.basename(os.path.normpath(path))
+
+
+def index_path(dir_path):
+    return os.path.join(dir_path, f"{_tag(dir_path)}_index.json")
+
+
+def shard_path(dir_path, i):
+    return os.path.join(dir_path, f"{_tag(dir_path)}_{i:05d}.tokens")
+
+
 # --------------------------------------------------------------------------- #
 # building
 # --------------------------------------------------------------------------- #
-def build(path, sig, documents, eos, vocab_size, log=print, flush_every=1 << 20):
-    """Write `documents` (an iterable of id lists) to `path` as one token stream.
+def _write_shard(path, dtype, eos, sig, offsets, flat, np):
+    """One shard: header line, its document offsets, then its tokens. Written to <path>.part
+    and renamed, so an interrupted write can never leave a file a later run would trust."""
+    head = {"magic": MAGIC, "version": VERSION, "dtype": dtype, "eos": int(eos),
+            "sig": sig, "n_tokens": int(len(flat)), "n_docs": len(offsets) - 1}
+    blob = (json.dumps(head) + "\n").encode("utf-8")
+    pad = (-len(blob)) % 4096            # page-align the arrays; a misaligned mmap can cost a
+    head["off_docs"] = len(blob) + pad   # copy on every read
+    head["off_tokens"] = head["off_docs"] + 8 * len(offsets)
+    blob = (json.dumps(head) + "\n").encode("utf-8")
+    blob += b" " * (head["off_docs"] - len(blob))
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(blob)
+        offsets.tofile(f)
+        flat.tofile(f)
+    os.replace(tmp, path)
+    return head
 
-    STREAMING, in both directions: documents are consumed from an iterator and appended to a
-    scratch file in blocks, so neither the caller's corpus nor the output is ever fully in
-    memory. Only the document offsets are held, at 8 bytes each -- a million documents costs
-    8 MB, which is the one part of the corpus small enough to keep.
 
-    Written to <path>.part and renamed at the end, so an interrupted build leaves no file that
-    a later run would mistake for a complete one. Returns (n_tokens, n_docs)."""
+def build(dir_path, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES):
+    """Write `documents` (an iterable of id lists) as a directory of token shards.
+
+    STREAMING, and RESUMABLE. Documents are consumed from an iterator and flushed a shard at a
+    time, so neither the corpus nor the output is ever fully in memory; and the manifest is
+    rewritten after every completed shard, so a build killed at 8 TB restarts at 8 TB rather
+    than at zero. Resuming skips the documents the finished shards already hold, which is
+    sound because the document order is deterministic: the corpus files are sorted and each is
+    packed in order.
+
+    Returns (n_tokens, n_docs)."""
     import array
     np = _np()
     dtype = dtype_for(vocab_size)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    raw_path, part_path = path + ".raw", path + ".part"
-    # array("Q"), not a list: a corpus of five million documents would cost ~200 MB as Python
-    # ints and costs 40 MB as machine integers. This is the one structure that scales with the
-    # corpus rather than with the batch, so it is the one worth being careful about.
+    os.makedirs(dir_path, exist_ok=True)
+
+    # what a previous, interrupted run of THIS signature already finished
+    done = _read_index(dir_path)
+    if done and done.get("sig") == sig and not done.get("complete"):
+        shards = done["shards"]
+        skip_docs = sum(s["n_docs"] for s in shards)
+        log(f"[tokens] resuming: {len(shards)} shard(s) already written, "
+            f"{skip_docs:,} documents; skipping ahead")
+    else:
+        shards, skip_docs = [], 0
+        if done and done.get("sig") != sig:
+            for f in os.listdir(dir_path):                     # a different corpus lived here
+                if f.endswith((".tokens", ".tokens.part", "_index.json")):
+                    try:
+                        os.remove(os.path.join(dir_path, f))
+                    except OSError:
+                        pass
+
+    # array("Q") for the offsets, not a list: a shard of five million documents costs 40 MB as
+    # machine integers and ~200 MB as Python ints, and this is the one structure that scales
+    # with the corpus rather than with the batch
     offsets = array.array("Q", [0])
-    n_tokens = 0
-    buf = []
+    buf = array.array("H" if dtype == "uint16" else "I")
+    seen, n_tokens_total, n_docs_total = 0, sum(s["n_tokens"] for s in shards), skip_docs
+    per_shard = max(shard_bytes // (2 if dtype == "uint16" else 4), 1)
 
-    def flush(fh):
-        nonlocal buf
-        if buf:
-            np.asarray(buf, dtype=dtype).tofile(fh)
-            buf = []
+    def flush():
+        nonlocal offsets, buf, n_tokens_total
+        if not len(buf):
+            return
+        p = shard_path(dir_path, len(shards))
+        head = _write_shard(p, dtype, eos, sig, offsets, buf, np)
+        shards.append({"file": os.path.basename(p), "n_tokens": head["n_tokens"],
+                       "n_docs": head["n_docs"]})
+        n_tokens_total += head["n_tokens"]
+        _write_index(dir_path, sig, dtype, eos, vocab_size, shards, complete=False)
+        log(f"[tokens] shard {len(shards) - 1:05d}: {head['n_tokens']:,} tokens, "
+            f"{os.path.getsize(p) / 1048576:.1f} MB")
+        offsets = array.array("Q", [0])
+        buf = array.array("H" if dtype == "uint16" else "I")
 
+    for ids in documents:
+        if not ids:
+            continue
+        seen += 1
+        if seen <= skip_docs:                                  # already in a finished shard
+            continue
+        buf.extend(ids)
+        buf.append(eos)                                        # the join the model learns
+        offsets.append(len(buf))
+        n_docs_total += 1
+        if len(buf) >= per_shard:
+            flush()
+    flush()
+    _write_index(dir_path, sig, dtype, eos, vocab_size, shards, complete=True)
+    log(f"[tokens] wrote {n_tokens_total:,} tokens ({dtype}) in {len(shards)} shard(s) "
+        f"from {n_docs_total:,} documents -> {dir_path}")
+    return n_tokens_total, n_docs_total
+
+
+def _write_index(dir_path, sig, dtype, eos, vocab_size, shards, complete):
+    tmp = index_path(dir_path) + ".part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"magic": MAGIC, "version": VERSION, "sig": sig, "dtype": dtype,
+                   "eos": int(eos), "vocab_size": int(vocab_size), "complete": bool(complete),
+                   "n_tokens": sum(s["n_tokens"] for s in shards),
+                   "n_docs": sum(s["n_docs"] for s in shards),
+                   "shards": shards}, f, indent=1)
+    os.replace(tmp, index_path(dir_path))
+
+
+def _read_index(dir_path):
     try:
-        with open(raw_path, "wb") as raw:
-            for ids in documents:
-                if not ids:
-                    continue
-                buf.extend(ids)
-                buf.append(eos)                  # the join the model learns to produce
-                n_tokens += len(ids) + 1
-                offsets.append(n_tokens)
-                if len(buf) >= flush_every:
-                    flush(raw)
-            flush(raw)
-
-        head = {"magic": MAGIC, "version": VERSION, "dtype": dtype, "eos": int(eos),
-                "vocab_size": int(vocab_size), "n_tokens": int(n_tokens),
-                "n_docs": len(offsets) - 1, "sig": sig}
-        blob = (json.dumps(head) + "\n").encode("utf-8")
-        head["off_docs"] = len(blob)             # recorded after the header's own length is
-        head["off_tokens"] = len(blob)           # known, so both are exact
-        # the two offsets change the header's length, so it is re-serialised at a FIXED width:
-        # pad to a multiple of 4096 and record that, which also aligns the token array to a
-        # page boundary -- a misaligned mmap costs a copy on every read on some platforms
-        blob = (json.dumps(head) + "\n").encode("utf-8")
-        pad = (-len(blob)) % 4096
-        head["off_docs"] = len(blob) + pad
-        head["off_tokens"] = head["off_docs"] + 8 * len(offsets)
-        blob = (json.dumps(head) + "\n").encode("utf-8")
-        blob += b" " * ((head["off_docs"]) - len(blob))
-        with open(part_path, "wb") as out:
-            out.write(blob)
-            offsets.tofile(out)                       # array("Q") is uint64 on every platform
-            with open(raw_path, "rb") as raw:
-                shutil.copyfileobj(raw, out, 1 << 22)
-        os.replace(part_path, path)
-    finally:
-        for p in (raw_path, part_path):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-    log(f"[tokens] wrote {n_tokens:,} tokens ({dtype}, "
-        f"{os.path.getsize(path) / 1048576:.1f} MB) from {len(offsets) - 1:,} documents "
-        f"-> {path}")
-    return n_tokens, len(offsets) - 1
+        with open(index_path(dir_path), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- #
 # reading
 # --------------------------------------------------------------------------- #
-class TokenStream:
-    """A memory-mapped token stream. Nothing is read until it is indexed.
+class _Shard:
+    """One shard, memory-mapped lazily: opening a stream of ten thousand shards must not open
+    ten thousand files, so the mapping is created on first touch."""
 
-    `len(stream)` is the DOCUMENT count, so the stage logs and tables read the same as they did
-    when the corpus was a list of documents; `stream.n_tokens` is the token count."""
+    def __init__(self, path, np):
+        self.path, self._np = path, np
+        with open(path, "rb") as f:
+            self.head = json.loads(f.readline().decode("utf-8").rstrip("\0 \n"))
+        self.n_tokens = self.head["n_tokens"]
+        self.n_docs = self.head["n_docs"]
+        self._tokens = self._offsets = None
+
+    @property
+    def tokens(self):
+        if self._tokens is None:
+            self._tokens = self._np.memmap(self.path, dtype=self.head["dtype"], mode="r",
+                                           offset=self.head["off_tokens"],
+                                           shape=(self.n_tokens,))
+        return self._tokens
+
+    @property
+    def offsets(self):
+        if self._offsets is None:
+            self._offsets = self._np.memmap(self.path, dtype="uint64", mode="r",
+                                            offset=self.head["off_docs"],
+                                            shape=(self.n_docs + 1,))
+        return self._offsets
+
+
+class TokenStream:
+    """A directory of memory-mapped token shards, read as one contiguous stream.
+
+    `len(stream)` is the DOCUMENT count, so the stage logs and tables read as they did when the
+    corpus was a list of documents; `stream.n_tokens` is the token count."""
 
     def __init__(self, path):
         np = _np()
+        self._np = np
         self.path = path
-        with open(path, "rb") as f:
-            line = f.readline()
-        self.head = json.loads(line.decode("utf-8").rstrip("\0 \n"))
-        if self.head.get("magic") != MAGIC:
-            raise ValueError(f"{path} is not a {MAGIC} file")
-        h = self.head
-        self.n_tokens, self.n_docs = h["n_tokens"], h["n_docs"]
-        self.eos, self.sig, self.dtype = h["eos"], h.get("sig", ""), h["dtype"]
-        self.tokens = np.memmap(path, dtype=h["dtype"], mode="r",
-                                offset=h["off_tokens"], shape=(h["n_tokens"],))
-        self.offsets = np.memmap(path, dtype="uint64", mode="r",
-                                 offset=h["off_docs"], shape=(h["n_docs"] + 1,))
+        idx = _read_index(path)
+        if not idx or idx.get("magic") != MAGIC:
+            raise ValueError(f"{path} is not a {MAGIC} directory")
+        if not idx.get("complete"):
+            raise ValueError(f"{path} is an unfinished build ({len(idx['shards'])} shards)")
+        self.head, self.sig, self.dtype = idx, idx.get("sig", ""), idx["dtype"]
+        self.eos, self.n_tokens, self.n_docs = idx["eos"], idx["n_tokens"], idx["n_docs"]
+        self.shards = [_Shard(os.path.join(path, s["file"]), np) for s in idx["shards"]]
+        # cumulative starts, so a global offset maps to (shard, offset) by one bisect
+        self._tok_start, self._doc_start, t, d = [], [], 0, 0
+        for s in self.shards:
+            self._tok_start.append(t); self._doc_start.append(d)
+            t += s.n_tokens; d += s.n_docs
+        self._tok_start.append(t); self._doc_start.append(d)
 
     def __len__(self):
         return self.n_docs
 
     @property
     def nbytes(self):
-        return os.path.getsize(self.path)
+        return sum(os.path.getsize(s.path) for s in self.shards)
+
+    def _locate(self, starts, i):
+        import bisect
+        return max(0, min(bisect.bisect_right(starts, i) - 1, len(self.shards) - 1))
+
+    def read(self, start, n):
+        """`n` tokens from global offset `start`, ACROSS SHARD BOUNDARIES.
+
+        A window is completed from the following shard when it runs off the end of one, so the
+        shard size is invisible to training. Drawing within a single shard would have been
+        simpler and quietly biased: the last n positions of every shard could never begin a
+        window."""
+        np = self._np
+        out, k = [], self._locate(self._tok_start, start)
+        off = start - self._tok_start[k]
+        while n > 0 and k < len(self.shards):
+            s = self.shards[k]
+            take = min(n, s.n_tokens - off)
+            if take > 0:
+                out.append(np.asarray(s.tokens[off:off + take], dtype="int64"))
+                n -= take
+            k += 1
+            off = 0
+        return out[0] if len(out) == 1 else np.concatenate(out)
 
     def doc(self, i):
         """Document `i` as a list of ids, WITHOUT its trailing eos."""
-        a, b = int(self.offsets[i]), int(self.offsets[i + 1])
-        return self.tokens[a:b - 1].tolist()
+        k = self._locate(self._doc_start, i)
+        s = self.shards[k]
+        j = i - self._doc_start[k]
+        a, b = int(s.offsets[j]), int(s.offsets[j + 1])
+        return s.tokens[a:b - 1].tolist()
 
     def batch(self, batch, seq_len, generator=None, device=None):
         """One training batch: (ids, attn, rmask), each (batch, seq_len + 1).
@@ -186,16 +304,14 @@ class TokenStream:
         padding to hide and no prompt to exclude, so every position is a target -- which is the
         entire point of packing.
 
-        Offsets are drawn from the SAME torch generator the training loop checkpoints, so a
-        resumed run continues the data order it would have had rather than starting a new one."""
+        Offsets come from the SAME torch generator the training loop checkpoints, so a resumed
+        run continues the data order it would have had rather than starting a new one."""
         import torch
-        np = _np()
+        np = self._np
         n = seq_len + 1
         hi = max(self.n_tokens - n, 1)
         starts = torch.randint(0, hi, (batch,), generator=generator).tolist()
-        # one numpy copy per row, then a single conversion: np.stack on memmap slices reads
-        # only the pages touched, which is what keeps resident memory at O(batch * seq_len)
-        arr = np.stack([np.asarray(self.tokens[s:s + n], dtype="int64") for s in starts])
+        arr = np.stack([self.read(s, n) for s in starts])
         ids = torch.from_numpy(arr)
         if device is not None:
             ids = ids.to(device)
@@ -203,16 +319,16 @@ class TokenStream:
         return ids, ones, ones
 
     def describe(self):
-        return (f"{self.n_tokens:,} tokens ({self.dtype}, {self.nbytes / 1048576:.1f} MB "
-                f"memory-mapped) in {self.n_docs:,} documents")
+        return (f"{self.n_tokens:,} tokens ({self.dtype}, {self.nbytes / 1048576:.1f} MB in "
+                f"{len(self.shards)} shard(s), memory-mapped) in {self.n_docs:,} documents")
 
 
 def open_if_current(path, sig):
-    """The stream at `path` when it exists and its signature matches, else None."""
-    if not os.path.isfile(path):
+    """The stream at `path` when it is complete and its signature matches, else None."""
+    idx = _read_index(path)
+    if not idx or idx.get("sig") != sig or not idx.get("complete"):
         return None
     try:
-        st = TokenStream(path)
+        return TokenStream(path)
     except Exception:                                          # noqa: BLE001
         return None
-    return st if st.sig == sig else None
