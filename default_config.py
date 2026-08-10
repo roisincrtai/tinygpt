@@ -235,7 +235,7 @@ SCHEMES = {
     "zetagpt-m": dict(n_layer=16, n_head=12, n_embd=768,  context_window=1024),
     "zetagpt-l": dict(n_layer=24, n_head=16, n_embd=1024, context_window=1024),
 }
-DEFAULT_SCHEME = "zetagpt-tiny"
+DEFAULT_SCHEME = "zetagpt-s"
 
 
 def scheme(name=DEFAULT_SCHEME):
@@ -276,7 +276,9 @@ TRAIN = dict(
                                 # own folder of records (the layout is detected)
     gpu="auto",                 # auto | cuda | mps | cpu
     seed=0,
-    batch=16,                   # examples (or preference pairs) per step
+    batch=56,                   # examples (or preference pairs) per step; sized to fill a
+                                # 40 GB card at zetagpt-s / context 512 with headroom.
+                                # `python -m tools.vram --sweep` measures it for real.
     micro_batch=0,              # gradient-accumulation micro-batch (0 = off)
     max_len=0,                  # 0 = auto: the model's own context window (block_size)
     beta=0.1,                   # implicit-reward beta, shared by DPO / evaluation
@@ -368,7 +370,8 @@ BPE = dict(
 # would have needed 838,926 steps. Packing at 344 words fills the window, and the number below
 # means what it says. Recompute both if the batch, the context or the corpus changes.
 PRETRAIN = dict(
-    steps=488281, lr=2e-5,       # 2 epochs over ~2B tokens
+    steps=139782, lr=2e-5,       # 2 epochs over ~2B tokens at 56 x 511 = 28,616 per step;
+                                 # RECOMPUTE whenever TRAIN['batch'] changes
     # WHICH SCHEME IS PRETRAINED, and at what context window. Both are exposed on the command
     # line (--model_scheme / --context_window) and in config.sh, so a size can be changed for
     # one run without editing Python. context_window=0 takes the scheme's own value from

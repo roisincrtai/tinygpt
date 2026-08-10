@@ -88,11 +88,12 @@ SEED="${SEED:-0}"                   # random seed; also seeds the data order, so
 DATASET="${DATASET:-hh}"
 
 # PRETRAINING CORPUS -- and, because stage 2 trains the vocabulary on it, THE TOKENIZER'S
-# TRAINING CORPUS as well. WikiText-103, as converted to parquet by tools/txt_to_parquet.py.
-# The other shipped schemes: zetagpt-s uses the ~10 GB (~2B token) FineWeb-Edu subset, while
-# zetagpt-m and zetagpt-l ship with NO corpus and must be pointed at one here -- neither
-# shipped corpus is the right diet for a 199M or 480M model.
-PRETRAIN_DIR="${PRETRAIN_DIR:-data/download/zetagpt-tiny_pretrain-corpus_wikitext103}"
+# TRAINING CORPUS as well. The ~10 GB (~2B token) FineWeb-Edu subset, which is what
+# zetagpt-s is sized for. zetagpt-tiny uses the smaller WikiText-103 corpus
+# (data/download/zetagpt-tiny_pretrain-corpus_wikitext103), and zetagpt-m and zetagpt-l ship
+# with NO corpus and must be pointed at one here -- neither shipped corpus is the right diet
+# for a 199M or 480M model. Change this WITH MODEL_SCHEME below; the two go together.
+PRETRAIN_DIR="${PRETRAIN_DIR:-data/download/zetagpt-small_pretrain-corpus_fineweb-edu_10GB}"
 
 # INSTRUCTION-TUNING TREE, shared by stages 5, 6, 7 and 9 and by distillation. Its layout is
 # flat: alpaca_gpt4/ and rlhf_hh/ at its root. Moving this root moves everything derived from
@@ -119,8 +120,8 @@ VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layou
 # WHICH SIZE IS TRAINED. A scheme fixes depth, width and the context window TOGETHER:
 #
 #     scheme          layers  heads  d_model  d_h  context  parameters
-#     zetagpt-tiny         8      8      512   64      512       61.5M   (default)
-#     zetagpt-s           16      8      512   64      512       97.2M
+#     zetagpt-tiny         8      8      512   64      512       61.5M
+#     zetagpt-s           16      8      512   64      512       97.2M   (default)
 #     zetagpt-m           16     12      768   64     1024      199.3M
 #     zetagpt-l           24     16     1024   64     1024      479.9M
 #
@@ -143,7 +144,7 @@ VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layou
 #                           instead of falling back to a descriptive zetagpt-<L>x<d>.
 #
 # The new name then works here and in --model_scheme automatically.
-MODEL_SCHEME="${MODEL_SCHEME:-zetagpt-tiny}"
+MODEL_SCHEME="${MODEL_SCHEME:-zetagpt-s}"
 
 # CONTEXT WINDOW IN TOKENS. The one part of a scheme it is legitimate to vary alone, because it
 # is a TRAINING choice rather than an architectural one: nothing in ZetaGPT refers to an
@@ -178,7 +179,18 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 # =========================================================================== #
 # 5. optimisation -- shared by every trainer; per-stage rates are in each stage's section
 # =========================================================================== #
-BATCH="${BATCH:-16}"                # examples (or preference pairs) per step
+# BATCH SIZE, chosen to fill a 40 GB card and leave headroom. For zetagpt-s at context 512
+# the fixed cost is ~1.8 GB (weights plus AdamW's five copies) and each sequence in the batch
+# costs ~614 MB, of which the vocabulary-sized loss tensors are the largest part:
+#
+#     batch 32   ~21 GB      batch 56   ~35 GB  (88% of 40 GB)
+#     batch 48   ~30 GB      batch 64   ~40 GB  (no headroom -- expect OOM)
+#
+# 56 rather than 63 because the estimate is arithmetic: it cannot know what the allocator
+# rounds up or what a kernel asks for in workspace, and a card that fits in theory and not in
+# practice costs a whole run. MEASURE it with `python -m tools.vram --sweep` on the machine
+# you will train on, then raise this if there is room. MICRO_BATCH splits the step if not.
+BATCH="${BATCH:-56}"                # examples (or preference pairs) per step
 MICRO_BATCH="${MICRO_BATCH:-0}"     # gradient-accumulation micro-batch; 0 = off
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
@@ -262,7 +274,9 @@ TOKENS_SHARD_MB="${TOKENS_SHARD_MB:-100}"    # MB of tokens per shard. A corpus 
 # =========================================================================== #
 # stage 4 -- pretraining
 # =========================================================================== #
-PRETRAIN_STEPS="${PRETRAIN_STEPS:-488281}"
+# 2 epochs over the ~2B-token corpus at BATCH x (MAX_LEN-1) = 28,616 tokens per step.
+# CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being two epochs.
+PRETRAIN_STEPS="${PRETRAIN_STEPS:-139782}"
 PRETRAIN_LR="${PRETRAIN_LR:-2e-5}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 
