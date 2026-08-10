@@ -41,3 +41,5 @@ __pycache__
 .trash/
 cache
 config_user.yaml
+backup/
+.git-backup-*
