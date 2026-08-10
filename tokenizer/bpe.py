@@ -5,8 +5,8 @@ ZetaGPT.
 The token-bag synthetic datasets used a word-level vocabulary (models.WordTokenizer). The readable
 pref_<theme>.json datasets are grammatical English sentences, so ZetaGPT needs sub-word units: a
 word-level table would be huge and share nothing across inflections. This BPE is byte-level (like
-GPT-2), so EVERY string encodes -- there is no unknown token to fall back to -- and it is
-trained on the dataset corpus.
+GPT-2), so EVERY string encodes without ever needing an unknown token -- <|unk|> exists as a
+reserved id but nothing can produce it -- and it is trained on the dataset corpus.
 
 Interface parity with models.WordTokenizer so it is a drop-in for build_tokenizer/build_model:
     tok(text, add_special_tokens=False) -> {"input_ids": [...]}
@@ -31,15 +31,18 @@ The predefined set follows GPT-2's naming:
 
     <|endoftext|>   end of a document, and the bos/eos the pipeline generates against
     <|pad|>         padding, kept DISTINCT from eos
+    <|unk|>         reserved; see below
 
 GPT-2 itself uses one token and pads with it. A separate pad costs one id and removes a real
 ambiguity: with pad == eos, a padded batch and a batch of empty completions have identical
 ids, and only the attention mask tells them apart -- so a mask bug becomes a silent training
 error rather than a loud one.
 
-There is no <unk>. A byte-level vocabulary cannot produce one: every string encodes into the
-256 byte tokens at worst. `unk_token_id` remains as an alias for eos so callers expecting the
-HuggingFace attribute keep working.
+<|unk|> IS RESERVED RATHER THAN USED. A byte-level vocabulary never needs an unknown token:
+every string decomposes into the 256 byte tokens at worst, so encode() cannot produce it and
+no corpus can make it appear. It is kept as a real id because interfaces expect an
+unk_token_id to exist, and because a reserved slot costs one embedding row and is there if a
+later use wants it.
 
 REGISTERING A TOKEN makes it an ATOM of the vocabulary:
 
@@ -68,7 +71,8 @@ class BPETokenizer:
     # id the generation loops, the packer and every checkpoint agree on.
     EOS_TOKEN = "<|endoftext|>"
     PAD_TOKEN = "<|pad|>"
-    SPECIALS = [EOS_TOKEN, PAD_TOKEN]
+    UNK_TOKEN = "<|unk|>"
+    SPECIALS = [EOS_TOKEN, PAD_TOKEN, UNK_TOKEN]
     LAYOUT = "specials-last"          # written into the file; see load()
 
     def __init__(self, merges, build_history=None, specials=None):
@@ -101,10 +105,12 @@ class BPETokenizer:
         self.eos_token_id = self.special2id[self.EOS_TOKEN]
         self.pad_token_id = self.special2id.get(self.PAD_TOKEN, self.eos_token_id)
         self.bos_token_id = self.eos_token_id                # no separate BOS; reuse EOS
-        # A byte-level vocabulary has no unknown token -- every string encodes into the 256
-        # byte tokens at worst. The attribute is an alias so callers written against the
-        # HuggingFace interface keep working rather than raising AttributeError.
-        self.unk_token_id = self.eos_token_id
+        # <|unk|> is RESERVED, not reachable: a byte-level vocabulary never needs it, since
+        # every string decomposes into the 256 byte tokens at worst, and encode() cannot
+        # produce it. It is kept as a real id anyway -- interfaces expect an unk_token_id, and
+        # a reserved slot costs one row and is there if a later use wants it. Falls back to
+        # eos if a caller supplies a specials list without it.
+        self.unk_token_id = self.special2id.get(self.UNK_TOKEN, self.eos_token_id)
         # Recogniser for the specials, LONGEST FIRST so that when one token is a prefix of
         # another the longer one wins -- with <|im|> and <|im_end|> both registered, the
         # shorter must not claim the first four characters of the longer.

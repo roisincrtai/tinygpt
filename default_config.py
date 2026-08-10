@@ -307,7 +307,7 @@ TRAIN = dict(
 # --------------------------------------------------------------------------- #
 # per-stage config
 # --------------------------------------------------------------------------- #
-# EXTRA SPECIAL TOKENS, registered on top of the predefined <|endoftext|> and <|pad|>.
+# EXTRA SPECIAL TOKENS, on top of the predefined <|endoftext|>, <|pad|> and <|unk|>.
 #
 # A registered token is an ATOM: the tokenizer emits ONE id for it and never breaks it into
 # subwords, so a later model can attach a meaning to it -- a control marker, a role tag, a
@@ -326,7 +326,9 @@ TRAIN = dict(
 EXTRA_SPECIAL_TOKENS = []
 
 BPE = dict(num_merges=50000)         # vocab = 256 bytes + num_merges + specials
-                                     # (2 predefined + EXTRA_SPECIAL_TOKENS)
+                                     # = 256 + 50000 + 3 = 50259
+                                     # (<|endoftext|>, <|pad|>, <|unk|>, plus any
+                                     #  EXTRA_SPECIAL_TOKENS)
 
 # Step budgets are EPOCH BUDGETS in disguise: steps = ceil(epochs * examples / batch) at the
 # default batch of 16. Recompute them if the corpus or the batch size changes.
