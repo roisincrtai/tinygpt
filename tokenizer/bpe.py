@@ -171,7 +171,7 @@ class BPETokenizer:
     @classmethod
     def build(cls, texts, num_merges=10000, checkpoint_path=None, checkpoint_every=250,
               log=print, monitor=None, plot_every=200, init_merges=None, init_history=None,
-              init_sig=None):
+              init_sig=None, min_freq=1):
         """Train byte-level BPE on `texts` (an iterable of strings).
 
         INCREMENTAL. The textbook loop recounts every adjacent pair in the whole corpus
@@ -227,6 +227,30 @@ class BPETokenizer:
             for chunk in cls._pretok(t):
                 words[chunk] += 1
         items = [(w, c) for w, c in words.items() if w]
+
+        # MINIMUM FREQUENCY. A word seen once costs as much to maintain as one seen a million
+        # times -- the merge loop's cost is driven by how many distinct words each pair occurs
+        # in, not by how often those words appear -- while contributing a millionth of the
+        # evidence for any merge. Dropping the tail therefore buys speed almost for free.
+        #
+        # Dropped words are dropped from the COUNTING ONLY. Nothing leaves the vocabulary,
+        # because a byte-level vocabulary has nothing to leave: every string still encodes,
+        # using whatever merges the frequent words justified. The only effect is that a merge
+        # which ONLY rare words would have argued for is not learned, so those words cost a
+        # token or two more.
+        if min_freq > 1:
+            kept = [(w, c) for w, c in items if c >= min_freq]
+            occ, occ_kept = sum(c for _, c in items), sum(c for _, c in kept)
+            if kept:
+                log(f"BPE: min_freq={min_freq} keeps {len(kept):,} of {len(items):,} word "
+                    f"types ({100 * len(kept) / max(len(items), 1):.1f}%), which are "
+                    f"{100 * occ_kept / max(occ, 1):.2f}% of all occurrences")
+                items = kept
+            else:
+                log(f"BPE: min_freq={min_freq} would discard every word type; ignored")
+
+        # the signature covers min_freq through the word table it produced, so a partial build
+        # started at one threshold is never resumed at another
         sig = cls._corpus_signature(items)
 
         # ---- intern symbols: id <-> bytes ---- #

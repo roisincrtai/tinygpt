@@ -57,7 +57,7 @@ def peek(bpe_path):
 
 
 def build(texts, bpe_path, log, plotdir=None, num_merges=8000, plot_every=200,
-          checkpoint_every=250):
+          checkpoint_every=250, min_freq=1):
     """Return the BPE tokenizer, (re)using the checkpoint at `bpe_path` (a stale/unreadable
     file is rebuilt).
 
@@ -90,6 +90,7 @@ def build(texts, bpe_path, log, plotdir=None, num_merges=8000, plot_every=200,
                 viz.bpe_monitor(history, plotdir, "")
         tok = BPETokenizer.build(texts, num_merges=num_merges, checkpoint_path=bpe_path,
                                  checkpoint_every=checkpoint_every, log=log,
+                                 min_freq=min_freq,
                                  monitor=monitor if plotdir else None,
                                  plot_every=plot_every,
                                  init_merges=tok.merges if tok else None,

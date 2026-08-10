@@ -325,7 +325,17 @@ TRAIN = dict(
 # special as plain text.
 EXTRA_SPECIAL_TOKENS = []
 
-BPE = dict(num_merges=50000)         # vocab = 256 bytes + num_merges + specials
+BPE = dict(
+    num_merges=50000,
+    # A word type must occur at least this often to be counted when merges are learned.
+    # In a corpus of this size half the distinct words appear EXACTLY ONCE -- proper nouns,
+    # typos, one-off quotations -- and they are under 2% of the running text. The merge loop's
+    # cost scales with the number of distinct words a pair occurs in, so the tail is most of
+    # the work and almost none of the evidence. Nothing is removed from the vocabulary: a
+    # byte-level tokenizer can always encode a word it never counted, using the merges the
+    # frequent words justified. Set to 1 to count every word.
+    min_freq=2,
+)                                    # vocab = 256 bytes + num_merges + specials
                                      # = 256 + 50000 + 3 = 50259
                                      # (<|endoftext|>, <|pad|>, <|unk|>, plus any
                                      #  EXTRA_SPECIAL_TOKENS)

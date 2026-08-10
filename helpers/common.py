@@ -355,7 +355,8 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
                           plotdir=plot_dir("bpe"),          # always: the build is watched
                           num_merges=args.bpe_merges,
                           plot_every=args.plot_every_steps,
-                          checkpoint_every=args.checkpoint_every_steps)
+                          checkpoint_every=args.checkpoint_every_steps,
+                          min_freq=config.BPE.get("min_freq", 1))
     if need_pairs and train_pairs:
         helpers.table("dataset", dsets.stats_rows(args.dataset, train_pairs, ev_pairs, tok,
                                                   source=config.INSTRUCT_DIR),
