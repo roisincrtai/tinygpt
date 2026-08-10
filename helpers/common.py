@@ -325,27 +325,32 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
                                                  args.seed, args.limit)
     texts = [p[k] for p in (train_pairs + ev_pairs) for k in ("prompt", "chosen", "rejected")]
     if need_bpe_build:
-        # the tokenizer is trained on EVERY text the pipeline will ever see -- the
-        # pretraining corpus, the fine-tuning corpus and the preference file -- so one
-        # vocabulary serves every stage.
+        # The tokenizer is trained on EVERY text the pipeline will ever see, so one vocabulary
+        # serves every stage. That is two sources, not three:
+        #
+        #   the pretraining corpus   scanned as documents
+        #   the instruction data     ALREADY in `texts` above -- load_pairs extracted every
+        #                            prompt, chosen and rejected string from it
+        #
+        # There is no separate scan of --sft_dir. It points at the rlhf_hh tree, whose files
+        # are preference JSON, and json is a corpus extension: scanning it would have read
+        # `{"pairs": [{"id": 0, "prompt": ...` as prose and taught the vocabulary merges over
+        # JSON punctuation -- while the very same prompts and responses were already in
+        # `texts`, properly extracted. One source, counted once, in its parsed form.
         pre, n_pre = dsets.load_pretrain_corpus(
             args.pretrain_dir, config.PRETRAIN["max_words"],
             exclude_dirs=config.PRETRAIN["exclude_dirs"],
             text_column=config.PRETRAIN["text_column"])
-        sft_docs, n_sft = dsets.load_pretrain_corpus(
-            args.sft_dir, config.SFT["max_words"],
-            exclude_dirs=config.SFT["exclude_dirs"])
         helpers.table("BPE training corpus", [
             ("pretrain dir", args.pretrain_dir or "(unset for this scheme)"),
             ("pretrain excluded", ", ".join(config.PRETRAIN["exclude_dirs"]) or "(none)"),
             ("pretrain corpus files", f"{n_pre:,}"),
             ("pretrain documents", f"{len(pre):,}"),
-            ("sft dir", args.sft_dir),
-            ("sft corpus files", f"{n_sft:,}"),
-            ("sft documents", f"{len(sft_docs):,}"),
-            ("preference texts", f"{len(texts):,}"),
+            ("instruction data", config.INSTRUCT_DIR),
+            ("instruction texts", f"{len(texts):,}  (prompt/chosen/rejected of "
+                                  f"{len(train_pairs) + len(ev_pairs):,} pairs)"),
             ("merges requested", f"{args.bpe_merges:,}")], out=log)
-        texts = texts + [d["chosen"] for d in pre] + [d["chosen"] for d in sft_docs]
+        texts = texts + [d["chosen"] for d in pre]
     tok = train_bpe.build(texts, BPE_PATH, log,
                           plotdir=plot_dir("bpe"),          # always: the build is watched
                           num_merges=args.bpe_merges,
