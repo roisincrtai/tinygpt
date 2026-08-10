@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 
 import default_config as config
-from helpers import pref_dataset as pdset
+from helpers import dataset_helpers as dsets
 from tokenizer import BPETokenizer
 from model import ZetaGPT
 
@@ -85,7 +85,7 @@ def parse_args():
                          "raw state_dict; the architecture (zetagpt vs distilled gpt2 "
                          "student) is auto-detected. Empty = base (untrained) zetagpt. "
                          f"Default: {os.path.relpath(DEFAULT_CKPT, config.ROOT)}")
-    ap.add_argument("--dataset", default="hh", choices=list(pdset.DATASETS),
+    ap.add_argument("--dataset", default="hh",
                     help="only used for the prompt template and the tokenizer fallback")
     ap.add_argument("--data_dir", default=config.DOWNLOAD_DIR)
     ap.add_argument("--gpu", choices=["auto", "cuda", "mps", "cpu"], default="auto")
@@ -173,7 +173,7 @@ def build_from_checkpoint(sd, cfg, args, device):
     if os.path.isfile(config.BPE_PATH):
         tok = BPETokenizer.load(config.BPE_PATH)
     else:
-        tr, ev = pdset.load_pairs(args.dataset, args.data_dir, 0.05, args.seed, 0)
+        tr, ev = dsets.load_pairs(args.dataset, args.data_dir, 0.05, args.seed, 0)
         texts = [p[k] for p in (tr + ev) for k in ("prompt", "chosen", "rejected")]
         tok = BPETokenizer.build(texts, num_merges=config.BPE["num_merges"])
     if cfg:

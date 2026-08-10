@@ -8,7 +8,7 @@ helpers -- everything the stages share, and nothing any single stage owns.
     helpers.common           the setup every stage runs: arguments, tokenizer, model factory,
                              monitor and generation previews
     helpers.lm               the length-normalised language-model training loop (stages 2, 3)
-    helpers.pref_dataset     every preference and instruction dataset behind one interface
+    helpers.dataset_helpers     every preference and instruction dataset behind one interface
     helpers.visualization    every figure, drawn as PDF under outputs/plots/<stage>/
 
 `utils` is re-exported at package level, so the form every trainer already uses --
@@ -18,11 +18,11 @@ helpers -- everything the stages share, and nothing any single stage owns.
 -- keeps working. The other four are imported explicitly:
 
     from helpers import common, lm
-    from helpers import pref_dataset as pdset
+    from helpers import dataset_helpers as dsets
     from helpers import visualization as viz
 
 They are NOT imported here. helpers.common imports chat, and chat imports
-helpers.pref_dataset; pulling common in at package-initialisation time would make that a
+helpers.dataset_helpers; pulling common in at package-initialisation time would make that a
 circular import. Importing a submodule by name is enough to load it, so nothing is lost.
 """
 from .utils import *          # noqa: F401,F403

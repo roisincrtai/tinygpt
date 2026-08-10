@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 import default_config as config
-from helpers import pref_dataset as pdset
+from helpers import dataset_helpers as dsets
 from helpers import visualization as viz
 from tokenizer import BPETokenizer
 from model import ZetaGPT
@@ -30,7 +30,8 @@ from instruct_dpo.dpo import seq_logp, margin as dpo_margin
 
 def parse_args():
     ap = argparse.ArgumentParser(description="evaluate trained stages; plots -> outputs/plots/eval/")
-    ap.add_argument("--dataset", default="hh", choices=list(pdset.DATASETS))
+    ap.add_argument("--dataset", default="hh",
+                    help="\"hh\", or a path to your own folder of preference records")
     ap.add_argument("--stages", default="dpo",
                     help="comma-separated stages to evaluate; each is read from "
                          "checkpoints/<stage>/checkpoint_<model>_<pe>_<stage-label>.pt")
@@ -112,13 +113,13 @@ def main():
             print(f"[eval] [plot] {o} created", flush=True)
         return
 
-    _, ev = pdset.load_pairs(args.dataset, args.data_dir, args.val_frac, args.seed, args.limit)
+    _, ev = dsets.load_pairs(args.dataset, args.data_dir, args.val_frac, args.seed, args.limit)
     if os.path.isfile(config.BPE_PATH):
         tok = BPETokenizer.load(config.BPE_PATH)
     else:
         texts = [p[k] for p in ev for k in ("prompt", "chosen", "rejected")]
         tok = BPETokenizer.build(texts, num_merges=config.BPE["num_merges"])
-    enc = pdset.Encoder(tok, device, args.max_len)
+    enc = dsets.Encoder(tok, device, args.max_len)
 
     def load_policy(stage):
         p = ckpt_path(ckdir, stage)          # checkpoints/<stage>/checkpoint_*_<label>.pt

@@ -25,7 +25,7 @@ import os
 import random
 
 import default_config as config
-from . import pref_dataset as pdset
+from . import dataset_helpers as dsets
 from . import utils as helpers
 from .utils import progress
 from chat import generate, decode
@@ -105,7 +105,10 @@ def parse_args(argv=None):
     """Every trainer knob as a CLI flag, defaulting to default_config.py's values."""
     t = config.TRAIN
     ap = argparse.ArgumentParser(description="zetagpt pipeline stage")
-    ap.add_argument("--dataset", default=t["dataset"], choices=list(pdset.DATASETS))
+    ap.add_argument("--dataset", default=t["dataset"],
+                    help="\"hh\" for the downloaded rlhf_hh tree, or a PATH to your "
+                         "own folder of json/jsonl preference records (absolute, or "
+                         "relative to --data_dir); the layout is detected, not declared")
     ap.add_argument("--gpu", choices=["auto", "cuda", "mps", "cpu"], default=t["gpu"])
     ap.add_argument("--seed", type=int, default=t["seed"])
     ap.add_argument("--batch", type=int, default=t["batch"])
@@ -315,17 +318,17 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
     need_bpe_build = len(_saved.merges) < args.bpe_merges if _saved else True
     train_pairs, ev_pairs = ([], [])
     if need_pairs or need_bpe_build:
-        train_pairs, ev_pairs = pdset.load_pairs(args.dataset, args.data_dir, args.val_frac,
+        train_pairs, ev_pairs = dsets.load_pairs(args.dataset, args.data_dir, args.val_frac,
                                                  args.seed, args.limit)
     texts = [p[k] for p in (train_pairs + ev_pairs) for k in ("prompt", "chosen", "rejected")]
     if need_bpe_build:
         # the tokenizer is trained on EVERY text the pipeline will ever see -- the
         # pretraining corpus, the fine-tuning corpus and the preference file -- so one
         # vocabulary serves every stage.
-        pre, n_pre = pdset.load_pretrain_corpus(
+        pre, n_pre = dsets.load_pretrain_corpus(
             args.pretrain_dir, config.PRETRAIN["max_words"],
             exclude_dirs=config.PRETRAIN["exclude_dirs"])
-        sft_docs, n_sft = pdset.load_pretrain_corpus(
+        sft_docs, n_sft = dsets.load_pretrain_corpus(
             args.sft_dir, config.SFT["max_words"],
             exclude_dirs=config.SFT["exclude_dirs"])
         helpers.table("BPE training corpus", [
@@ -345,7 +348,7 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
                           plot_every=args.plot_every_steps,
                           checkpoint_every=args.checkpoint_every_steps)
     if need_pairs and train_pairs:
-        helpers.table("dataset", pdset.stats_rows(args.dataset, train_pairs, ev_pairs, tok,
+        helpers.table("dataset", dsets.stats_rows(args.dataset, train_pairs, ev_pairs, tok,
                                                   source=config.INSTRUCT_DIR),
                       out=log)
     # Pre-tokenise the preference pairs into cache/instruct/tokens/ -- ONLY for the stages
@@ -357,7 +360,7 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
             helpers.attach_pair_ids(ev_pairs, src, tok, split="val", log=log)
         except Exception as e:                                    # noqa: BLE001
             log(f"[cache] preference pre-tokenisation skipped: {e}")
-    enc = pdset.Encoder(tok, device, args.max_len)
+    enc = dsets.Encoder(tok, device, args.max_len)
     def new_model(): return build_model(tok, device, args=args)
 
     def monitor(mode, records, step=None):

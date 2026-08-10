@@ -41,8 +41,8 @@ def load_prompts(distill_dir=None):
     a student is only worth distilling on the distribution the teacher was actually aligned
     over. Prompts drawn from somewhere else would measure the teacher off-distribution and
     transfer that to the student as if it were the teacher's behaviour."""
-    from helpers import pref_dataset as pdset
-    return pdset.load_instruction_prompts(distill_dir or config.DISTILL_DIR)
+    from helpers import dataset_helpers as dsets
+    return dsets.load_instruction_prompts(distill_dir or config.DISTILL_DIR)
 
 
 def build_student(device):
@@ -58,7 +58,7 @@ def build_student(device):
 
 def _encode_student(s_tok, pairs, device, max_len):
     """(prompt, response) text -> right-padded (ids, attn, response-mask) under the STUDENT
-    tokenizer, left-truncated to max_len -- the same convention as pref_dataset.Encoder."""
+    tokenizer, left-truncated to max_len -- the same convention as dataset_helpers.Encoder."""
     seqs, masks = [], []
     for prompt, resp in pairs:
         pid = s_tok(prompt, add_special_tokens=False)["input_ids"]

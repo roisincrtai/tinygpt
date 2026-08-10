@@ -98,6 +98,24 @@ python -m sft.run --sft_steps 5000
 `python config_wizard.py` writes `config_user.yaml` holding only the settings you choose;
 `config.sh` reads it over its own defaults.
 
+### Using your own data
+
+Point a stage at a directory and it works out the layout by looking at it:
+
+```bash
+DATASET=/path/to/my_preferences ./stage5_train_rlhf_reward.sh
+SFT_DIR=/path/to/my_demos       ./stage4_sft.sh
+PRETRAIN_DIR=/path/to/my_corpus ./stage3_pretrain.sh
+```
+
+A directory holding `*_train/` and `*_test/` subdirectories of json batches keeps **its own
+split**; anything else is read as a plain folder of `.json` / `.jsonl` records, shuffled and
+cut at `VAL_FRAC`. Records may be a list, one per jsonl line, or wrapped under `pairs` /
+`records` / `data`, and the fields may be spelled `prompt` / `instruction` / `question`,
+`chosen` / `response` / `output`, `rejected` / `reject`. A prompt-only bank may also be a
+folder of `.txt`, one prompt per line. Every stage prints the directory it read and the layout
+it read it as.
+
 Talk to a trained checkpoint:
 
 ```bash

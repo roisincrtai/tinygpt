@@ -264,7 +264,8 @@ MODEL = dict(
 # shared trainer knobs (defaults of common.parse_args; CLI flags override)
 # --------------------------------------------------------------------------- #
 TRAIN = dict(
-    dataset="hh",               # preference dataset key in pref_dataset.DATASETS
+    dataset="hh",               # "hh" = the downloaded rlhf_hh tree, or a PATH to your
+                                # own folder of records (the layout is detected)
     gpu="auto",                 # auto | cuda | mps | cpu
     seed=0,
     batch=16,                   # examples (or preference pairs) per step
@@ -365,7 +366,9 @@ SFT = dict(
 # objective is written under.
 REWARD = dict(
     steps=2500, lr=1e-5,        # 1 epoch over the hh pairs
-    sources=["hh"],             # "hh" (rlhf_hh) | "dialogue" (pref_*.json)
+    # Split directories to read when the data is an hh-layout tree. They are used WHERE THEY
+    # EXIST and discovered otherwise, so a tree that names its splits differently still loads;
+    # for a plain local folder they are ignored and --val_frac cuts the validation set.
     hh_subsets=["helpful_train", "harmless_train"],       # batch dirs under rlhf_hh/
     hh_val_subsets=["helpful_test", "harmless_test"],
     hh_limit=20000,             # pairs per subset, 0 = all (~86k train pairs in total)

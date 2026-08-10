@@ -17,7 +17,7 @@ command-line wrapper.
 import copy
 
 import default_config as config
-from helpers import pref_dataset as pdset
+from helpers import dataset_helpers as dsets
 
 from . import ppo
 import instruct_reward as rlhf_reward
@@ -36,9 +36,10 @@ def load_prompts(ctx):
     cfg, log = config.RLHF, ctx["log"]
     d = cfg.get("prompt_dir")
     if d:
-        prompts, n_files = pdset.load_instruction_prompts(d, cfg.get("prompt_limit", 0))
+        prompts, n_files = dsets.load_instruction_prompts(d, cfg.get("prompt_limit", 0))
         if prompts:
-            log(f"rlhf prompts: {len(prompts):,} instructions from {n_files} files in {d}")
+            log(f"rlhf prompts: {len(prompts):,} unique instructions "
+                f"from {n_files} files in {d}")
             return [{"prompt": p} for p in prompts]
         log(f"rlhf prompts: nothing under {d}; falling back to the preference prompts")
     return ctx["train_pairs"]

@@ -10,30 +10,36 @@ classifier (sigmoid + BCE) on the preference pairs: chosen 1, rejected 0.
 from helpers import common
 import default_config as config
 import helpers
-from helpers import pref_dataset as pdset
+from helpers import dataset_helpers as dsets
 
 from . import rlhf_reward
 
 
 def load_pairs(ctx):
-    """The preference pairs this stage trains on, per config.REWARD["sources"].
+    """The preference pairs this stage trains on.
 
-    "hh"        the helpful/harmless pairs of <instruct_dir>/rlhf_hh -- the same records
-                stage 4 fine-tuned on and stage 6 rolls out over, which is what makes this
-                model's scores meaningful where the policy is actually evaluated."""
-    cfg, log = config.REWARD, ctx["log"]
-    train, val = [], []
-    for src in cfg.get("sources", ["hh"]):
-        if src == "hh":
-            tr = pdset.load_hh_pairs(cfg["hh_subsets"], limit=cfg["hh_limit"],
-                                     seed=ctx["args"].seed)
-            ev = pdset.load_hh_pairs(cfg["hh_val_subsets"],
-                                     limit=max(cfg["hh_limit"] // 20, 200),
-                                     seed=ctx["args"].seed)
-            log(f"reward data: rlhf_hh -> {len(tr):,} train / {len(ev):,} val pairs")
-            train += tr; val += ev
-        else:
-            log(f"reward data: {src!r} is not a known source; the pipeline reads rlhf_hh")
+    Read from --dataset: "hh" for the downloaded rlhf_hh tree -- the same records stage 4
+    fine-tuned on and stage 6 rolls out over, which is what makes this model's scores
+    meaningful where the policy is actually evaluated -- or a path to your own folder. The
+    LAYOUT is detected: a tree with its own *_train / *_test split keeps that split, a plain
+    folder of json/jsonl is shuffled and cut at --val_frac.
+
+    Pairs without a rejected response are refused by load_pairs, since a classifier trained on
+    one label learns to output that label."""
+    args, log = ctx["args"], ctx["log"]
+    root = dsets.resolve_root(getattr(args, "dataset", "hh"), args.data_dir)
+    log(f"reward data: {root}")
+    log(f"             read as {dsets.describe(root)}")
+    train, val, _ = dsets.load_train_val(
+        root, config.REWARD["hh_subsets"], config.REWARD["hh_val_subsets"],
+        val_frac=args.val_frac, seed=args.seed, limit=config.REWARD["hh_limit"],
+        val_limit=max(config.REWARD["hh_limit"] // 20, 200))
+    train = [p for p in train if p["rejected"]]
+    val = [p for p in val if p["rejected"]]
+    if not train:
+        raise SystemExit(f"[reward] {root} holds no records with a REJECTED response; this "
+                         f"stage learns from a preference, so it needs pairs.")
+    log(f"             {len(train):,} train / {len(val):,} val pairs")
     return train, (val or ctx["ev_pairs"])
 
 

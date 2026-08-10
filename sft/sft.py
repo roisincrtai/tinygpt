@@ -20,7 +20,7 @@ import random
 
 import default_config as config
 import helpers
-from helpers import pref_dataset as pdset
+from helpers import dataset_helpers as dsets
 from helpers import lm
 
 STAGE = "sft"
@@ -39,14 +39,26 @@ def load_corpus(tok, corpus_dir, log=print):
 
     A pair whose prompt and chosen response are identical to another's is dropped. rlhf_hh
     repeats prompts across its helpful and harmless subsets, and a duplicated demonstration is
-    simply that example weighted twice."""
-    if not corpus_dir or not os.path.isdir(corpus_dir):
+    simply that example weighted twice.
+
+    `corpus_dir` may be the downloaded hh tree or YOUR OWN FOLDER of json/jsonl records; the
+    layout is detected and reported, not declared. Only a prompt and a preferred response are
+    needed here, so a folder of plain demonstrations (no rejected field) is enough for this
+    stage even though stages 5 and 8 would refuse it."""
+    layout = dsets.detect_layout(corpus_dir)
+    if layout == "missing":
         raise SystemExit(
             f"[sft] fine-tuning data not found: {corpus_dir or '(unset)'}\n"
+            f"      Expected an hh tree (<dir>/*_train/*.json) or a folder of json/jsonl\n"
+            f"      records carrying a prompt and a response.\n"
             f"      No stage downloads. Run:  ./stage1_download_data.sh\n"
             f"      or set SFT_DIR in config.sh (--sft_dir) to your own.")
-    pairs = pdset.load_hh_pairs(subsets=config.SFT["subsets"], hh_dir=corpus_dir,
-                                limit=config.SFT["limit"], seed=0)
+    if layout == "hh":
+        pairs = dsets.load_hh_pairs(subsets=dsets.subsets_for(corpus_dir,
+                                                              config.SFT["subsets"]),
+                                    hh_dir=corpus_dir, limit=config.SFT["limit"], seed=0)
+    else:
+        pairs = dsets.load_local_pairs(corpus_dir, limit=config.SFT["limit"], seed=0)
     seen, corpus = set(), []
     for p in pairs:
         key = (p["prompt"], p["chosen"])
@@ -54,7 +66,7 @@ def load_corpus(tok, corpus_dir, log=print):
             continue
         seen.add(key)
         corpus.append({"prompt": p["prompt"], "chosen": p["chosen"], "rejected": ""})
-    n_files = len(glob.glob(os.path.join(corpus_dir, "**", "*.json"), recursive=True))
+    n_files = len(glob.glob(os.path.join(corpus_dir, "**", "*.json*"), recursive=True))
     n_tok = 0
     if corpus:
         # measured on a sample: tokenising every demonstration to print one number would cost
@@ -66,7 +78,9 @@ def load_corpus(tok, corpus_dir, log=print):
         helpers.table("sft data", [
             ("dataset", os.path.basename(corpus_dir.rstrip("/")) or corpus_dir),
             ("directory", corpus_dir),
-            ("subsets", ", ".join(config.SFT["subsets"])),
+            ("layout", dsets.describe(corpus_dir)),
+            ("subsets", ", ".join(dsets.subsets_for(corpus_dir, config.SFT["subsets"]))
+                        if layout == "hh" else "(local folder: read recursively)"),
             ("batch files", helpers.count(n_files)),
             ("pairs read", helpers.count(len(pairs))),
             ("demonstrations (deduplicated)", helpers.count(len(corpus))),

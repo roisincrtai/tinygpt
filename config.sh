@@ -60,7 +60,13 @@ GPU="${GPU:-}"                      # auto | cuda | mps | cpu
 SEED="${SEED:-}"                    # random seed
 BATCH="${BATCH:-}"                  # examples (or preference pairs) per step
 MICRO_BATCH="${MICRO_BATCH:-}"      # gradient-accumulation micro-batch (0 = off)
-DATASET="${DATASET:-}"              # preference dataset key: hh | shp
+DATASET="${DATASET:-}"              # "hh" = the downloaded rlhf_hh tree, or a PATH to
+                                    # your own folder of json/jsonl records carrying
+                                    # prompt / chosen / rejected. The layout is
+                                    # DETECTED: a tree with its own *_train and *_test
+                                    # subdirs keeps that split, a plain folder is cut
+                                    # at VAL_FRAC. Empty = the default in
+                                    # default_config.py.
 LIMIT="${LIMIT:-}"                  # cap #preference pairs loaded (0 = all)
 VAL_FRAC="${VAL_FRAC:-}"            # validation fraction of the preference file
 BETA="${BETA:-}"                    # implicit-reward beta, shared by DPO and evaluation
