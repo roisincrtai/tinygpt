@@ -109,6 +109,11 @@ def parse_args(argv=None):
                     help="\"hh\" for the downloaded rlhf_hh tree, or a PATH to your "
                          "own folder of json/jsonl preference records (absolute, or "
                          "relative to --data_dir); the layout is detected, not declared")
+    ap.add_argument("--set", dest="overrides", action="append", default=[], metavar="SEC.key=v",
+                    help="override any value in default_config.py's dictionaries, e.g. "
+                         "--set BPE.min_freq=3 --set RLHF.kl_coef=0.02. Repeatable. "
+                         "Sections: BPE PRETRAIN SFT REWARD RLHF COT DPO DISTILL TRAIN "
+                         "SCALING MODEL")
     ap.add_argument("--gpu", choices=["auto", "cuda", "mps", "cpu"], default=t["gpu"])
     ap.add_argument("--seed", type=int, default=t["seed"])
     ap.add_argument("--batch", type=int, default=t["batch"])
@@ -302,6 +307,11 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
     shared, so it is trained over every corpus regardless of who asked for it.
     """
     def log(m): print(m, flush=True)     # plain, no elapsed-time prefix (human-readable logs)
+
+    # --set FIRST, before anything reads a configuration value. The stages hold references to
+    # default_config's dictionaries rather than copies, so applying the overrides here is what
+    # makes them take effect everywhere without a flag per setting.
+    config.apply_overrides(getattr(args, "overrides", []), log)
 
     # every checkpoint, history and figure this run writes is named after the configuration,
     # so an ablation never overwrites the run it is compared with

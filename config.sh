@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # config.sh -- EVERY configurable argument, in one place, sourced by each stage<N>_*.sh.
 #
-# THE DEFAULTS LIVE IN default_config.py. This file is the shell-level layer that steers a run
-# without editing Python. Every knob the trainers accept has a variable here; leave one blank
-# and that stage uses default_config.py's value, which is what the shipped file does for
-# almost everything.
+# EVERY VARIABLE CARRIES ITS ACTUAL VALUE, not a blank standing for "whatever Python decides".
+# You can read this file and know what the run will do; the summary printed at the end shows
+# the same numbers, and never a dash.
 #
 #   command-line flag > environment variable > config_user.yaml > config.sh > default_config.py
 #
@@ -13,35 +12,44 @@
 #   GPU=cpu ./stage5_sft.sh                     # override a shared knob for one run
 #   COT_INIT=sft ./stage8_cot_aha_moment.sh     # start the CoT stage from the SFT model
 #
-# YOUR OWN SETTINGS GO IN config_user.yaml, not here. `python config_wizard.py` writes it;
-# this file sources it at the end, through export_yaml.sh, so its values override the defaults
-# below without editing a tracked file. It is git-ignored. Delete it and the defaults here
-# stand. A variable already set in the environment is never overwritten by the YAML.
+# YOUR OWN SETTINGS GO IN config_user.yaml, not here. `python config_wizard.py` writes it; this
+# file sources it near the end, through export_yaml.sh, so its values override what is below
+# without editing a tracked file. It is git-ignored. Delete it and this file stands. A variable
+# already set in the environment is never overwritten by the YAML.
 #
 # Each stage script also forwards its own arguments, so `./stage9_instruct_dpo.sh --beta 0.05`
 # works too.
 #
-# Layout: interpreter, the shared knobs every stage reads, one section per stage -- all values
-# only -- then the YAML import, then the command lines are assembled from whatever survived.
-# <STAGE>_FLAGS in each section is free text appended verbatim, for anything without a
-# variable of its own.
+# SECTIONS, in order: interpreter; runtime; data; model; optimisation; reporting; probes;
+# advanced overrides; then one section per stage; then the scaling study; then the YAML import,
+# the assembly of the command lines, and the summary. <STAGE>_FLAGS in each stage section is
+# free text appended verbatim, for anything without a variable of its own.
+
+# The complete list, defined once: it drives the environment capture below and the summary
+# printed at the end, so a knob added in one place cannot be forgotten by the other.
+ZETAGPT_VARS="PY GPU SEED \
+DATASET PRETRAIN_DIR INSTRUCT_DIR SFT_DIR DATA_LIMIT VAL_FRAC \
+MODEL_SCHEME CONTEXT_WINDOW PE MAX_LEN \
+BATCH MICRO_BATCH LR_SCHEDULE LR_MIN_FACTOR BETA \
+PLOT_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
+EVAL_EVERY EVAL_PAIRS EB_EVERY EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID \
+EXTRA_SET COMMON_FLAGS \
+BPE_MERGES BPE_MIN_FREQ BPE_FLAGS \
+CORPUS_MAX_WORDS CORPUS_TEXT_COLUMN TOKENIZE_FLAGS \
+PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
+SFT_STEPS SFT_LR SFT_FLAGS \
+REWARD_STEPS REWARD_LR REWARD_FLAGS \
+RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
+COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
+DPO_STEPS DPO_LR DPO_FLAGS \
+DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
+SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
+SCALING_FLAGS"
 
 # Which variables came from the ENVIRONMENT, recorded before a single default is applied:
 # export_yaml.sh must not overwrite these, or `GPU=cpu ./stage4_pretrain.sh` would lose to the
 # YAML file. `${!v+x}` is set for an exported-but-empty variable too, which is deliberate:
 # GPU= means "explicitly nothing", not "unset".
-# The complete list, defined once: it drives the environment capture below and the summary
-# printed at the end, so a knob added in one place cannot be forgotten by the other.
-ZETAGPT_VARS="PY GPU SEED BATCH MICRO_BATCH DATASET LIMIT VAL_FRAC BETA MAX_LEN \
-MODEL_SCHEME CONTEXT_WINDOW PRETRAIN_DIR SFT_DIR INSTRUCT_DIR \
-LR_SCHEDULE LR_MIN_FACTOR PLOT_EVERY CKPT_EVERY PE SSM_STATS_EVERY NO_RESUME EVAL_EVERY EVAL_PAIRS EB_EVERY \
-EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID BPE_MERGES BPE_FLAGS PRETRAIN_STEPS \
-PRETRAIN_LR PRETRAIN_FLAGS SFT_STEPS SFT_LR SFT_FLAGS REWARD_STEPS REWARD_LR REWARD_FLAGS \
-RLHF_STEPS RLHF_LR RLHF_FLAGS COT_STEPS COT_LR COT_INIT COT_GROUP COT_FLAGS DPO_STEPS \
-DPO_LR DPO_FLAGS DISTILL_STEPS DISTILL_LR DISTILL_FLAGS COMMON_FLAGS \
-SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
-SCALING_FLAGS"
-
 ZETAGPT_ENV_SET=""
 for _v in $ZETAGPT_VARS; do
   [ -n "${!_v+x}" ] && ZETAGPT_ENV_SET="$ZETAGPT_ENV_SET $_v"
@@ -49,43 +57,19 @@ done
 unset _v
 
 # =========================================================================== #
-# interpreter
+# 1. interpreter
 # =========================================================================== #
 PY="${PY:-python}"
 
 # =========================================================================== #
-# shared -- every stage reads these
+# 2. runtime -- where and how the process runs
 # =========================================================================== #
-GPU="${GPU:-}"                      # auto | cuda | mps | cpu
-SEED="${SEED:-}"                    # random seed
-BATCH="${BATCH:-}"                  # examples (or preference pairs) per step
-MICRO_BATCH="${MICRO_BATCH:-}"      # gradient-accumulation micro-batch (0 = off)
-DATASET="${DATASET:-}"              # "hh" = the downloaded rlhf_hh tree, or a PATH to
-                                    # your own folder of json/jsonl records carrying
-                                    # prompt / chosen / rejected. The layout is
-                                    # DETECTED: a tree with its own *_train and *_test
-                                    # subdirs keeps that split, a plain folder is cut
-                                    # at VAL_FRAC. Empty = the default in
-                                    # default_config.py.
-LIMIT="${LIMIT:-}"                  # cap #preference pairs loaded (0 = all)
-VAL_FRAC="${VAL_FRAC:-}"            # validation fraction of the preference file
-BETA="${BETA:-}"                    # implicit-reward beta, shared by DPO and evaluation
-
-# TRUNCATION of an encoded example, in tokens, for every stage. BLANK IS THE RIGHT SETTING:
-# it follows the context window of the model actually being built -- CONTEXT_WINDOW below, or
-# the scheme's own -- so the encoder and the model can never disagree.
-#
-# This shipped as 256 while the small scheme's window was 512, and the two disagreeing is a
-# quiet and expensive kind of wrong: training ran at 256, every figure and table said 512, and
-# roughly four fifths of documents lost their opening to truncation. The corpus is packed at
-# PRETRAIN["max_words"] = 344 words, which at about 1.5 tokens per word fills a 512-token
-# window. Set this only to truncate BELOW the context window on purpose -- to fit a
-# longer-context model on a smaller machine, say. To change the context itself set
-# CONTEXT_WINDOW, which also tells the model what it was trained at.
-MAX_LEN="${MAX_LEN:-}"
+GPU="${GPU:-auto}"                  # auto | cuda | mps | cpu
+SEED="${SEED:-0}"                   # random seed; also seeds the data order, so a resumed
+                                    # run continues the order it would have had
 
 # =========================================================================== #
-# data -- LOCAL DIRECTORIES ONLY
+# 3. data -- LOCAL DIRECTORIES ONLY
 # =========================================================================== #
 # NOTHING IN THE PIPELINE DOWNLOADS. Fetch once, deliberately:
 #
@@ -94,80 +78,48 @@ MAX_LEN="${MAX_LEN:-}"
 #
 # A stage that fetched its own corpus would have an unpinned corpus: not reproducible offline,
 # failing hours in on a network error, and leaving a log from which nobody can tell what was
-# trained on. Every stage below reads a directory and stops if it is not there.
+# trained on. Every stage reads a directory and stops if it is not there.
 
-# PRETRAINING CORPUS. Blank takes the scheme's own: zetagpt-tiny trains on the downloaded
-# WikiText-103 corpus and zetagpt-s on the ~10 GB (~2B token) FineWeb-Edu subset, while
-# zetagpt-m and zetagpt-l ship with NO corpus and must be pointed at one here -- neither is
-# the right diet for a 199M or 480M model, and defaulting them to one would be worse than
-# refusing. NOTE that Tiny and S therefore differ in corpus as well as depth.
-PRETRAIN_DIR="${PRETRAIN_DIR:-}"
+# PREFERENCE DATA. "hh" is the downloaded rlhf_hh tree; anything else is a PATH to your own
+# folder of json/jsonl records carrying prompt / chosen / rejected. The layout is DETECTED: a
+# tree with its own *_train and *_test subdirectories keeps that split, a plain folder is cut
+# at VAL_FRAC below.
+DATASET="${DATASET:-hh}"
 
-# INSTRUCTION-TUNING TREE, shared by stages 5, 6, 7, 9 and 10. Blank takes
-# data/download/zetagpt-rlhf-instruction_following, whose layout is flat: alpaca_gpt4/ and
-# rlhf_hh/ at its root. Moving this root moves everything derived from it -- the fine-tuning
-# data, the preferences and the prompt bank -- together, so no two stages can read
-# different datasets.
-INSTRUCT_DIR="${INSTRUCT_DIR:-}"
+# PRETRAINING CORPUS -- and, because stage 2 trains the vocabulary on it, THE TOKENIZER'S
+# TRAINING CORPUS as well. WikiText-103, as converted to parquet by tools/txt_to_parquet.py.
+# The other shipped schemes: zetagpt-s uses the ~10 GB (~2B token) FineWeb-Edu subset, while
+# zetagpt-m and zetagpt-l ship with NO corpus and must be pointed at one here -- neither
+# shipped corpus is the right diet for a 199M or 480M model.
+PRETRAIN_DIR="${PRETRAIN_DIR:-data/download/zetagpt-tiny_pretrain-corpus_wikitext103}"
 
-# FINE-TUNING DATA for stage 5. Blank = <INSTRUCT_DIR>/rlhf_hh, the same records stages 6, 7
-# and 9 read: stage 5 trains on the CHOSEN response of each pair, conditioned on its prompt.
-# Point this elsewhere only to fine-tune on something other than the preference data.
-SFT_DIR="${SFT_DIR:-}"
+# INSTRUCTION-TUNING TREE, shared by stages 5, 6, 7 and 9 and by distillation. Its layout is
+# flat: alpaca_gpt4/ and rlhf_hh/ at its root. Moving this root moves everything derived from
+# it -- the fine-tuning data, the preferences and the prompt bank -- together, so no two
+# stages can read different datasets.
+INSTRUCT_DIR="${INSTRUCT_DIR:-data/download/zetagpt-rlhf-instruction_following}"
 
-# learning-rate schedule; the per-stage peak rates are in each stage's section below
-LR_SCHEDULE="${LR_SCHEDULE:-}"      # cosine | constant
-LR_MIN_FACTOR="${LR_MIN_FACTOR:-}"  # cosine floor: minimum lr = stage lr / this
+# FINE-TUNING DATA for stage 5: the same records stages 6, 7 and 9 read, of which stage 5
+# takes the CHOSEN response conditioned on its prompt. Point this elsewhere only to fine-tune
+# on something other than the preference data.
+SFT_DIR="${SFT_DIR:-data/download/zetagpt-rlhf-instruction_following/rlhf_hh}"
 
-# cadences
-PLOT_EVERY="${PLOT_EVERY:-}"        # figures + 20 generation examples, every N steps (0 = off)
-CKPT_EVERY="${CKPT_EVERY:-}"        # checkpoint every N steps
-# HOW POSITION ENTERS THE MODEL. "ssm" is the proposed architecture: the state space module
-# supplies position and no positional encoding is used anywhere. "rope" is the ABLATION
-# CONTROL: the module is removed and rotary positions are applied inside attention instead.
-# The choice is recorded in the checkpoint and appears in every filename the run writes, so an
-# ablation never overwrites the run it is compared with.
-#   PE=rope ./stage4_pretrain.sh
-PE="${PE:-}"                        # ssm | rope
-
-# State space diagnostics -- memory horizon, selectivity, residual write ratio and the rest,
-# recorded PER LAYER for one step every N and drawn in the pretraining dynamics figure.
-# 0 turns them off. Read by stage 4 (pretraining).
-SSM_STATS_EVERY="${SSM_STATS_EVERY:-}"
-NO_RESUME="${NO_RESUME:-}"          # set to 1 to ignore checkpoints and start from scratch
-
-# diagnostic probes (read by the DPO stage and by eval.py)
-EVAL_EVERY="${EVAL_EVERY:-}"        # held-out probe every N steps (0 = use PLOT_EVERY)
-EVAL_PAIRS="${EVAL_PAIRS:-}"        # pairs per held-out probe
-EB_EVERY="${EB_EVERY:-}"            # exposure-bias probe every N steps (0 = off)
-EB_PAIRS="${EB_PAIRS:-}"            # pairs per exposure-bias probe
-ROLLOUT_TEMP="${ROLLOUT_TEMP:-}"    # sampling temperature of that probe
-N_HIST="${N_HIST:-}"                # end-of-stage evaluation: histories scored
-N_ROLL="${N_ROLL:-}"                # end-of-stage evaluation: rollouts
-ROLL_TOKENS="${ROLL_TOKENS:-}"      # end-of-stage evaluation: tokens per rollout
-P_GRID="${P_GRID:-}"                # end-of-stage evaluation: comma-separated p values
-
-COMMON_FLAGS="${COMMON_FLAGS:-}"
-# =========================================================================== #
-# stage 3 -- tokenise the corpora (no knobs of its own; it reads the pretraining settings
-#            below and writes cache/tokens/bpe_<256+merges>_<fp>/*.tokens)
-
-# stage 2 -- byte-level BPE tokenizer
-# =========================================================================== #
-BPE_MERGES="${BPE_MERGES:-}"        # merge budget; raising it EXTENDS an existing tokenizer
-BPE_FLAGS="${BPE_FLAGS:-}"
+DATA_LIMIT="${DATA_LIMIT:-0}"       # cap #preference pairs loaded; 0 = all
+VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layout that ships
+                                    # no split of its own
 
 # =========================================================================== #
-# stage 4 -- pretraining
+# 4. model -- what is built, read by EVERY stage
 # =========================================================================== #
-PRETRAIN_STEPS="${PRETRAIN_STEPS:-}"
-PRETRAIN_LR="${PRETRAIN_LR:-}"
+# These belong to the model, not to pretraining, and every stage must agree on them: the run
+# tag that names every checkpoint, history and figure is derived from them, so a stage that
+# did not receive them would look for a checkpoint filename no stage ever wrote.
 
 # WHICH SIZE IS TRAINED. A scheme fixes depth, width and the context window TOGETHER:
 #
 #     scheme          layers  heads  d_model  d_h  context  parameters
-#     zetagpt-tiny         8      8      512   64      512       61.5M
-#     zetagpt-s           16      8      512   64      512       97.2M   (default)
+#     zetagpt-tiny         8      8      512   64      512       61.5M   (default)
+#     zetagpt-s           16      8      512   64      512       97.2M
 #     zetagpt-m           16     12      768   64     1024      199.3M
 #     zetagpt-l           24     16     1024   64     1024      479.9M
 #
@@ -184,75 +136,183 @@ PRETRAIN_LR="${PRETRAIN_LR:-}"
 #                           keeping n_embd a multiple of 64 and n_head = n_embd / 64, or the
 #                           model warns that its head dimension is non-standard.
 #   2. PRETRAIN_CORPUS      add the same key, pointing at the corpus that size should train on
-#                           (an empty string means "configure PRETRAIN_DIR", which is what the
-#                           larger shipped schemes do).
+#                           (an empty string means "configure PRETRAIN_DIR").
 #   3. helpers/utils.py     add (n_layer, n_head, n_embd) -> name to MODEL_SIZES, so the run's
 #                           checkpoints, histories and figures are named after your scheme
 #                           instead of falling back to a descriptive zetagpt-<L>x<d>.
 #
-# The new name then appears in MODEL_SCHEME below and in --model_scheme automatically; nothing
-# here needs a matching edit.
-MODEL_SCHEME="${MODEL_SCHEME:-}"    # zetagpt-tiny | zetagpt-s | zetagpt-m | zetagpt-l | your own
+# The new name then works here and in --model_scheme automatically.
+MODEL_SCHEME="${MODEL_SCHEME:-zetagpt-tiny}"
 
-# CONTEXT WINDOW IN TOKENS, blank = the scheme's own. This is the one part of a scheme it is
-# legitimate to vary alone, because it is a TRAINING choice rather than an architectural one:
-# nothing in ZetaGPT refers to an absolute position, so no length is forbidden and a trained
-# model can be evaluated at any length. What it costs is attention, which is quadratic in it,
-# so 512 -> 1024 is roughly 4x the attention term per step; that is why the small scheme takes
-# 512 and the two larger ones take 1024. The value chosen here is what the checkpoint records
-# as its block_size, and it is also what --max_len follows when MAX_LEN is left blank.
-CONTEXT_WINDOW="${CONTEXT_WINDOW:-}"
+# CONTEXT WINDOW IN TOKENS. The one part of a scheme it is legitimate to vary alone, because it
+# is a TRAINING choice rather than an architectural one: nothing in ZetaGPT refers to an
+# absolute position, so no length is forbidden and a trained model can be evaluated at any
+# length. What it costs is attention, which is quadratic in it, so 512 -> 1024 is roughly 4x
+# the attention term per step. This is what the checkpoint records as its block_size.
+CONTEXT_WINDOW="${CONTEXT_WINDOW:-512}"
 
+# HOW POSITION ENTERS THE MODEL. "ssm" is the proposed architecture: the state space module
+# supplies position and no positional encoding is used anywhere. "rope" is the ABLATION
+# CONTROL: the module is removed and rotary positions are applied inside attention instead.
+# The choice is recorded in the checkpoint and appears in every filename the run writes, so an
+# ablation never overwrites the run it is compared with.
+#   PE=rope ./stage4_pretrain.sh
+PE="${PE:-ssm}"                     # ssm | rope
+
+# TRUNCATION of an encoded example, in tokens. Keep this EQUAL TO CONTEXT_WINDOW unless you
+# mean to truncate below it -- to fit a longer-context model on a smaller machine, say.
+# The two disagreeing is a quiet and expensive kind of wrong: this shipped as 256 while the
+# window was 512, so training ran at 256 while every figure and table said 512, and roughly
+# four fifths of documents lost their opening to truncation.
+MAX_LEN="${MAX_LEN:-512}"
+
+# =========================================================================== #
+# 5. optimisation -- shared by every trainer; per-stage rates are in each stage's section
+# =========================================================================== #
+BATCH="${BATCH:-16}"                # examples (or preference pairs) per step
+MICRO_BATCH="${MICRO_BATCH:-0}"     # gradient-accumulation micro-batch; 0 = off
+LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
+LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
+BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and evaluation
+
+# =========================================================================== #
+# 6. reporting -- figures, checkpoints, resume
+# =========================================================================== #
+PLOT_EVERY="${PLOT_EVERY:-200}"     # redraw the stage figure, and print 20 generation
+                                    # examples, every N steps; 0 = off
+CKPT_EVERY="${CKPT_EVERY:-200}"     # checkpoint every N steps
+SSM_STATS_EVERY="${SSM_STATS_EVERY:-200}"   # state space diagnostics -- memory horizon,
+                                    # selectivity, residual write ratio -- recorded PER LAYER
+                                    # for one step every N, drawn in the pretraining figure.
+                                    # 0 turns them off. Read by stage 4.
+NO_RESUME="${NO_RESUME:-0}"         # 1 = ignore checkpoints and start from scratch
+
+# =========================================================================== #
+# 7. diagnostic probes -- read by the DPO stage and by eval.py
+# =========================================================================== #
+EVAL_EVERY="${EVAL_EVERY:-0}"       # held-out probe every N steps; 0 = follow PLOT_EVERY
+EVAL_PAIRS="${EVAL_PAIRS:-32}"      # pairs per held-out probe
+EB_EVERY="${EB_EVERY:-25}"          # exposure-bias probe every N steps; 0 = off
+EB_PAIRS="${EB_PAIRS:-4}"           # pairs per exposure-bias probe
+ROLLOUT_TEMP="${ROLLOUT_TEMP:-1.0}" # sampling temperature of that probe
+N_HIST="${N_HIST:-256}"             # end-of-stage evaluation: histories scored
+N_ROLL="${N_ROLL:-32}"              # end-of-stage evaluation: rollouts
+ROLL_TOKENS="${ROLL_TOKENS:-48}"    # end-of-stage evaluation: tokens per rollout
+P_GRID="${P_GRID:-0.0,0.5,1.0}"     # end-of-stage evaluation: comma-separated p values
+
+# =========================================================================== #
+# 8. advanced -- reach anything in default_config.py without a variable here
+# =========================================================================== #
+# The named knobs above cover what is tuned often. Everything else in default_config.py's
+# dictionaries is reachable through --set SECTION.key=value, which takes the type of the value
+# already there and refuses an unknown section or key rather than ignoring it.
+#
+#   EXTRA_SET="--set RLHF.ppo_epochs=2 --set COT.format_reward=0.5"
+#
+# Sections: BPE PRETRAIN SFT REWARD RLHF COT DPO DISTILL TRAIN SCALING MODEL
+EXTRA_SET="${EXTRA_SET:-}"
+
+COMMON_FLAGS="${COMMON_FLAGS:-}"
+
+# =========================================================================== #
+# stage 2 -- byte-level BPE tokenizer
+# =========================================================================== #
+BPE_MERGES="${BPE_MERGES:-50000}"   # merge budget; raising it EXTENDS an existing tokenizer.
+                                    # 50,000 is GPT-2's count.
+# MINIMUM WORD FREQUENCY for a word to be counted when merges are learned. Half the distinct
+# words in a corpus this size appear EXACTLY ONCE and are under 2% of the running text, while
+# costing as much to maintain as the commonest word -- the merge loop's cost scales with the
+# number of distinct words a pair occurs in. Nothing leaves the vocabulary: a byte-level
+# tokenizer encodes a word it never counted. 1 counts every word.
+BPE_MIN_FREQ="${BPE_MIN_FREQ:-2}"
+BPE_FLAGS="${BPE_FLAGS:-}"
+
+# =========================================================================== #
+# stage 3 -- tokenise the corpora into memory-mapped .tokens streams
+# =========================================================================== #
+# Reads PRETRAIN_DIR above and writes cache/tokens/bpe_<256+merges>_<fingerprint>/. Re-running
+# is free when nothing changed. These two also govern how stage 4 reads the corpus, so they
+# live here rather than in the pretraining section.
+CORPUS_MAX_WORDS="${CORPUS_MAX_WORDS:-344}"      # words per packed document; ~1.5 tokens per
+                                                 # word fills a 512-token window
+CORPUS_TEXT_COLUMN="${CORPUS_TEXT_COLUMN:-text}" # which parquet column holds the text
+TOKENIZE_FLAGS="${TOKENIZE_FLAGS:-}"
+
+# =========================================================================== #
+# stage 4 -- pretraining
+# =========================================================================== #
+PRETRAIN_STEPS="${PRETRAIN_STEPS:-488281}"
+PRETRAIN_LR="${PRETRAIN_LR:-2e-5}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 
 # =========================================================================== #
 # stage 5 -- supervised fine-tuning
 # =========================================================================== #
-SFT_STEPS="${SFT_STEPS:-}"
-SFT_LR="${SFT_LR:-}"
+SFT_STEPS="${SFT_STEPS:-2342}"
+SFT_LR="${SFT_LR:-1e-6}"
 SFT_FLAGS="${SFT_FLAGS:-}"
 
 # =========================================================================== #
 # stage 6 -- reward model (sigmoid + BCE)
 # =========================================================================== #
-REWARD_STEPS="${REWARD_STEPS:-}"
-REWARD_LR="${REWARD_LR:-}"
+REWARD_STEPS="${REWARD_STEPS:-2500}"
+REWARD_LR="${REWARD_LR:-1e-5}"
 REWARD_FLAGS="${REWARD_FLAGS:-}"
 
 # =========================================================================== #
 # stage 7 -- RLHF by PPO
 # =========================================================================== #
-RLHF_STEPS="${RLHF_STEPS:-}"
-RLHF_LR="${RLHF_LR:-}"
+RLHF_STEPS="${RLHF_STEPS:-3251}"
+RLHF_LR="${RLHF_LR:-1e-6}"
+RLHF_KL_COEF="${RLHF_KL_COEF:-0.05}"            # per-token KL penalty to the frozen SFT
+                                                # reference: the leash on how far the policy
+                                                # may drift while chasing reward
+RLHF_MAX_NEW_TOKENS="${RLHF_MAX_NEW_TOKENS:-48}"  # response length of each rollout
 RLHF_FLAGS="${RLHF_FLAGS:-}"
 
 # =========================================================================== #
 # stage 8 -- chain of thought by GRPO (the aha moment)
 # =========================================================================== #
-COT_STEPS="${COT_STEPS:-}"
-COT_LR="${COT_LR:-}"
-# WHICH CHECKPOINT THE POLICY STARTS FROM. "pretrain" is the R1-Zero setting -- reinforcement
-# learning on the base model with no supervised reasoning anywhere in the pipeline, which is
-# the run that is supposed to produce the aha moment. "sft" makes the stage a sibling of RLHF
-# and DPO; "rlhf" or "dpo" continue an already aligned policy.
-COT_INIT="${COT_INIT:-}"            # pretrain | sft | rlhf | dpo
-COT_GROUP="${COT_GROUP:-}"          # completions sampled per problem (GRPO's baseline, >= 2)
+COT_STEPS="${COT_STEPS:-1400}"
+COT_LR="${COT_LR:-1e-6}"
+COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which checkpoint it
+                                    # starts from; "pretrain" is the R1-Zero setting
+COT_GROUP="${COT_GROUP:-8}"         # completions sampled per problem (GRPO's baseline is
+                                    # their mean, so this is the group it averages over)
+COT_KL_COEF="${COT_KL_COEF:-0.001}" # much smaller than RLHF's: reasoning needs room to
+                                    # explore before the verifier rewards it
+COT_MAX_NEW_TOKENS="${COT_MAX_NEW_TOKENS:-200}"  # room for a chain of thought, not a reply
 COT_FLAGS="${COT_FLAGS:-}"
 
 # =========================================================================== #
 # stage 9 -- direct preference optimisation
 # =========================================================================== #
-DPO_STEPS="${DPO_STEPS:-}"
-DPO_LR="${DPO_LR:-}"
+DPO_STEPS="${DPO_STEPS:-590}"
+DPO_LR="${DPO_LR:-1e-6}"
 DPO_FLAGS="${DPO_FLAGS:-}"
 
 # =========================================================================== #
 # distillation into gpt2-small -- OPTIONAL, not a numbered stage:
 #     python -m distill.run
 # =========================================================================== #
-DISTILL_STEPS="${DISTILL_STEPS:-}"
-DISTILL_LR="${DISTILL_LR:-}"
+DISTILL_STEPS="${DISTILL_STEPS:-3251}"
+DISTILL_LR="${DISTILL_LR:-1e-6}"
+DISTILL_TEACHER="${DISTILL_TEACHER:-rlhf}"   # which aligned checkpoint teaches: rlhf | dpo
+DISTILL_STUDENT="${DISTILL_STUDENT:-gpt2}"   # any HuggingFace causal LM
 DISTILL_FLAGS="${DISTILL_FLAGS:-}"
+
+# =========================================================================== #
+# scaling laws -- NOT a pipeline stage; run by ./run_scaling_laws.sh
+# =========================================================================== #
+# Loss against model size and data size, on WikiText-103. The ladder is ZetaGPT-S shrunk, so
+# every rung differs in depth and width alone; see scaling_laws/grid.py.
+SCALING_MODELS="${SCALING_MODELS:-zs/8,zs/6,zs/4,zs/2,zs}"
+SCALING_BUDGETS="${SCALING_BUDGETS:-2000000,8000000,32000000,100000000}"
+SCALING_CONTEXT="${SCALING_CONTEXT:-512}"    # held FIXED across the grid
+SCALING_BATCH="${SCALING_BATCH:-16}"
+SCALING_LR="${SCALING_LR:-6e-4}"             # peak rate at the reference width
+SCALING_LR_RULE="${SCALING_LR_RULE:-sqrt_width}"   # sqrt_width | fixed
+SCALING_FLAGS="${SCALING_FLAGS:-}"
 
 # =========================================================================== #
 # your settings: config_user.yaml overrides everything above
@@ -267,97 +327,90 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 # =========================================================================== #
 # command lines, assembled from whatever survived the layers above
 # =========================================================================== #
-# =========================================================================== #
-# scaling laws -- NOT a pipeline stage; run by ./run_scaling_laws.sh
-# =========================================================================== #
-# Loss against model size and data size, on WikiText-103 (downloaded to data/download/, which
-# is git-ignored). The ladder is ZetaGPT-S shrunk, so every rung differs in depth and width
-# alone; see scaling_laws/grid.py. Blank = default_config.SCALING.
-SCALING_MODELS="${SCALING_MODELS:-}"      # e.g. zs/8,zs/6,zs/4,zs/2,zs
-SCALING_BUDGETS="${SCALING_BUDGETS:-}"    # token budgets, e.g. 2e6,8e6,32e6,100e6
-SCALING_CONTEXT="${SCALING_CONTEXT:-}"    # held FIXED across the grid
-SCALING_BATCH="${SCALING_BATCH:-}"
-SCALING_LR="${SCALING_LR:-}"              # peak rate at the reference width
-SCALING_LR_RULE="${SCALING_LR_RULE:-}"    # sqrt_width | fixed
-SCALING_FLAGS="${SCALING_FLAGS:-}"
-
-[ -n "$GPU" ]           && COMMON_FLAGS="$COMMON_FLAGS --gpu $GPU"
-[ -n "$SEED" ]          && COMMON_FLAGS="$COMMON_FLAGS --seed $SEED"
-[ -n "$BATCH" ]         && COMMON_FLAGS="$COMMON_FLAGS --batch $BATCH"
-[ -n "$MICRO_BATCH" ]   && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
-[ -n "$DATASET" ]       && COMMON_FLAGS="$COMMON_FLAGS --dataset $DATASET"
-[ -n "$LIMIT" ]         && COMMON_FLAGS="$COMMON_FLAGS --limit $LIMIT"
-[ -n "$VAL_FRAC" ]      && COMMON_FLAGS="$COMMON_FLAGS --val_frac $VAL_FRAC"
-[ -n "$BETA" ]          && COMMON_FLAGS="$COMMON_FLAGS --beta $BETA"
-[ -n "$MAX_LEN" ]       && COMMON_FLAGS="$COMMON_FLAGS --max_len $MAX_LEN"
-[ -n "$PRETRAIN_DIR" ]  && COMMON_FLAGS="$COMMON_FLAGS --pretrain_dir $PRETRAIN_DIR"
-[ -n "$INSTRUCT_DIR" ]  && COMMON_FLAGS="$COMMON_FLAGS --instruct_dir $INSTRUCT_DIR"
-[ -n "$SFT_DIR" ]       && COMMON_FLAGS="$COMMON_FLAGS --sft_dir $SFT_DIR"
-[ -n "$LR_SCHEDULE" ]   && COMMON_FLAGS="$COMMON_FLAGS --lr_schedule $LR_SCHEDULE"
-[ -n "$LR_MIN_FACTOR" ] && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"
-[ -n "$PLOT_EVERY" ]    && COMMON_FLAGS="$COMMON_FLAGS --plot_every_steps $PLOT_EVERY"
-[ -n "$CKPT_EVERY" ]    && COMMON_FLAGS="$COMMON_FLAGS --checkpoint_every_steps $CKPT_EVERY"
-[ -n "$PE" ]            && COMMON_FLAGS="$COMMON_FLAGS --pe $PE"
+# runtime, data, model, optimisation, reporting, probes -- EVERY stage receives all of these.
+# The model settings are here rather than with pretraining because the run tag that names
+# every checkpoint and figure is derived from them: a stage that did not receive them would
+# look for a filename no stage ever wrote.
+[ -n "$GPU" ]            && COMMON_FLAGS="$COMMON_FLAGS --gpu $GPU"
+[ -n "$SEED" ]           && COMMON_FLAGS="$COMMON_FLAGS --seed $SEED"
+[ -n "$DATASET" ]        && COMMON_FLAGS="$COMMON_FLAGS --dataset $DATASET"
+[ -n "$PRETRAIN_DIR" ]   && COMMON_FLAGS="$COMMON_FLAGS --pretrain_dir $PRETRAIN_DIR"
+[ -n "$INSTRUCT_DIR" ]   && COMMON_FLAGS="$COMMON_FLAGS --instruct_dir $INSTRUCT_DIR"
+[ -n "$SFT_DIR" ]        && COMMON_FLAGS="$COMMON_FLAGS --sft_dir $SFT_DIR"
+[ -n "$DATA_LIMIT" ]     && COMMON_FLAGS="$COMMON_FLAGS --limit $DATA_LIMIT"
+[ -n "$VAL_FRAC" ]       && COMMON_FLAGS="$COMMON_FLAGS --val_frac $VAL_FRAC"
+[ -n "$MODEL_SCHEME" ]   && COMMON_FLAGS="$COMMON_FLAGS --model_scheme $MODEL_SCHEME"
+[ -n "$CONTEXT_WINDOW" ] && COMMON_FLAGS="$COMMON_FLAGS --context_window $CONTEXT_WINDOW"
+[ -n "$PE" ]             && COMMON_FLAGS="$COMMON_FLAGS --pe $PE"
+[ -n "$MAX_LEN" ]        && COMMON_FLAGS="$COMMON_FLAGS --max_len $MAX_LEN"
+[ -n "$BATCH" ]          && COMMON_FLAGS="$COMMON_FLAGS --batch $BATCH"
+[ -n "$MICRO_BATCH" ]    && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
+[ -n "$LR_SCHEDULE" ]    && COMMON_FLAGS="$COMMON_FLAGS --lr_schedule $LR_SCHEDULE"
+[ -n "$LR_MIN_FACTOR" ]  && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"
+[ -n "$BETA" ]           && COMMON_FLAGS="$COMMON_FLAGS --beta $BETA"
+[ -n "$PLOT_EVERY" ]     && COMMON_FLAGS="$COMMON_FLAGS --plot_every_steps $PLOT_EVERY"
+[ -n "$CKPT_EVERY" ]     && COMMON_FLAGS="$COMMON_FLAGS --checkpoint_every_steps $CKPT_EVERY"
 [ -n "$SSM_STATS_EVERY" ] && COMMON_FLAGS="$COMMON_FLAGS --ssm_stats_every $SSM_STATS_EVERY"
-[ -n "$NO_RESUME" ]     && COMMON_FLAGS="$COMMON_FLAGS --no-resume"
-[ -n "$EVAL_EVERY" ]    && COMMON_FLAGS="$COMMON_FLAGS --eval_every $EVAL_EVERY"
-[ -n "$EVAL_PAIRS" ]    && COMMON_FLAGS="$COMMON_FLAGS --eval_pairs $EVAL_PAIRS"
-[ -n "$EB_EVERY" ]      && COMMON_FLAGS="$COMMON_FLAGS --eb_every $EB_EVERY"
-[ -n "$EB_PAIRS" ]      && COMMON_FLAGS="$COMMON_FLAGS --eb_pairs $EB_PAIRS"
-[ -n "$ROLLOUT_TEMP" ]  && COMMON_FLAGS="$COMMON_FLAGS --rollout_temp $ROLLOUT_TEMP"
-[ -n "$N_HIST" ]        && COMMON_FLAGS="$COMMON_FLAGS --n_hist $N_HIST"
-[ -n "$N_ROLL" ]        && COMMON_FLAGS="$COMMON_FLAGS --n_roll $N_ROLL"
-[ -n "$ROLL_TOKENS" ]   && COMMON_FLAGS="$COMMON_FLAGS --roll_tokens $ROLL_TOKENS"
-[ -n "$P_GRID" ]        && COMMON_FLAGS="$COMMON_FLAGS --p_grid $P_GRID"
-[ -n "$BPE_MERGES" ] && BPE_FLAGS="$BPE_FLAGS --bpe_merges $BPE_MERGES"
-[ -n "$MODEL_SCHEME" ]   && PRETRAIN_FLAGS="$PRETRAIN_FLAGS --model_scheme $MODEL_SCHEME"
-[ -n "$CONTEXT_WINDOW" ] && PRETRAIN_FLAGS="$PRETRAIN_FLAGS --context_window $CONTEXT_WINDOW"
+[ "$NO_RESUME" = "1" ]   && COMMON_FLAGS="$COMMON_FLAGS --no-resume"
+[ -n "$EVAL_EVERY" ]     && COMMON_FLAGS="$COMMON_FLAGS --eval_every $EVAL_EVERY"
+[ -n "$EVAL_PAIRS" ]     && COMMON_FLAGS="$COMMON_FLAGS --eval_pairs $EVAL_PAIRS"
+[ -n "$EB_EVERY" ]       && COMMON_FLAGS="$COMMON_FLAGS --eb_every $EB_EVERY"
+[ -n "$EB_PAIRS" ]       && COMMON_FLAGS="$COMMON_FLAGS --eb_pairs $EB_PAIRS"
+[ -n "$ROLLOUT_TEMP" ]   && COMMON_FLAGS="$COMMON_FLAGS --rollout_temp $ROLLOUT_TEMP"
+[ -n "$N_HIST" ]         && COMMON_FLAGS="$COMMON_FLAGS --n_hist $N_HIST"
+[ -n "$N_ROLL" ]         && COMMON_FLAGS="$COMMON_FLAGS --n_roll $N_ROLL"
+[ -n "$ROLL_TOKENS" ]    && COMMON_FLAGS="$COMMON_FLAGS --roll_tokens $ROLL_TOKENS"
+[ -n "$P_GRID" ]         && COMMON_FLAGS="$COMMON_FLAGS --p_grid $P_GRID"
+
+# the settings that live inside default_config.py's dictionaries, forwarded as --set
+[ -n "$CORPUS_MAX_WORDS" ]   && COMMON_FLAGS="$COMMON_FLAGS --set PRETRAIN.max_words=$CORPUS_MAX_WORDS"
+[ -n "$CORPUS_TEXT_COLUMN" ] && COMMON_FLAGS="$COMMON_FLAGS --set PRETRAIN.text_column=$CORPUS_TEXT_COLUMN"
+[ -n "$BPE_MIN_FREQ" ]       && COMMON_FLAGS="$COMMON_FLAGS --set BPE.min_freq=$BPE_MIN_FREQ"
+[ -n "$RLHF_KL_COEF" ]       && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.kl_coef=$RLHF_KL_COEF"
+[ -n "$RLHF_MAX_NEW_TOKENS" ] && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.max_new_tokens=$RLHF_MAX_NEW_TOKENS"
+[ -n "$COT_KL_COEF" ]        && COMMON_FLAGS="$COMMON_FLAGS --set COT.kl_coef=$COT_KL_COEF"
+[ -n "$COT_MAX_NEW_TOKENS" ] && COMMON_FLAGS="$COMMON_FLAGS --set COT.max_new_tokens=$COT_MAX_NEW_TOKENS"
+[ -n "$DISTILL_TEACHER" ]    && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.teacher_stage=$DISTILL_TEACHER"
+[ -n "$DISTILL_STUDENT" ]    && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.student=$DISTILL_STUDENT"
+[ -n "$EXTRA_SET" ]          && COMMON_FLAGS="$COMMON_FLAGS $EXTRA_SET"
+
+# stage 3 does not take the common trainer flags (it builds no model), so the corpus
+# settings it shares with stage 4 are forwarded to it separately
+[ -n "$CORPUS_MAX_WORDS" ]   && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --max_words $CORPUS_MAX_WORDS"
+[ -n "$CORPUS_TEXT_COLUMN" ] && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --text_column $CORPUS_TEXT_COLUMN"
+[ -n "$EXTRA_SET" ]          && TOKENIZE_FLAGS="$TOKENIZE_FLAGS $EXTRA_SET"
+
+# per-stage
+[ -n "$BPE_MERGES" ]     && BPE_FLAGS="$BPE_FLAGS --bpe_merges $BPE_MERGES"
 [ -n "$PRETRAIN_STEPS" ] && PRETRAIN_FLAGS="$PRETRAIN_FLAGS --pretrain_steps $PRETRAIN_STEPS"
 [ -n "$PRETRAIN_LR" ]    && PRETRAIN_FLAGS="$PRETRAIN_FLAGS --pretrain_lr $PRETRAIN_LR"
-[ -n "$SFT_STEPS" ] && SFT_FLAGS="$SFT_FLAGS --sft_steps $SFT_STEPS"
-[ -n "$SFT_LR" ]    && SFT_FLAGS="$SFT_FLAGS --sft_lr $SFT_LR"
-[ -n "$REWARD_STEPS" ] && REWARD_FLAGS="$REWARD_FLAGS --reward_steps $REWARD_STEPS"
-[ -n "$REWARD_LR" ]    && REWARD_FLAGS="$REWARD_FLAGS --reward_lr $REWARD_LR"
-[ -n "$RLHF_STEPS" ] && RLHF_FLAGS="$RLHF_FLAGS --rlhf_steps $RLHF_STEPS"
-[ -n "$RLHF_LR" ]    && RLHF_FLAGS="$RLHF_FLAGS --rlhf_lr $RLHF_LR"
-[ -n "$COT_STEPS" ] && COT_FLAGS="$COT_FLAGS --cot_steps $COT_STEPS"
-[ -n "$COT_LR" ]    && COT_FLAGS="$COT_FLAGS --cot_lr $COT_LR"
-[ -n "$COT_INIT" ]  && COT_FLAGS="$COT_FLAGS --cot_init $COT_INIT"
-[ -n "$COT_GROUP" ] && COT_FLAGS="$COT_FLAGS --cot_group $COT_GROUP"
-[ -n "$DPO_STEPS" ] && DPO_FLAGS="$DPO_FLAGS --dpo_steps $DPO_STEPS"
-[ -n "$DPO_LR" ]    && DPO_FLAGS="$DPO_FLAGS --dpo_lr $DPO_LR"
-[ -n "$DISTILL_STEPS" ] && DISTILL_FLAGS="$DISTILL_FLAGS --distill_steps $DISTILL_STEPS"
-[ -n "$DISTILL_LR" ]    && DISTILL_FLAGS="$DISTILL_FLAGS --distill_lr $DISTILL_LR"
-[ -n "$SCALING_MODELS" ]   && SCALING_FLAGS="$SCALING_FLAGS --models $SCALING_MODELS"
-[ -n "$SCALING_BUDGETS" ]  && SCALING_FLAGS="$SCALING_FLAGS --budgets $SCALING_BUDGETS"
-[ -n "$SCALING_CONTEXT" ]  && SCALING_FLAGS="$SCALING_FLAGS --context $SCALING_CONTEXT"
-[ -n "$SCALING_BATCH" ]    && SCALING_FLAGS="$SCALING_FLAGS --batch $SCALING_BATCH"
-[ -n "$SCALING_LR" ]       && SCALING_FLAGS="$SCALING_FLAGS --lr $SCALING_LR"
-[ -n "$SCALING_LR_RULE" ]  && SCALING_FLAGS="$SCALING_FLAGS --lr_rule $SCALING_LR_RULE"
-
+[ -n "$SFT_STEPS" ]      && SFT_FLAGS="$SFT_FLAGS --sft_steps $SFT_STEPS"
+[ -n "$SFT_LR" ]         && SFT_FLAGS="$SFT_FLAGS --sft_lr $SFT_LR"
+[ -n "$REWARD_STEPS" ]   && REWARD_FLAGS="$REWARD_FLAGS --reward_steps $REWARD_STEPS"
+[ -n "$REWARD_LR" ]      && REWARD_FLAGS="$REWARD_FLAGS --reward_lr $REWARD_LR"
+[ -n "$RLHF_STEPS" ]     && RLHF_FLAGS="$RLHF_FLAGS --rlhf_steps $RLHF_STEPS"
+[ -n "$RLHF_LR" ]        && RLHF_FLAGS="$RLHF_FLAGS --rlhf_lr $RLHF_LR"
+[ -n "$COT_STEPS" ]      && COT_FLAGS="$COT_FLAGS --cot_steps $COT_STEPS"
+[ -n "$COT_LR" ]         && COT_FLAGS="$COT_FLAGS --cot_lr $COT_LR"
+[ -n "$COT_INIT" ]       && COT_FLAGS="$COT_FLAGS --cot_init $COT_INIT"
+[ -n "$COT_GROUP" ]      && COT_FLAGS="$COT_FLAGS --cot_group $COT_GROUP"
+[ -n "$DPO_STEPS" ]      && DPO_FLAGS="$DPO_FLAGS --dpo_steps $DPO_STEPS"
+[ -n "$DPO_LR" ]         && DPO_FLAGS="$DPO_FLAGS --dpo_lr $DPO_LR"
+[ -n "$DISTILL_STEPS" ]  && DISTILL_FLAGS="$DISTILL_FLAGS --distill_steps $DISTILL_STEPS"
+[ -n "$DISTILL_LR" ]     && DISTILL_FLAGS="$DISTILL_FLAGS --distill_lr $DISTILL_LR"
+[ -n "$SCALING_MODELS" ]  && SCALING_FLAGS="$SCALING_FLAGS --models $SCALING_MODELS"
+[ -n "$SCALING_BUDGETS" ] && SCALING_FLAGS="$SCALING_FLAGS --budgets $SCALING_BUDGETS"
+[ -n "$SCALING_CONTEXT" ] && SCALING_FLAGS="$SCALING_FLAGS --context $SCALING_CONTEXT"
+[ -n "$SCALING_BATCH" ]   && SCALING_FLAGS="$SCALING_FLAGS --batch $SCALING_BATCH"
+[ -n "$SCALING_LR" ]      && SCALING_FLAGS="$SCALING_FLAGS --lr $SCALING_LR"
+[ -n "$SCALING_LR_RULE" ] && SCALING_FLAGS="$SCALING_FLAGS --lr_rule $SCALING_LR_RULE"
 
 # =========================================================================== #
 # what this run is actually configured with
 # =========================================================================== #
 # Every knob, one per line, with the value in force and where it came from -- so the head of a
 # log says what produced it, without anyone having to reconstruct four layers of precedence
-# from memory. A blank value means the flag is not passed at all and the trainer falls back to
-# default_config.py. Set ZETAGPT_QUIET=1 to suppress this (run_full.sh chains eight stages).
-# What default_config.py falls back to when a variable here is left blank -- asked for once,
-# so the summary can print the value actually in force instead of a dash. Only lines that
-# look like assignments are evaluated, and a failure (no interpreter, a broken import) leaves
-# the defaults unknown rather than killing the run.
-ZETAGPT_DEF_LOADED=""
-if [ -z "${ZETAGPT_QUIET:-}" ]; then
-  while IFS= read -r _line; do
-    case "$_line" in
-      ZETAGPT_DEF_[A-Z_]*=*) eval "$_line"; ZETAGPT_DEF_LOADED=1 ;;
-    esac
-  done <<< "$("$PY" "$(dirname "${BASH_SOURCE[0]}")/default_config.py" --shell-defaults \
-              2>/dev/null || true)"
-  unset _line
-fi
-
+# from memory. Set ZETAGPT_QUIET=1 to suppress this (run_full.sh chains nine stages).
 if [ -z "${ZETAGPT_QUIET:-}" ]; then
   echo "--- configuration ------------------------------------------------------------"
   for _v in $ZETAGPT_VARS; do
@@ -369,25 +422,16 @@ if [ -z "${ZETAGPT_QUIET:-}" ]; then
            *) case "$_v" in
                 # the *_FLAGS lines are built from the knobs above, not configured directly
                 *_FLAGS) _src="assembled" ;;
-                *) if [ -n "$_val" ]; then
-                     _src="config.sh"
-                   else
-                     # blank here means the flag is not passed and default_config.py decides:
-                     # print ITS value, which is the one actually in force
-                     _d="ZETAGPT_DEF_$_v"
-                     _val="${!_d:-}"
-                     _src="default_config.py"
-                     [ -n "$_val" ] || [ -n "$ZETAGPT_DEF_LOADED" ] || _src="default_config.py (unread)"
-                   fi ;;
+                *) _src="config.sh" ;;
               esac ;;
          esac ;;
     esac
-    [ -n "$_val" ] || _val="-"
-    printf '  %-16s %-46s %s\n' "$_v" "$_val" "$_src"
+    [ -n "$_val" ] || _val="(none)"
+    printf '  %-20s %-46s %s\n' "$_v" "$_val" "$_src"
   done
   echo "------------------------------------------------------------------------------"
 fi
-unset _v _val _src _d
+unset _v _val _src
 
 # The loop above can end on a failed test, and the exit status of the last command in a sourced
 # file is the exit status of `source`. Every stage script runs under `set -e`, so without this

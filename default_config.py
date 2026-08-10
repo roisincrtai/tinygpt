@@ -235,7 +235,7 @@ SCHEMES = {
     "zetagpt-m": dict(n_layer=16, n_head=12, n_embd=768,  context_window=1024),
     "zetagpt-l": dict(n_layer=24, n_head=16, n_embd=1024, context_window=1024),
 }
-DEFAULT_SCHEME = "zetagpt-s"
+DEFAULT_SCHEME = "zetagpt-tiny"
 
 
 def scheme(name=DEFAULT_SCHEME):
@@ -560,13 +560,66 @@ SAMPLING = dict(max_new=60, temperature=0.8, top_k=50, top_p=0.95)
 #
 # emits `ZETAGPT_DEF_<VAR>='<value>'` lines for config.sh to eval. Keys are the shell variable
 # names; a variable with no Python default (PY, NO_RESUME, the assembled *_FLAGS) is absent.
+def apply_overrides(pairs, log=print):
+    """Apply `SECTION.key=value` overrides to the configuration dictionaries, in place.
+
+    Forty-odd settings live inside these dictionaries -- BPE["min_freq"], RLHF["kl_coef"],
+    PRETRAIN["max_words"] and so on -- and giving each its own command-line flag would mean
+    forty flags, forty forwarding lines in config.sh, and a new one to add every time a
+    setting appears. One override reaches all of them, and reaches settings added later
+    without any further work.
+
+    Applied by common.setup BEFORE any stage reads its configuration, and by the stages that
+    do not go through setup. The stages hold references to these dicts rather than copies of
+    their values, so mutating them here is what makes the override take effect.
+
+    The value is coerced to the TYPE ALREADY THERE, so `--set BPE.min_freq=3` yields an int
+    and `--set RLHF.kl_coef=0.02` a float; a bool accepts the spellings a shell produces
+    (1/0, true/false, yes/no). An unknown section or key is refused rather than ignored --
+    a silently-dropped override is a run that reports settings it did not use.
+    """
+    import ast
+    for item in pairs or []:
+        if "=" not in item:
+            raise SystemExit(f"[config] --set expects SECTION.key=value, got {item!r}")
+        path, _, raw = item.partition("=")
+        section, _, key = path.strip().partition(".")
+        d = globals().get(section.strip().upper())
+        if not isinstance(d, dict):
+            raise SystemExit(f"[config] --set: no configuration section {section!r}. "
+                             f"Sections: BPE, PRETRAIN, SFT, REWARD, RLHF, COT, DPO, "
+                             f"DISTILL, TRAIN, SCALING, MODEL")
+        if key not in d:
+            raise SystemExit(f"[config] --set: {section.upper()} has no key {key!r}. "
+                             f"Keys: {', '.join(sorted(d))}")
+        cur = d[key]
+        try:
+            if isinstance(cur, bool):
+                val = str(raw).strip().lower() in ("1", "true", "yes", "on")
+            elif isinstance(cur, int) and not isinstance(cur, bool):
+                val = int(raw)
+            elif isinstance(cur, float):
+                val = float(raw)
+            elif isinstance(cur, (list, tuple)):
+                val = ast.literal_eval(raw) if raw.strip().startswith(("[", "("))         \
+                      else [x for x in raw.split(",") if x]
+            else:
+                val = raw
+        except (ValueError, SyntaxError) as e:
+            raise SystemExit(f"[config] --set {path}: {raw!r} is not a "
+                             f"{type(cur).__name__} ({e})") from e
+        if val != cur:
+            log(f"[config] {section.upper()}[{key!r}] {cur!r} -> {val!r}")
+        d[key] = val
+
+
 SHELL_DEFAULTS = {
     "GPU": TRAIN["gpu"],
     "SEED": TRAIN["seed"],
     "BATCH": TRAIN["batch"],
     "MICRO_BATCH": TRAIN["micro_batch"],
     "DATASET": TRAIN["dataset"],
-    "LIMIT": TRAIN["limit"],
+    "DATA_LIMIT": TRAIN["limit"],
     "VAL_FRAC": TRAIN["val_frac"],
     "BETA": TRAIN["beta"],
     # max_len=0 means "the model's context", so report the number that ends up in force

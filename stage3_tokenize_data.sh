@@ -12,4 +12,4 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh          # which reads config_user.yaml over its defaults
 echo "=== [3/9] tokenize corpora ============================================"
-exec $PY -m tokenize_data.run "$@"
+exec $PY -m tokenize_data.run $TOKENIZE_FLAGS "$@"

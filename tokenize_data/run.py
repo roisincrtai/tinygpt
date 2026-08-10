@@ -58,7 +58,11 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true", help="show what would be built, and where")
     ap.add_argument("--max_words", type=int, default=config.PRETRAIN["max_words"])
     ap.add_argument("--text_column", default=config.PRETRAIN["text_column"])
+    ap.add_argument("--set", dest="overrides", action="append", default=[],
+                    metavar="SEC.key=v", help="override any default_config value, e.g. "
+                         "--set PRETRAIN.max_words=512")
     a, _ = ap.parse_known_args(argv)
+    config.apply_overrides(a.overrides, print)
 
     # The tokenizer is READ, never built here. A stream is tied to the vocabulary that
     # produced it -- that is what its cache directory is named after -- so a stage that
