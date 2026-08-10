@@ -380,8 +380,10 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
     if pretokenize_pairs and train_pairs:
         try:
             src = dsets.resolve_root(getattr(args, "dataset", "hh"), args.data_dir)
-            helpers.attach_pair_ids(train_pairs, src, tok, split="train", log=log)
-            helpers.attach_pair_ids(ev_pairs, src, tok, split="val", log=log)
+            helpers.attach_pair_ids(train_pairs, src, tok, split="train", log=log,
+                                    resume=args.resume)
+            helpers.attach_pair_ids(ev_pairs, src, tok, split="val", log=log,
+                                    resume=args.resume)
         except Exception as e:                                    # noqa: BLE001
             log(f"[cache] preference pre-tokenisation skipped: {e}")
     enc = dsets.Encoder(tok, device, args.max_len)

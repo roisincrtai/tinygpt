@@ -1364,37 +1364,128 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
 # --------------------------------------------------------------------------- #
 # preference pairs: the same idea for the preference batches
 # --------------------------------------------------------------------------- #
-def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print):
-    """Attach `prompt_ids` / `chosen_ids` / `rejected_ids` to every preference pair, IN
-    PLACE, reading them from cache/tokens/<tokenizer>/<src>.<split>.<sig>.tokens when it is current
-    and writing it when it is not. The reward and DPO trainers then never tokenise inside
-    their step loops. Returns the number of tokens cached.
+def _pair_stem(tok, src, split, sig):
+    """<mirror of the source>.<split>.<sig> -- the stem the pair cache's two files share."""
+    return _tok_path(tok, src + (f".{split}" if split else ""), sig)[:-len(".tokens")]
+
+
+def _pair_read(stem, want_pairs):
+    """(records, valid_bytes) already on disk: id lists in the order they were written.
+
+    Each record is LENGTH-PREFIXED -- one uint32 count, then that many uint32 ids -- so the
+    file is read by walking forward, and a partial write at the end is simply a record that
+    does not complete. No separator is used and none would do: a preference record CAN contain
+    the characters of a special token, and a scheme that split on EOS would mis-cut exactly
+    those pairs with nothing to say so."""
+    import array
+    try:
+        with open(f"{stem}_index.json", encoding="utf-8") as f:
+            head = json.load(f)
+        n_rec, valid = int(head["n_records"]), int(head["n_bytes"])
+    except (OSError, ValueError, KeyError):
+        return [], 0
+    try:
+        with open(f"{stem}.tokens", "rb") as f:
+            raw = array.array("I")
+            raw.frombytes(f.read(valid))
+    except OSError:
+        return [], 0
+    out, i = [], 0
+    while len(out) < n_rec and i < len(raw):
+        n = raw[i]; i += 1
+        if i + n > len(raw):
+            break
+        out.append(raw[i:i + n].tolist()); i += n
+    return out[:3 * want_pairs], valid
+
+
+def _pair_manifest(stem, sig, st, n_records, n_bytes, complete):
+    tmp = f"{stem}_index.json.part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"magic": "zetagpt-pairs", "version": 1, "sig": sig,
+                   "src_mtime": int(st.st_mtime), "src_size": st.st_size,
+                   "n_records": n_records, "n_bytes": n_bytes,
+                   "complete": bool(complete)}, f)
+    os.replace(tmp, f"{stem}_index.json")
+
+
+def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print, resume=True,
+                    flush_every=2000):
+    """Attach `prompt_ids` / `chosen_ids` / `rejected_ids` to every preference pair, IN PLACE,
+    caching them so the reward and DPO trainers never tokenise inside their step loops.
+
+    WRITTEN AS IT GOES, never held. Each pair's three sequences are appended the moment they
+    are tokenised, and the manifest catches up every few thousand pairs, so a run killed part
+    way leaves every pair it tokenised on disk and RESUMES from there. Building the whole cache
+    in memory and writing once at the end -- which is what this did -- means an interrupted run
+    leaves nothing at all, and the peak cost is the whole cache rather than one pair.
 
     The split and the pair count are part of the signature, so the train half can never be
-    served the validation half's ids, and a corpus that grew invalidates rather than silently
-    reuses the prefix it happens to agree with."""
+    served the validation half's ids, and a set that grew invalidates rather than silently
+    reusing the prefix it happens to agree with."""
+    import array
     if not pairs:
         return 0
     sig = f"{_tok_signature(tok, 0)}|pairs={len(pairs)}|split={split}"
     st = os.stat(src)
-    cp = _tok_path(tok, src + (f".{split}" if split else ""), sig)
-    flat = _read(cp, sig, st)                     # one "document" per field, in pair order
-    if flat is not None and len(flat) == 3 * len(pairs):
-        for i, p in enumerate(pairs):
-            p["prompt_ids"] = flat[3 * i]
-            p["chosen_ids"] = flat[3 * i + 1]
-            p["rejected_ids"] = flat[3 * i + 2]
-        log(f"[{stage}] pair token cache: reused {len(pairs):,} {split or 'pairs'} "
-            f"-> {cp}")
-        return sum(len(d) for d in flat)
-    seqs = []
+    stem = _pair_stem(tok, src, split, sig)
+    os.makedirs(os.path.dirname(stem) or ".", exist_ok=True)
+    path = f"{stem}.tokens"
+
+    have, valid = [], 0
+    if resume:
+        try:
+            with open(f"{stem}_index.json", encoding="utf-8") as f:
+                head = json.load(f)
+            if (head.get("sig") == sig and head.get("src_size") == st.st_size
+                    and head.get("src_mtime") == int(st.st_mtime)):
+                have, valid = _pair_read(stem, len(pairs))
+        except (OSError, ValueError):
+            have, valid = [], 0
+    if not have:
+        for f in (path, f"{stem}_index.json"):
+            if os.path.exists(f):
+                os.remove(f)
+        valid = 0
+
+    done = len(have) // 3
+    for i in range(done):
+        pairs[i]["prompt_ids"] = have[3 * i]
+        pairs[i]["chosen_ids"] = have[3 * i + 1]
+        pairs[i]["rejected_ids"] = have[3 * i + 2]
+    n_tokens = sum(len(r) for r in have)
+    if done >= len(pairs):
+        log(f"[{stage}] pair token cache: reused {done:,} {split or 'pairs'} -> {path}")
+        return n_tokens
+    if done:
+        log(f"[{stage}] pair token cache: {done:,} {split or 'pairs'} reused, "
+            f"{len(pairs) - done:,} still to tokenise")
+
+    # bytes written after the manifest's mark belong to a pair it does not count
+    if os.path.exists(path) and os.path.getsize(path) != valid:
+        with open(path, "r+b") as f:
+            f.truncate(valid)
+
     eos = tok.eos_token_id
-    for p in progress(pairs, desc=f"[{stage}] tokenizing {split or 'pairs'}",
-                      total=len(pairs)):
-        p["prompt_ids"] = tok(p["prompt"], add_special_tokens=False)["input_ids"]
-        p["chosen_ids"] = tok(" " + p["chosen"], add_special_tokens=False)["input_ids"] + [eos]
-        p["rejected_ids"] = tok(" " + p["rejected"], add_special_tokens=False)["input_ids"] + [eos]
-        seqs += [p["prompt_ids"], p["chosen_ids"], p["rejected_ids"]]
-    _write(cp, sig, st, seqs)
-    log(f"[{stage}] pair token cache: tokenised {len(pairs):,} {split or 'pairs'} -> {cp}")
-    return sum(len(s) for s in seqs)
+    n_bytes, n_rec = valid, 3 * done
+    with open(path, "ab") as fh:
+        for i in progress(range(done, len(pairs)),
+                          desc=f"[{stage}] tokenizing {split or 'pairs'}",
+                          total=len(pairs), initial=done):
+            p = pairs[i]
+            p["prompt_ids"] = tok(p["prompt"], add_special_tokens=False)["input_ids"]
+            p["chosen_ids"] = tok(" " + p["chosen"], add_special_tokens=False)["input_ids"] + [eos]
+            p["rejected_ids"] = tok(" " + p["rejected"], add_special_tokens=False)["input_ids"] + [eos]
+            for seq in (p["prompt_ids"], p["chosen_ids"], p["rejected_ids"]):
+                array.array("I", [len(seq)] + list(seq)).tofile(fh)
+                n_bytes += 4 * (len(seq) + 1)
+                n_tokens += len(seq)
+                n_rec += 1
+            if (i + 1 - done) % flush_every == 0:
+                fh.flush()
+                _pair_manifest(stem, sig, st, n_rec, n_bytes, complete=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    _pair_manifest(stem, sig, st, n_rec, n_bytes, complete=True)
+    log(f"[{stage}] pair token cache: {len(pairs):,} {split or 'pairs'} -> {path}")
+    return n_tokens
