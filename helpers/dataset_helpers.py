@@ -277,7 +277,10 @@ def load_pretrain_corpus(root, max_words=200, exclude_dirs=(), text_column="text
 
     Returns (docs, n_files). This is the ONE place the corpus is held as text rather than
     streamed, because a tokenizer cannot be built from tokens it has not yet defined."""
-    from helpers import progress, corpus_files, _pack
+    # `_pack` is imported from the MODULE, not the package: helpers/__init__ re-exports with
+    # `from .utils import *`, which by definition skips underscore names.
+    from helpers import progress, corpus_files
+    from helpers.utils import _pack
     files = corpus_files(root, exclude_dirs)
     docs = []
     for fp in progress(files, desc="[corpus] scanning corpus", total=len(files)):
