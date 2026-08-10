@@ -26,7 +26,7 @@ STAGE = "pretrain"
 
 
 def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0):
-    """Pre-tokenised pretraining documents (cached under cache/tokens/bpe_<vocab>_<fingerprint>/), reported
+    """Pre-tokenised pretraining documents (cached under cache/tokens/bpe_<256+merges>_<fp>/), reported
     as a table: the file count and the total token count the scan must announce.
 
     `corpus_dir` is passed in rather than read from the configuration, because it depends on

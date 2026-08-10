@@ -150,7 +150,7 @@ P_GRID="${P_GRID:-}"                # end-of-stage evaluation: comma-separated p
 COMMON_FLAGS="${COMMON_FLAGS:-}"
 # =========================================================================== #
 # stage 3 -- tokenise the corpora (no knobs of its own; it reads the pretraining settings
-#            below and writes cache/tokens/bpe_<vocab>_<fingerprint>/*.tokens)
+#            below and writes cache/tokens/bpe_<256+merges>_<fp>/*.tokens)
 
 # stage 2 -- byte-level BPE tokenizer
 # =========================================================================== #

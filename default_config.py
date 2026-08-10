@@ -37,7 +37,7 @@ instruction tree holds. NOTHING HERE DOWNLOADS; see DATASETS below and tools/dow
                                 reasoning problems: {train,test}_<batch>.json
     cache/tokens/<tokenizer>/   pre-tokenised corpora as .tokens files, mirroring the
                                 source path. The directory is the TOKENIZER
-                                (bpe_<vocab>_<8 chars of `git hash-object bpe.json`>), so
+                                (bpe_<256+merges>_<8 chars of the merges' blob hash>), so
                                 two vocabularies coexist instead of evicting each
                                 other, and no stage appears in the path: tokens depend on
                                 the file and the tokenizer, so every stage shares them
@@ -166,7 +166,7 @@ def set_instruct_root(path):
 COT_DIR = dataset_dir("zetagpt-grpo-cot_gsm8k")             # chain-of-thought / reasoning
 COT_GSM8K_DIR = COT_DIR                                    # {train,test}_<batch>.json
 DISTILL_DIR = HH_DIR        # distillation generates from the same prompts stage 7 rolls out on
-CACHE_DIR = os.path.join(ROOT, "cache")                    # cache/tokens/bpe_<vocab>_<fp>/<mirror>.tokens
+CACHE_DIR = os.path.join(ROOT, "cache")                    # cache/tokens/bpe_<256+merges>_<fp>/<mirror>.tokens
 CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints")         # checkpoints/<stage>/checkpoint_*.pt
 OUTPUT_DIR = os.path.join(ROOT, "outputs")                  # everything a run produces
 PLOT_DIR = os.path.join(OUTPUT_DIR, "plots")               # outputs/plots/<stage>/<figure>.pdf

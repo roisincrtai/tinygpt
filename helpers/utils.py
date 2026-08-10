@@ -874,14 +874,15 @@ def holdout_probe(policy, ref, enc, pairs, beta, gen=None, roll_temp=1.0, batch=
 # under a mirror of its path, in a directory named for THE TOKENIZER THAT PRODUCED IT:
 #
 #     data/download/<corpus>/<path>/<name>.parquet
-#         ->  cache/tokens/bpe_<vocab>_<fingerprint>/data/download/<corpus>/.../<name>.parquet.<sig>.tokens
+#         ->  cache/tokens/bpe_<256+merges>_<fp>/data/download/<corpus>/.../<name>.parquet.<sig>.tokens
 #
 # THE TOKENIZER IS THE DIRECTORY, not a field inside the file, so two vocabularies coexist
 # instead of overwriting each other: retrain the BPE, try the new vocabulary, go back, and the
 # old tokens are still there. The fingerprint is the first 8 characters of GIT'S BLOB HASH of
-# bpe.json -- `git hash-object checkpoints/bpe/bpe.json` prints it -- so the directory names
-# the tokenizer AS IT IS NOW rather than merely its size: a rebuild to the same vocabulary size
-# lands somewhere else, which is the whole point, and the name can be checked against the file.
+# the tokenizer's MERGES, so the directory names the encoding rather than merely its size: a
+# vocabulary rebuilt to the same size lands somewhere else, which is the whole point. It names
+# the merges rather than the whole bpe.json so that REGISTERING A SPECIAL LEAVES IT ALONE -- a
+# chat token added after pretraining must not throw away a corpus that has not changed.
 # THE STAGE IS NOT IN THE PATH: tokens are a property of (file,
 # tokenizer, packing) and of nothing else, so a file tokenised for pretraining is reused by any
 # other stage that reads it rather than tokenised again from scratch.
@@ -918,24 +919,56 @@ def blob_hash(data):
     return h.hexdigest()
 
 
+def encoding_blob(tok):
+    """The canonical bytes that DEFINE how this tokenizer turns corpus text into ids: its
+    ordered merges, and nothing else.
+
+    Deliberately not the whole bpe.json. The specials are excluded because they do not
+    participate in corpus tokenisation at all -- the packer calls encode_ordinary, so a
+    document is bytes and merges -- and because the id of eos is 256 + len(merges), which does
+    not move when a special is registered either. Registering <|im_start|> after pretraining
+    must therefore leave every cached token stream valid, which is the entire point of being
+    able to register one."""
+    return json.dumps([[list(a), list(b)] for a, b in tok.merges],
+                      separators=(",", ":")).encode("utf-8")
+
+
 def tokenizer_fingerprint(path=None, tok=None, n=8):
-    """`n` characters of the git blob hash of the tokenizer file -- bpe.json AS IT IS NOW.
+    """`n` characters of the git blob hash of the tokenizer's ENCODING.
 
     Abbreviated the way git abbreviates a commit, and for the same reason: the full digest is
     what makes it unique, the first few characters are what makes it usable in a name. Eight
     hex characters is 4.3 billion values against the handful of tokenizers a project ever has,
     so a collision is not a practical concern; git itself defaults to seven.
 
-    The FILE is hashed, not anything derived from it, so any change at all -- different merges,
-    a reordered vocabulary, a hand edit -- lands the cache somewhere else. A vocabulary rebuilt
-    to the same size is a different tokenizer and must not be able to read the previous one's
-    tokens.
+    Any change to the merges -- a retrained vocabulary, a different merge order, one merge more
+    -- lands the cache somewhere else, because those are the changes that alter what a corpus
+    tokenises to. Registering a special does NOT, by construction: see encoding_blob.
 
-    Memoised on (path, mtime, size): the fingerprint is asked for once per cached file, and
-    re-reading a 50k-merge json tens of thousands of times would cost more than the tokenising
-    it exists to avoid. Falls back to hashing the tokenizer's own vocabulary and merges when
-    the file is not on disk (an in-memory tokenizer, or a run before it is written), so the
-    cache still separates correctly instead of silently sharing one directory."""
+    The value is reproducible from the shell, which is why git's construction is used rather
+    than a bare digest:
+
+        python -c "import json,hashlib,sys; m=json.load(open('checkpoints/bpe/bpe.json'))['merges']; \
+                   b=json.dumps(m,separators=(',',':')).encode(); \
+                   print(hashlib.sha1(b'blob %d\\0'%len(b)+b).hexdigest()[:8])"
+
+    Memoised on the tokenizer object, since it is asked for once per cached file and a 50k-merge
+    list is not free to serialise tens of thousands of times."""
+    if tok is not None and hasattr(tok, "merges"):
+        # Cached ON THE OBJECT, not in a dict keyed by id(): CPython reuses an id once an
+        # object is collected, so an id-keyed cache can hand a new tokenizer the fingerprint
+        # of a dead one -- and the failure would be a corpus silently read from the wrong
+        # cache. The merge count is part of the key so an incrementally extended vocabulary
+        # recomputes.
+        cached = getattr(tok, "_fingerprint_cache", None)
+        if not cached or cached[0] != len(tok.merges):
+            cached = (len(tok.merges), blob_hash(encoding_blob(tok)))
+            try:
+                tok._fingerprint_cache = cached
+            except AttributeError:                 # a tokenizer that forbids new attributes
+                pass
+        return cached[1][:n]
+    # No tokenizer object: fall back to the file, which at least separates two different ones.
     path = path or config.BPE_PATH
     try:
         st = os.stat(path)
@@ -945,21 +978,23 @@ def tokenizer_fingerprint(path=None, tok=None, n=8):
                 _FINGERPRINTS[key] = blob_hash(f.read())
         return _FINGERPRINTS[key][:n]
     except OSError:
-        if tok is None:
-            return "nofile00"[:n].ljust(n, "0")
-        merges = list(getattr(tok, "merges", []) or [])
-        return blob_hash(repr((len(tok), merges)).encode("utf-8"))[:n]
+        return "nofile00"[:n].ljust(n, "0")
 
 
 def tokenizer_tag(tok, path=None):
-    """The cache directory name for a tokenizer: bpe_<vocabulary size>_<fingerprint>.
+    """The cache directory name: bpe_<encoding size>_<fingerprint>.
 
-    All three parts earn their place. `bpe` says what kind of tokenizer it is, the vocabulary
-    size is the number you actually think in and lets you recognise a directory at a glance,
-    and the fingerprint is what makes the name CORRECT rather than merely descriptive: two
-    vocabularies of the same size are different tokenizers, and only the digest of the file
-    can tell them apart."""
-    return f"bpe_{len(tok)}_{tokenizer_fingerprint(path, tok)}"
+    The size counted is 256 + #merges -- the ids a corpus can actually contain -- NOT len(tok),
+    which includes the specials. That distinction is the difference between a cache that
+    survives registering a chat token and one that does not: len(tok) rises by one the moment
+    <|im_start|> is registered, and naming the directory after it would throw away a corpus
+    that had not changed by a single token.
+
+    `bpe` says what kind of tokenizer it is, the size is the number a human recognises the
+    directory by, and the fingerprint is what makes the name correct rather than merely
+    descriptive -- two vocabularies of the same size are different tokenizers."""
+    n_base = 256 + len(tok.merges) if hasattr(tok, "merges") else len(tok)
+    return f"bpe_{n_base}_{tokenizer_fingerprint(path, tok)}"
 
 
 def token_cache_root(tok, path=None):
