@@ -6,7 +6,8 @@ shares, and saves it WITH its full vocabulary and per-merge build history under
 
     checkpoints/bpe/bpe.json
 
-The training corpus is the pretraining text (every *.txt under the pretraining corpus, recursive,
+The training corpus is the pretraining text (every corpus file under the pretraining
+corpus -- prose, markdown, code or parquet -- recursive,
 minus config.PRETRAIN["exclude_dirs"]) plus the preference texts, so the single tokenizer
 covers both. build() is the one place the tokenizer is constructed, so every stage gets a
 byte-for-byte identical vocabulary.

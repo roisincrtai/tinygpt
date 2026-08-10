@@ -330,17 +330,18 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
         # vocabulary serves every stage.
         pre, n_pre = dsets.load_pretrain_corpus(
             args.pretrain_dir, config.PRETRAIN["max_words"],
-            exclude_dirs=config.PRETRAIN["exclude_dirs"])
+            exclude_dirs=config.PRETRAIN["exclude_dirs"],
+            text_column=config.PRETRAIN["text_column"])
         sft_docs, n_sft = dsets.load_pretrain_corpus(
             args.sft_dir, config.SFT["max_words"],
             exclude_dirs=config.SFT["exclude_dirs"])
         helpers.table("BPE training corpus", [
             ("pretrain dir", args.pretrain_dir or "(unset for this scheme)"),
             ("pretrain excluded", ", ".join(config.PRETRAIN["exclude_dirs"]) or "(none)"),
-            ("pretrain txt files", f"{n_pre:,}"),
+            ("pretrain corpus files", f"{n_pre:,}"),
             ("pretrain documents", f"{len(pre):,}"),
             ("sft dir", args.sft_dir),
-            ("sft txt files", f"{n_sft:,}"),
+            ("sft corpus files", f"{n_sft:,}"),
             ("sft documents", f"{len(sft_docs):,}"),
             ("preference texts", f"{len(texts):,}"),
             ("merges requested", f"{args.bpe_merges:,}")], out=log)

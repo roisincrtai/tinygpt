@@ -260,39 +260,31 @@ def load_pairs(dataset, data_dir, val_frac, seed, limit=0):
     return train_p, val_p
 
 
-def load_pretrain_corpus(txt_root, max_words=200, exclude_dirs=()):
-    """LM pretraining documents from plain-text files.
+def load_pretrain_corpus(root, max_words=200, exclude_dirs=(), text_column="text"):
+    """Corpus documents as text, for the stage that has no tokenizer yet.
 
-    Scans EVERY *.txt under `txt_root` RECURSIVELY (the pretraining corpus**/*.txt), so any text corpus
-    dropped anywhere under the pretraining corpus is picked up -- EXCEPT files living under a directory
-    whose name is in `exclude_dirs` (matched against every path component below `txt_root`, so
-    nested directories with an excluded name are skipped too; config.PRETRAIN["exclude_dirs"]
-    defaults to starwars_transcripts and lyrics). Consecutive lines of a file are packed into
-    ~max_words-word chunks (never crossing files) and returned as
-    {prompt:'', chosen:<chunk>, rejected:''} pseudo-pairs, so sft.run's length-normalized LM
-    loop can pretrain on them (prompt empty -> the whole chunk is the response it scores).
+    ANY FORMAT the corpus scanner accepts, not just .txt: prose, markdown, source code and
+    PARQUET, whose rows are decoded through pyarrow. This used to open every file with plain
+    open(), which for a parquet corpus meant training the byte-level BPE on the mojibake of a
+    compressed binary -- a vocabulary of column headers and zstd frames rather than of English.
+    The packing is the same `_pack` every other stage uses, so the tokenizer is built from
+    exactly the documents the model will later be trained on.
 
-    Returns (docs, n_files) where n_files counts the files actually used. The caller reports
-    the scan (stage 4 prints the number of files and the total token count)."""
-    from helpers import progress, corpus_files
-    files = corpus_files(txt_root, exclude_dirs)
+    Scans `root` RECURSIVELY, skipping anything excluded by `exclude_dirs` (a directory of that
+    name, or a file whose leading name token matches -- which is how the held-out splits stay
+    out of it). Documents are returned as {prompt:'', chosen:<text>, rejected:''} pseudo-pairs,
+    the shape the rest of the pipeline already passes around.
+
+    Returns (docs, n_files). This is the ONE place the corpus is held as text rather than
+    streamed, because a tokenizer cannot be built from tokens it has not yet defined."""
+    from helpers import progress, corpus_files, _pack
+    files = corpus_files(root, exclude_dirs)
     docs = []
-    for fp in progress(files, desc="[corpus] scanning *.txt", total=len(files)):
+    for fp in progress(files, desc="[corpus] scanning corpus", total=len(files)):
         try:
-            lines = open(fp, encoding="utf-8", errors="replace").read().splitlines()
-        except Exception:
+            docs.extend(_pack(fp, max_words, text_column))
+        except Exception:                                      # noqa: BLE001
             continue
-        buf, wc = [], 0
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            buf.append(line)
-            wc += len(line.split())
-            if wc >= max_words:
-                docs.append(" ".join(buf)); buf, wc = [], 0
-        if buf:
-            docs.append(" ".join(buf))
     return [{"prompt": "", "chosen": d, "rejected": ""} for d in docs], len(files)
 
 

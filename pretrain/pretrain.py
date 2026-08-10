@@ -11,7 +11,8 @@ shared LM loop (lm.train) is run with. run.py is only the command-line wrapper.
 State space diagnostics (memory horizon, selectivity, residual write ratio) are recorded every
 --ssm_stats_every steps and drawn in the second row of outputs/plots/pretrain/.
 
-The corpus is every *.txt under the pretraining corpus, scanned recursively minus
+The corpus is every file with a CORPUS_EXTENSIONS extension under the pretraining
+corpus (prose, markdown, source code, parquet), scanned recursively minus
 config.PRETRAIN["exclude_dirs"], packed into ~max_words-word documents that never cross a
 file boundary. Nothing outside the pretraining corpus is read.
 """
