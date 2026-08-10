@@ -56,7 +56,8 @@ def build(texts, bpe_path, log, plotdir=None, num_merges=8000, plot_every=200,
     if tok is not None and len(tok.merges) > num_merges:
         log(f"BPE: {bpe_path} has {len(tok.merges):,} merges, more than the requested "
             f"{num_merges:,}; reusing it as is (delete the file to train a smaller one, "
-            f"but note that every checkpoint and token cache is tied to this vocabulary)")
+            f"but note that every checkpoint is tied to this vocabulary, and the "
+            f"token cache moves to a new cache/bpe_<vocab>_<fingerprint>/)")
     elif tok is None or len(tok.merges) < num_merges:
         if tok is not None:
             log(f"BPE: extending {bpe_path} from {len(tok.merges):,} to {num_merges:,} merges")

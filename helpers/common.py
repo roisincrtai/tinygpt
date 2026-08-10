@@ -351,11 +351,15 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
         helpers.table("dataset", dsets.stats_rows(args.dataset, train_pairs, ev_pairs, tok,
                                                   source=config.INSTRUCT_DIR),
                       out=log)
-    # Pre-tokenise the preference pairs into cache/instruct/tokens/ -- ONLY for the stages
-    # that train on them, so a corpus stage never touches the instruction data.
+    # Pre-tokenise the preference pairs into cache/<tokenizer>/ -- ONLY for the stages that
+    # train on them, so a corpus stage never touches the instruction data.
+    #
+    # The cache is keyed by the directory the pairs CAME FROM, not by config.HH_DIR: --dataset
+    # now takes a path, and keying two different folders to one name would let a run be served
+    # the other folder's tokens whenever the two happened to agree on pair count.
     if pretokenize_pairs and train_pairs:
         try:
-            src = config.HH_DIR
+            src = dsets.resolve_root(getattr(args, "dataset", "hh"), args.data_dir)
             helpers.attach_pair_ids(train_pairs, src, tok, split="train", log=log)
             helpers.attach_pair_ids(ev_pairs, src, tok, split="val", log=log)
         except Exception as e:                                    # noqa: BLE001

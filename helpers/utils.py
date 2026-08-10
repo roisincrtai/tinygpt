@@ -871,19 +871,99 @@ def holdout_probe(policy, ref, enc, pairs, beta, gen=None, roll_temp=1.0, batch=
 #
 # Tokenising the corpus once per training STEP is pure waste: the same documents are encoded
 # thousands of times by the same tokenizer. Each source file is tokenised ONCE and stored
-# beside a mirror of the data tree,
+# under a mirror of its path, in a directory named for THE TOKENIZER THAT PRODUCED IT:
 #
-#     data/<stage>/<path>/<name>.txt  ->  cache/<stage>/tokens/<path>/<name>.txt.tok
+#     data/download/<corpus>/<path>/<name>.parquet
+#         ->  cache/bpe_<vocab>_<fingerprint>/data/download/<corpus>/.../<name>.parquet.<sig>.tokens
 #
-# so the cache has the same structure as the data directory and each entry is the source file
-# name with `.tok` appended. Format: one JSON header line, then the ids of every packed
-# document concatenated as little-endian uint32. The header's `sig` identifies the tokenizer
-# AND the packing, and `src_mtime`/`src_size` the source file, so a rebuilt vocabulary, a
-# changed `max_words` or an edited file all invalidate the entry -- a stale cache can never
-# silently train the wrong tokens.
+# THE TOKENIZER IS THE DIRECTORY, not a field inside the file, so two vocabularies coexist
+# instead of overwriting each other: retrain the BPE, try the new vocabulary, go back, and the
+# old tokens are still there. The fingerprint is the first 8 characters of GIT'S BLOB HASH of
+# bpe.json -- `git hash-object checkpoints/bpe/bpe.json` prints it -- so the directory names
+# the tokenizer AS IT IS NOW rather than merely its size: a rebuild to the same vocabulary size
+# lands somewhere else, which is the whole point, and the name can be checked against the file.
+# THE STAGE IS NOT IN THE PATH: tokens are a property of (file,
+# tokenizer, packing) and of nothing else, so a file tokenised for pretraining is reused by any
+# other stage that reads it rather than tokenised again from scratch.
+#
+# `<sig>` is a short hash of the packing (max_words, the parquet text column). It is in the
+# NAME rather than only in the header so that two settings do not evict each other's entries
+# turn by turn; the same signature is also stored inside and checked on read.
+#
+# Format: one JSON header line, then the ids of every packed document concatenated as
+# little-endian uint32. The header's `sig` identifies the tokenizer AND the packing, and
+# `src_mtime`/`src_size` the source file, so a rebuilt vocabulary, a changed `max_words` or an
+# edited file all invalidate the entry -- a stale cache can never silently train the wrong
+# tokens.
 # --------------------------------------------------------------------------- #
-def token_cache_root(stage):
-    return os.path.join(config.CACHE_DIR, stage, "tokens")
+_FINGERPRINTS = {}
+
+
+def blob_hash(data):
+    """GIT'S object hash of `data`: sha1(b"blob <size>\\0" + data).
+
+    Git's, deliberately, rather than a bare digest of the bytes. It costs one extra header to
+    compute and buys a fingerprint anyone can CHECK against the tool already on their machine:
+
+        git hash-object checkpoints/bpe/bpe.json
+
+    prints the full 40-character digest whose first characters name the cache directory. A
+    fingerprint you cannot independently reproduce is one you end up trusting; this one can be
+    verified in a second, which matters when the question is "did this cache come from the
+    tokenizer I am holding"."""
+    import hashlib
+    h = hashlib.sha1()
+    h.update(b"blob %d\0" % len(data))
+    h.update(data)
+    return h.hexdigest()
+
+
+def tokenizer_fingerprint(path=None, tok=None, n=8):
+    """`n` characters of the git blob hash of the tokenizer file -- bpe.json AS IT IS NOW.
+
+    Abbreviated the way git abbreviates a commit, and for the same reason: the full digest is
+    what makes it unique, the first few characters are what makes it usable in a name. Eight
+    hex characters is 4.3 billion values against the handful of tokenizers a project ever has,
+    so a collision is not a practical concern; git itself defaults to seven.
+
+    The FILE is hashed, not anything derived from it, so any change at all -- different merges,
+    a reordered vocabulary, a hand edit -- lands the cache somewhere else. A vocabulary rebuilt
+    to the same size is a different tokenizer and must not be able to read the previous one's
+    tokens.
+
+    Memoised on (path, mtime, size): the fingerprint is asked for once per cached file, and
+    re-reading a 50k-merge json tens of thousands of times would cost more than the tokenising
+    it exists to avoid. Falls back to hashing the tokenizer's own vocabulary and merges when
+    the file is not on disk (an in-memory tokenizer, or a run before it is written), so the
+    cache still separates correctly instead of silently sharing one directory."""
+    path = path or config.BPE_PATH
+    try:
+        st = os.stat(path)
+        key = (path, int(st.st_mtime), st.st_size)
+        if key not in _FINGERPRINTS:
+            with open(path, "rb") as f:
+                _FINGERPRINTS[key] = blob_hash(f.read())
+        return _FINGERPRINTS[key][:n]
+    except OSError:
+        if tok is None:
+            return "nofile00"[:n].ljust(n, "0")
+        merges = list(getattr(tok, "merges", []) or [])
+        return blob_hash(repr((len(tok), merges)).encode("utf-8"))[:n]
+
+
+def tokenizer_tag(tok, path=None):
+    """The cache directory name for a tokenizer: bpe_<vocabulary size>_<fingerprint>.
+
+    All three parts earn their place. `bpe` says what kind of tokenizer it is, the vocabulary
+    size is the number you actually think in and lets you recognise a directory at a glance,
+    and the fingerprint is what makes the name CORRECT rather than merely descriptive: two
+    vocabularies of the same size are different tokenizers, and only the digest of the file
+    can tell them apart."""
+    return f"bpe_{len(tok)}_{tokenizer_fingerprint(path, tok)}"
+
+
+def token_cache_root(tok, path=None):
+    return os.path.join(config.CACHE_DIR, tokenizer_tag(tok, path))
 
 
 def _tok_signature(tok, max_words, text_column=""):
@@ -895,8 +975,29 @@ def _tok_signature(tok, max_words, text_column=""):
             f"|col={text_column}")
 
 
-def _tok_path(stage, root, src):
-    return os.path.join(token_cache_root(stage), os.path.relpath(src, root) + ".tok")
+def _sig_tag(sig):
+    """Eight hex characters of the signature, for the file name."""
+    import hashlib
+    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:8]
+
+
+def _mirror(src):
+    """A source path as a path RELATIVE to the cache root, mirroring it from the project root.
+
+    The full path is mirrored rather than a path relative to the corpus directory, because the
+    stage no longer separates entries: two corpora each holding part_0000/batch_0.json would
+    otherwise land on the same cache file and quietly serve each other's tokens. A source from
+    outside the project keeps its absolute path under _external/ for the same reason."""
+    src = os.path.abspath(src)
+    rel = os.path.relpath(src, config.ROOT)
+    if rel != os.pardir and not rel.startswith(os.pardir + os.sep):
+        return rel
+    drive, tail = os.path.splitdrive(src)
+    return os.path.join("_external", drive.replace(":", ""), tail.lstrip(os.sep))
+
+
+def _tok_path(tok, src, sig):
+    return os.path.join(token_cache_root(tok), f"{_mirror(src)}.{_sig_tag(sig)}.tokens")
 
 
 def _parquet_lines(path, column):
@@ -1007,8 +1108,10 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
     """Pre-tokenised documents for `stage` from every *.txt under `root`.
 
     Returns (docs, n_files, n_tokens). Files whose cache entry is present and current are
-    read from cache/<stage>/tokens/; the rest are tokenised now and written there, so the
-    first run pays the cost once and every later run starts immediately."""
+    read from cache/<tokenizer>/; the rest are tokenised now and written there, so the first
+    run pays the cost once and every later run starts immediately. `stage` labels the log line
+    only -- the cache is keyed by the file and the tokenizer, so whichever stage reads a file
+    first pays for it and the others do not."""
     files = corpus_files(root, exclude_dirs, extensions)
     if not files:
         return [], 0, 0
@@ -1017,7 +1120,7 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
     docs, n_tokens, n_hit, n_built = [], 0, 0, 0
     for fp in progress(files, desc=f"[{stage}] tokenizing corpus", total=len(files)):
         st = os.stat(fp)
-        cp = _tok_path(stage, root, fp)
+        cp = _tok_path(tok, fp, sig)
         ids = _read(cp, sig, st)
         if ids is None:
             # the leading space matches Encoder's convention for a response, so cached and
@@ -1033,7 +1136,7 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
                 docs.append({"prompt": "", "ids": d, "rejected": ""})
                 n_tokens += len(d)
     log(f"[{stage}] token cache: {n_hit:,} files reused, {n_built:,} tokenised now "
-        f"-> {token_cache_root(stage)}")
+        f"-> {token_cache_root(tok)}")
     return docs, len(files), n_tokens
 
 
@@ -1042,15 +1145,18 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
 # --------------------------------------------------------------------------- #
 def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print):
     """Attach `prompt_ids` / `chosen_ids` / `rejected_ids` to every preference pair, IN
-    PLACE, reading them from cache/<stage>/tokens/<src>.<split>.tok when it is current and
-    writing it when it is not. The reward and DPO trainers then never tokenise inside their
-    step loops. Returns the number of tokens cached."""
+    PLACE, reading them from cache/<tokenizer>/<src>.<split>.<sig>.tokens when it is current
+    and writing it when it is not. The reward and DPO trainers then never tokenise inside
+    their step loops. Returns the number of tokens cached.
+
+    The split and the pair count are part of the signature, so the train half can never be
+    served the validation half's ids, and a corpus that grew invalidates rather than silently
+    reuses the prefix it happens to agree with."""
     if not pairs:
         return 0
     sig = f"{_tok_signature(tok, 0)}|pairs={len(pairs)}|split={split}"
     st = os.stat(src)
-    name = os.path.basename(src) + (f".{split}" if split else "") + ".tok"
-    cp = os.path.join(token_cache_root(stage), name)
+    cp = _tok_path(tok, src + (f".{split}" if split else ""), sig)
     flat = _read(cp, sig, st)                     # one "document" per field, in pair order
     if flat is not None and len(flat) == 3 * len(pairs):
         for i, p in enumerate(pairs):
