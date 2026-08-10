@@ -1151,6 +1151,44 @@ def _pack(path, max_words, text_column="text"):
 # helpers/token_store.py for the corpus, attach_pair_ids below for the preference pairs.
 # Nothing in this project writes a data file by building it in memory first.
 
+
+def corpus_bytes(files, text_column="text"):
+    """Total UNCOMPRESSED bytes of `files` -- the denominator a progress bar needs.
+
+    A parquet file's size on disk is its compressed size, which for prose is two or three
+    times smaller than the text it holds; using it would drive the bar past 100%. Parquet
+    records the uncompressed size of every row group in its FOOTER, so the true figure costs
+    a metadata read and no data. Anything else is its size on disk, which is already the
+    number of bytes that will be read.
+
+    Best-effort: a file that cannot be measured contributes its on-disk size, and a total that
+    is slightly wrong is a bar that is slightly wrong, never a failure."""
+    total = 0
+    for fp in files:
+        try:
+            if os.path.splitext(fp)[1].lower() == ".parquet":
+                import pyarrow.parquet as pq
+                md = pq.ParquetFile(fp).metadata
+                total += sum(md.row_group(i).total_byte_size
+                             for i in range(md.num_row_groups))
+            else:
+                total += os.path.getsize(fp)
+        except Exception:                                      # noqa: BLE001
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
+
+
+def _split_token(name):
+    """The leading name token of a file: `validation-00000-of-00001.parquet` -> "validation",
+    `test_0003.txt` -> "test", `doc.0.parquet` -> "doc"."""
+    stem = os.path.splitext(name)[0]
+    for sep in ("-", "_", "."):
+        stem = stem.split(sep)[0]
+    return stem.lower()
+
 def corpus_files(root, exclude_dirs=(), extensions=None):
     """Every corpus file under `root`, recursively: any file whose extension is in
     `extensions` (config.CORPUS_EXTENSIONS by default -- prose, markdown AND source code),
