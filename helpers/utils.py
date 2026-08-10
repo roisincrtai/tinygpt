@@ -1087,18 +1087,35 @@ def _read(path, sig, st):
     return out
 
 
+def _split_token(name):
+    """The leading name token of a file: `validation-00000-of-00001.parquet` -> "validation",
+    `test_0003.txt` -> "test", `doc.0.parquet` -> "doc"."""
+    stem = os.path.splitext(name)[0]
+    for sep in ("-", "_", "."):
+        stem = stem.split(sep)[0]
+    return stem.lower()
+
+
 def corpus_files(root, exclude_dirs=(), extensions=None):
     """Every corpus file under `root`, recursively: any file whose extension is in
     `extensions` (config.CORPUS_EXTENSIONS by default -- prose, markdown AND source code),
-    skipping anything under a directory named in `exclude_dirs`. Sorted, so a run is
-    reproducible."""
+    skipping anything excluded by `exclude_dirs`. Sorted, so a run is reproducible.
+
+    An entry in `exclude_dirs` excludes a DIRECTORY of that name and also any FILE whose
+    leading name token matches it. Both, because a corpus keeps its held-out split in whichever
+    of the two shapes its format favours: thirty thousand text files are laid out as valid/ and
+    test/ subdirectories, while the same corpus as parquet is a handful of files named
+    validation-00000-of-00001.parquet in one flat directory -- the layout the Hugging Face Hub
+    infers splits from. A directories-only rule silently pretrains on the test split the moment
+    a corpus is converted, and a model evaluated on text it was trained on reports a perplexity
+    that means nothing."""
     exts = {("." + e.lower().lstrip(".")) for e in (extensions or config.CORPUS_EXTENSIONS)}
-    excl = set(exclude_dirs or ())
+    excl = {d.lower() for d in (exclude_dirs or ())}
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in excl]
+        dirnames[:] = [d for d in dirnames if d.lower() not in excl]
         for fn in filenames:
-            if os.path.splitext(fn)[1].lower() in exts:
+            if os.path.splitext(fn)[1].lower() in exts and _split_token(fn) not in excl:
                 out.append(os.path.join(dirpath, fn))
     return sorted(out)
 

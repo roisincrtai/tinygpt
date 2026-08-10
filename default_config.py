@@ -19,8 +19,10 @@ live under the configured directory, and the instruction data is whatever prefer
 instruction tree holds. NOTHING HERE DOWNLOADS; see DATASETS below and tools/download_data.py.
 
     data/download/zetagpt-tiny_pretrain-corpus_wikitext103/
-                                pretraining corpus for Tiny: train/, valid/, test/, the first
-                                split into part_NNNN/ of 500 files each
+                                pretraining corpus for Tiny: <split>-<NNNNN>-of-<NNNNN>.parquet,
+                                one row per article in a `text` column. The held-out shards are
+                                excluded by PRETRAIN["exclude_dirs"], which matches file names
+                                as well as directories
     data/download/zetagpt-small_pretrain-corpus_fineweb-edu_10GB/
                                 pretraining corpus for S, ~2B tokens. Every file under it
                                 (recursive) whose extension is in CORPUS_EXTENSIONS, minus
@@ -347,7 +349,13 @@ PRETRAIN = dict(
     # would train on the held-out splits -- silently, since more data simply looks like more
     # data. The names are harmless for a corpus that has no such directories, which is why they
     # are excluded by default rather than set per corpus.
-    exclude_dirs=["test", "valid"],
+    # Held-out splits, excluded from pretraining. Each entry skips a DIRECTORY of that
+    # name AND any file whose leading name token matches it, so the same corpus is
+    # handled whether its splits are valid/ and test/ subdirectories or flat parquet
+    # shards named validation-00000-of-00001.parquet. "validation" is listed beside
+    # "valid" because the two layouts spell it differently and only one of them is the
+    # Hugging Face convention.
+    exclude_dirs=["test", "valid", "validation"],
 )
 
 # SFT is DOMAIN-ADAPTIVE fine-tuning: the same length-normalized LM objective as pretraining,
