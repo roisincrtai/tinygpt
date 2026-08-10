@@ -192,16 +192,73 @@ class ZetaGPT(nn.Module):
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
         self.tok.weight = self.head.weight                    # weight tying (wte <-> lm_head)
         self.apply(self._init)
+        self._resize_note = ""
         # nanoGPT scaled init for the residual projections: std = 0.02 / sqrt(2*n_layer).
         # The state space module's output projection writes to the same residual stream, so it
         # is scaled too -- otherwise a third branch per block inflates the stream's variance.
         for blk in self.blocks:
             nn.init.normal_(blk.attn.proj.weight, mean=0.0, std=0.02 / math.sqrt(2 * n_layer))
             nn.init.normal_(blk.mlp[2].weight, mean=0.0, std=0.02 / math.sqrt(2 * n_layer))
+
             if blk.ssm is not None:
                 nn.init.normal_(blk.ssm.out_proj.weight, mean=0.0,
                                 std=0.02 / math.sqrt(2 * n_layer))
                 nn.init.constant_(blk.ssm.a_proj.bias, -2.0)   # _init overwrote the bias
+
+    def resize_token_embeddings(self, new_vocab_size, seed=0, allow_shrink=False):
+        """Grow the vocabulary to `new_vocab_size`, KEEPING every existing row.
+
+        This is the model half of registering a special token. The tokenizer appends the new
+        id after everything already learned, so row i of the embedding still means token i for
+        every i that existed before; the matrix simply needs more rows. Fine-tuning a
+        pretrained checkpoint on a corpus that uses <xyz> therefore costs one new embedding
+        row, not a retrained model.
+
+        NEW ROWS ARE INITIALISED AT THE MEAN of the existing embeddings plus a little noise,
+        rather than at zero or at N(0, 0.02). The mean is where a token of no particular
+        meaning belongs: it starts out maximally unopinionated instead of being a large
+        outlier the first gradients have to drag back into the cloud. The noise breaks the
+        symmetry between several tokens registered at once, and is scaled to the spread of the
+        rows already there, so it does not depend on the width of the model. HuggingFace's
+        mean_resizing does the same thing for the same reason.
+
+        Weight tying is re-established explicitly: the embedding and the output head are ONE
+        parameter here, and a resize that rebuilt them separately would silently untie them --
+        the model would still run, and would train two copies of a matrix the architecture
+        says is one.
+        """
+        old = self.tok.weight.shape[0]
+        if new_vocab_size == old:
+            return self
+        if new_vocab_size < old and not allow_shrink:
+            # allow_shrink is for ONE caller: sizing a freshly built model down to match a
+            # checkpoint before loading it. Nothing is lost there because nothing is trained
+            # yet. Shrinking a trained model is refused, because it can only mean the
+            # vocabulary was rebuilt.
+            raise ValueError(
+                f"refusing to shrink the vocabulary {old} -> {new_vocab_size}: dropping rows "
+                f"would change what the surviving ids mean only if the tokenizer also "
+                f"changed, in which case this checkpoint belongs to a different vocabulary.")
+        w = self.tok.weight.data
+        keep = min(old, new_vocab_size)
+        emb = nn.Embedding(new_vocab_size, w.shape[1])
+        emb.weight.data[:keep] = w[:keep].cpu()
+        if new_vocab_size > old:
+            mu, sd = w.mean(0, keepdim=True), w.std().item()
+            g = torch.Generator(device="cpu").manual_seed(seed)
+            emb.weight.data[old:] = (
+                mu.cpu().repeat(new_vocab_size - old, 1)
+                + 0.02 * sd * torch.randn(new_vocab_size - old, w.shape[1], generator=g))
+        emb = emb.to(w.device, w.dtype)
+        head = nn.Linear(w.shape[1], new_vocab_size, bias=False).to(w.device, w.dtype)
+        self.tok, self.head = emb, head
+        self.head.weight = self.tok.weight                    # RE-TIE; see the docstring
+        self.cfg["vocab_size"] = new_vocab_size
+        self._resize_note = (
+            f"vocabulary {old} -> {new_vocab_size}: {new_vocab_size - old} row(s) added at "
+            f"the embedding mean" if new_vocab_size > old else
+            f"vocabulary {old} -> {new_vocab_size}")
+        return self
 
     @staticmethod
     def _init(m):

@@ -414,6 +414,40 @@ def load_stage_model(ctx, stage, train_mode=False):
         m = build_model(ctx["tok"], ctx["device"], model_cfg=translate_cfg(saved))
     else:
         m = ctx["new_model"]()
-    m.load_state_dict(ck["model"])
+    load_growing(m, ck["model"], log=ctx.get("log", print))
     m.train() if train_mode else m.eval()
     return m
+
+
+def load_growing(model, state, log=print):
+    """Load `state` into `model`, GROWING the vocabulary if tokens were registered since.
+
+    Registering a special token appends an id, so a checkpoint trained before it is correct in
+    every row it has and simply short by however many were added. Loading it is then a matter
+    of receiving the old rows and initialising the new ones -- which is what makes "register a
+    token, then fine-tune" a small operation rather than a retrain.
+
+    The state dict is loaded at ITS OWN size and the model grown afterwards, rather than the
+    checkpoint being padded: the new rows are then initialised by resize_token_embeddings,
+    in one place, instead of by whatever this function happened to choose.
+
+    A checkpoint LARGER than the current vocabulary is refused. That is not a registration --
+    it means the tokenizer was rebuilt, so the ids in the checkpoint mean different words, and
+    loading it would produce a model that runs and talks nonsense."""
+    want = model.tok.weight.shape[0]
+    have = state["tok.weight"].shape[0] if "tok.weight" in state else want
+    if have == want:
+        model.load_state_dict(state)
+        return model
+    if have > want:
+        raise SystemExit(
+            f"[model] checkpoint has a vocabulary of {have:,} but the tokenizer now has "
+            f"{want:,}.\n"
+            f"        Tokens can be REGISTERED (the vocabulary grows and old ids keep their "
+            f"meaning) but not removed, so this checkpoint was trained against a DIFFERENT "
+            f"vocabulary. Retrain, or restore the tokenizer it was built with.")
+    model.resize_token_embeddings(have, allow_shrink=True)   # fresh model, nothing lost
+    model.load_state_dict(state)
+    model.resize_token_embeddings(want)          # then grow, initialising only the new rows
+    log(f"[model] {model._resize_note}; the checkpoint's {have:,} rows are unchanged")
+    return model
