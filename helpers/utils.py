@@ -1195,12 +1195,25 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
             log(f"[{stage}]               {path}")
             return st, len(files)
 
+    # A tokenizer without encode_ordinary (the gpt2 student's, say) falls back to __call__;
+    # the distinction only exists for tokenizers that HAVE registered specials to protect.
+    ordinary = (tok.encode_ordinary if hasattr(tok, "encode_ordinary")
+                else lambda t: tok(t, add_special_tokens=False)["input_ids"])
+
     def documents():
         for fp in progress(files, desc=f"[{stage}] tokenizing corpus", total=len(files)):
             for d in _pack(fp, max_words, text_column):
                 # the leading space matches Encoder's convention for a response, so a document
                 # from the stream and the same document encoded on the fly are the same ids
-                ids = tok(" " + d, add_special_tokens=False)["input_ids"]
+                # encode_ordinary, NOT encode: a pretraining corpus is scraped text, and a
+                # document that merely MENTIONS <|endoftext|> -- any page discussing GPT-2
+                # does -- would otherwise contribute a real end-of-text in its middle. In a
+                # packed stream that is worse than a stray token: it forges a document
+                # boundary, and contiguous sampling then trains across a join that the corpus
+                # does not contain. The stream inserts its own separators; the text does not
+                # get a vote. Curated data (the SFT and preference sets, where a registered
+                # token is deliberately written) still goes through encode.
+                ids = ordinary(" " + d)
                 if ids:
                     yield ids
 
