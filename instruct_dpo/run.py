@@ -1,10 +1,10 @@
 """
-instruct_dpo/run.py -- stage 8 entry point: Direct Preference Optimization.
+instruct_dpo/run.py -- stage 9 entry point: Direct Preference Optimization.
 
 The policy starts from the SFT model and is trained against the frozen SFT reference.
 
     python -m instruct_dpo.run [--dpo_steps N --dpo_lr LR --beta B]
-    ./stage8_instruct_dpo.sh
+    ./stage9_instruct_dpo.sh
 """
 import copy
 

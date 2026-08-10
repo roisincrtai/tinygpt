@@ -1,10 +1,10 @@
 """
-sft/run.py -- stage 4 entry point: domain-adaptive fine-tuning on the fine-tuning data.
+sft/run.py -- stage 5 entry point: domain-adaptive fine-tuning on the fine-tuning data.
 
 SFT MUST be based on the pretrained model: without a pretrain checkpoint this exits.
 
     python -m sft.run [--sft_steps N --sft_lr LR]
-    ./stage4_sft.sh
+    ./stage5_sft.sh
 """
 from helpers import common
 

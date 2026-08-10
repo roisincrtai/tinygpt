@@ -8,17 +8,17 @@
 #
 #   command-line flag > environment variable > config_user.yaml > config.sh > default_config.py
 #
-#   ./stage3_pretrain.sh                        # this file's settings
-#   PRETRAIN_STEPS=20000 ./stage3_pretrain.sh   # override one knob for one run
-#   GPU=cpu ./stage4_sft.sh                     # override a shared knob for one run
-#   COT_INIT=sft ./stage7_cot_aha_moment.sh     # start the CoT stage from the SFT model
+#   ./stage4_pretrain.sh                        # this file's settings
+#   PRETRAIN_STEPS=20000 ./stage4_pretrain.sh   # override one knob for one run
+#   GPU=cpu ./stage5_sft.sh                     # override a shared knob for one run
+#   COT_INIT=sft ./stage8_cot_aha_moment.sh     # start the CoT stage from the SFT model
 #
 # YOUR OWN SETTINGS GO IN config_user.yaml, not here. `python config_wizard.py` writes it;
 # this file sources it at the end, through export_yaml.sh, so its values override the defaults
 # below without editing a tracked file. It is git-ignored. Delete it and the defaults here
 # stand. A variable already set in the environment is never overwritten by the YAML.
 #
-# Each stage script also forwards its own arguments, so `./stage8_instruct_dpo.sh --beta 0.05`
+# Each stage script also forwards its own arguments, so `./stage9_instruct_dpo.sh --beta 0.05`
 # works too.
 #
 # Layout: interpreter, the shared knobs every stage reads, one section per stage -- all values
@@ -27,7 +27,7 @@
 # variable of its own.
 
 # Which variables came from the ENVIRONMENT, recorded before a single default is applied:
-# export_yaml.sh must not overwrite these, or `GPU=cpu ./stage3_pretrain.sh` would lose to the
+# export_yaml.sh must not overwrite these, or `GPU=cpu ./stage4_pretrain.sh` would lose to the
 # YAML file. `${!v+x}` is set for an exported-but-empty variable too, which is deliberate:
 # GPU= means "explicitly nothing", not "unset".
 # The complete list, defined once: it drives the environment capture below and the summary
@@ -103,15 +103,15 @@ MAX_LEN="${MAX_LEN:-}"
 # refusing. NOTE that Tiny and S therefore differ in corpus as well as depth.
 PRETRAIN_DIR="${PRETRAIN_DIR:-}"
 
-# INSTRUCTION-TUNING TREE, shared by stages 4, 5, 6, 8 and 9. Blank takes
+# INSTRUCTION-TUNING TREE, shared by stages 5, 6, 7, 9 and 10. Blank takes
 # data/download/zetagpt-rlhf-instruction_following, whose layout is flat: alpaca_gpt4/ and
 # rlhf_hh/ at its root. Moving this root moves everything derived from it -- the fine-tuning
 # data, the preferences and the prompt bank -- together, so no two stages can read
 # different datasets.
 INSTRUCT_DIR="${INSTRUCT_DIR:-}"
 
-# FINE-TUNING DATA for stage 4. Blank = <INSTRUCT_DIR>/rlhf_hh, the same records stages 5, 6
-# and 8 read: stage 4 trains on the CHOSEN response of each pair, conditioned on its prompt.
+# FINE-TUNING DATA for stage 5. Blank = <INSTRUCT_DIR>/rlhf_hh, the same records stages 6, 7
+# and 9 read: stage 5 trains on the CHOSEN response of each pair, conditioned on its prompt.
 # Point this elsewhere only to fine-tune on something other than the preference data.
 SFT_DIR="${SFT_DIR:-}"
 
@@ -127,12 +127,12 @@ CKPT_EVERY="${CKPT_EVERY:-}"        # checkpoint every N steps
 # CONTROL: the module is removed and rotary positions are applied inside attention instead.
 # The choice is recorded in the checkpoint and appears in every filename the run writes, so an
 # ablation never overwrites the run it is compared with.
-#   PE=rope ./stage3_pretrain.sh
+#   PE=rope ./stage4_pretrain.sh
 PE="${PE:-}"                        # ssm | rope
 
 # State space diagnostics -- memory horizon, selectivity, residual write ratio and the rest,
 # recorded PER LAYER for one step every N and drawn in the pretraining dynamics figure.
-# 0 turns them off. Read by stage 3 (pretraining).
+# 0 turns them off. Read by stage 4 (pretraining).
 SSM_STATS_EVERY="${SSM_STATS_EVERY:-}"
 NO_RESUME="${NO_RESUME:-}"          # set to 1 to ignore checkpoints and start from scratch
 
@@ -149,13 +149,16 @@ P_GRID="${P_GRID:-}"                # end-of-stage evaluation: comma-separated p
 
 COMMON_FLAGS="${COMMON_FLAGS:-}"
 # =========================================================================== #
+# stage 3 -- tokenise the corpora (no knobs of its own; it reads the pretraining settings
+#            below and writes cache/tokens/bpe_<vocab>_<fingerprint>/*.tokens)
+
 # stage 2 -- byte-level BPE tokenizer
 # =========================================================================== #
 BPE_MERGES="${BPE_MERGES:-}"        # merge budget; raising it EXTENDS an existing tokenizer
 BPE_FLAGS="${BPE_FLAGS:-}"
 
 # =========================================================================== #
-# stage 3 -- pretraining
+# stage 4 -- pretraining
 # =========================================================================== #
 PRETRAIN_STEPS="${PRETRAIN_STEPS:-}"
 PRETRAIN_LR="${PRETRAIN_LR:-}"
@@ -203,28 +206,28 @@ CONTEXT_WINDOW="${CONTEXT_WINDOW:-}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 
 # =========================================================================== #
-# stage 4 -- supervised fine-tuning
+# stage 5 -- supervised fine-tuning
 # =========================================================================== #
 SFT_STEPS="${SFT_STEPS:-}"
 SFT_LR="${SFT_LR:-}"
 SFT_FLAGS="${SFT_FLAGS:-}"
 
 # =========================================================================== #
-# stage 5 -- reward model (sigmoid + BCE)
+# stage 6 -- reward model (sigmoid + BCE)
 # =========================================================================== #
 REWARD_STEPS="${REWARD_STEPS:-}"
 REWARD_LR="${REWARD_LR:-}"
 REWARD_FLAGS="${REWARD_FLAGS:-}"
 
 # =========================================================================== #
-# stage 6 -- RLHF by PPO
+# stage 7 -- RLHF by PPO
 # =========================================================================== #
 RLHF_STEPS="${RLHF_STEPS:-}"
 RLHF_LR="${RLHF_LR:-}"
 RLHF_FLAGS="${RLHF_FLAGS:-}"
 
 # =========================================================================== #
-# stage 7 -- chain of thought by GRPO (the aha moment)
+# stage 8 -- chain of thought by GRPO (the aha moment)
 # =========================================================================== #
 COT_STEPS="${COT_STEPS:-}"
 COT_LR="${COT_LR:-}"
@@ -237,14 +240,15 @@ COT_GROUP="${COT_GROUP:-}"          # completions sampled per problem (GRPO's ba
 COT_FLAGS="${COT_FLAGS:-}"
 
 # =========================================================================== #
-# stage 8 -- direct preference optimisation
+# stage 9 -- direct preference optimisation
 # =========================================================================== #
 DPO_STEPS="${DPO_STEPS:-}"
 DPO_LR="${DPO_LR:-}"
 DPO_FLAGS="${DPO_FLAGS:-}"
 
 # =========================================================================== #
-# stage 9 -- distillation into gpt2-small
+# distillation into gpt2-small -- OPTIONAL, not a numbered stage:
+#     python -m distill.run
 # =========================================================================== #
 DISTILL_STEPS="${DISTILL_STEPS:-}"
 DISTILL_LR="${DISTILL_LR:-}"

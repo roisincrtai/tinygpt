@@ -7,7 +7,7 @@ helpers -- everything the stages share, and nothing any single stage owns.
                              and the on-disk token cache
     helpers.common           the setup every stage runs: arguments, tokenizer, model factory,
                              monitor and generation previews
-    helpers.lm               the length-normalised language-model training loop (stages 2, 3)
+    helpers.lm               the length-normalised language-model training loop (stages 2, 4)
     helpers.dataset_helpers     every preference and instruction dataset behind one interface
     helpers.visualization    every figure, drawn as PDF under outputs/plots/<stage>/
 

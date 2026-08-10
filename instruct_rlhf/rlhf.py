@@ -1,15 +1,15 @@
 """
-rlhf.py -- stage 6's logic: RLHF instruction tuning.
+rlhf.py -- stage 7's logic: RLHF instruction tuning.
 
 Assembles the three models the recipe needs and hands them to the optimiser in ppo.py:
 
     policy     a copy of the SFT model -- what is trained
     reference  the SFT model, frozen -- what the KL penalty holds the policy near
-    reward     the stage-4 reward model, frozen -- what the policy maximises
+    reward     the stage-5 reward model, frozen -- what the policy maximises
 
 The algorithm itself (rollout, per-token KL-shaped reward, GAE, clipped surrogate) lives in
 ppo.py; this module owns the stage: which checkpoints are loaded, which prompts the previews
-use, and what the stage is called on disk. stage6_instruct_tuning_rlhf.sh is only the
+use, and what the stage is called on disk. stage7_instruct_tuning_rlhf.sh is only the
 command-line wrapper.
 
     run(ctx) -> the aligned policy
@@ -49,7 +49,7 @@ def run(ctx):
     """PPO-train a copy of the SFT model against the frozen reward model, preview, return."""
     from helpers import common
     args, log = ctx["args"], ctx["log"]
-    log("=== RLHF (PPO from SFT, reward = stage-4 reward model, KL to frozen SFT) ===")
+    log("=== RLHF (PPO from SFT, reward = stage-5 reward model, KL to frozen SFT) ===")
     sft_model = common.load_stage_model(ctx, "sft")
     ref = common.frozen(sft_model)                    # the KL anchor
     rm = rlhf_reward.load(ctx)                        # frozen reward model

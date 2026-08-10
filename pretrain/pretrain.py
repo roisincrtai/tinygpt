@@ -1,5 +1,5 @@
 """
-pretrain.py -- stage 3's logic: language-model pretraining.
+pretrain.py -- stage 4's logic: language-model pretraining.
 
 Owns everything specific to pretraining and nothing else: which corpus is read, how it is
 reported, which prompts the generation previews use, and which budget and learning rate the
@@ -25,7 +25,7 @@ STAGE = "pretrain"
 
 
 def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0):
-    """Pre-tokenised pretraining documents (cached under cache/<tokenizer>_<vocab>_<fingerprint>/), reported
+    """Pre-tokenised pretraining documents (cached under cache/tokens/bpe_<vocab>_<fingerprint>/), reported
     as a table: the file count and the total token count the scan must announce.
 
     `corpus_dir` is passed in rather than read from the configuration, because it depends on
@@ -59,7 +59,9 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0):
             ("dataset", os.path.basename(corpus_dir.rstrip("/")) or corpus_dir),
             ("directory", corpus_dir),
             ("excluded subdirs", ", ".join(config.PRETRAIN["exclude_dirs"]) or "(none)"),
-            ("token cache", helpers.token_cache_root(tok)),
+            ("token stream", corpus.path),
+            ("stream size", f"{corpus.nbytes / 1048576:.1f} MB {corpus.dtype}, "
+                            f"memory-mapped (not loaded)"),
             ("corpus files", helpers.count(n_files)),
             ("documents", helpers.count(len(corpus))),
             ("words per document", f"~{config.PRETRAIN['max_words']}"),

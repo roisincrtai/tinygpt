@@ -1,8 +1,8 @@
 """
-pretrain/run.py -- stage 3 entry point: language-model pretraining.
+pretrain/run.py -- stage 4 entry point: language-model pretraining.
 
     python -m pretrain.run [--pretrain_steps N --pretrain_lr LR]
-    ./stage3_pretrain.sh
+    ./stage4_pretrain.sh
 """
 from helpers import common
 

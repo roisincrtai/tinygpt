@@ -1,11 +1,11 @@
 """
-ppo.py -- PPO for RLHF instruction tuning (stage 6), the standard InstructGPT-style recipe
+ppo.py -- PPO for RLHF instruction tuning (stage 7), the standard InstructGPT-style recipe
 scaled down to ZetaGPT.
 
     THE POLICY STARTS FROM THE SFT MODEL. Each step:
       1. sample a batch of prompts from the preference data
       2. ROLLOUT: the policy autoregressively samples a response per prompt
-      3. score each (prompt + response) with the FROZEN stage-4 reward model (scalar)
+      3. score each (prompt + response) with the FROZEN stage-5 reward model (scalar)
       4. per-token reward  r_t = -kl_coef * ( log pi(y_t|.) - log pi_sft(y_t|.) ),
          with the reward-model score added at the LAST response token -- the KL term keeps
          the policy near the SFT reference exactly as DPO's beta term does

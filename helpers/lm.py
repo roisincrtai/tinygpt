@@ -73,7 +73,26 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
     # truncated at the resume point, so the appended records extend a strictly increasing
     # sequence and the figure stays continuous across a restart
     hist = load_hist(ckdir, stage, upto=start) if args.resume else []
-    Ntr = len(docs)
+
+    # TWO CORPUS SHAPES, ONE LOOP. A packed TokenStream is memory-mapped and sampled by
+    # offset: no padding, no prompt mask, every position a target. A list of records is
+    # encoded per batch as before, which is what the prompt/response distinction of the SFT
+    # corpus needs. The difference is confined to this closure, so the objective, the
+    # resume rule and the diagnostics below cannot drift between the two.
+    if hasattr(docs, "batch") and hasattr(docs, "n_tokens"):
+        # args.max_len is the model's context window by the time setup() is done with it, and
+        # batch() returns seq_len + 1 tokens so the shift produces seq_len targets. Asking for
+        # max_len - 1 therefore feeds the model EXACTLY its context window, never one over it.
+        T = max(int(args.max_len) - 1, 1)
+        log(f"{stage}: packed stream, {docs.n_tokens:,} tokens, {T + 1} tokens/example "
+            f"-> {args.batch * T:,} target tokens per step")
+        def sample(batch, gen):
+            return docs.batch(batch, T, generator=gen, device=enc.device)
+    else:
+        Ntr = len(docs)
+        def sample(batch, gen):
+            idx = torch.randint(0, Ntr, (batch,), generator=gen).tolist()
+            return enc.encode([docs[i] for i in idx], "chosen")
     # initial/total in ABSOLUTE steps: a resumed stage must read 30499/40000, not 499/10000.
     model.train()
     bar = progress(range(start, steps), desc=f"[{stage}]",
@@ -85,8 +104,7 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         want_ssm = bool(ssm_stats_every) and (step % ssm_stats_every == 0)
         if want_ssm:
             collect_stats(model, True)
-        idx = torch.randint(0, Ntr, (args.batch,), generator=g).tolist()
-        ids, attn, rmask = enc.encode([docs[i] for i in idx], "chosen")
+        ids, attn, rmask = sample(args.batch, g)
         logits = model(input_ids=ids, attention_mask=attn).logits
         logp = F.log_softmax(logits, -1)
         lp = logp[:, :-1].gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)

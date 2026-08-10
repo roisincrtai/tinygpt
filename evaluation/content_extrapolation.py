@@ -260,7 +260,7 @@ def find_checkpoint(given):
                        + glob.glob(os.path.join(d, "checkpoint_*.pt"))
                        + glob.glob(os.path.join(d, "last.pt"))), key=os.path.getmtime)
     if not found:
-        raise SystemExit(f"no pretrain checkpoint under {d}/ -- run stage 3 first")
+        raise SystemExit(f"no pretrain checkpoint under {d}/ -- run stage 4 first")
     return found[-1]
 
 

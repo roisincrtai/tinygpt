@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# stage3_pretrain.sh -- stage 3: LM pretraining.
+# stage4_pretrain.sh -- stage 4: LM pretraining.
 #
 # Knobs live in config.sh (and ultimately default_config.py); extra arguments are forwarded:
-#   ./stage3_pretrain.sh --help
+#   ./stage4_pretrain.sh --help
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh          # which reads config_user.yaml over its defaults
-echo "=== [3/9] LM pretraining ==============================================="
+echo "=== [4/9] LM pretraining ==============================================="
 exec $PY -m pretrain.run $COMMON_FLAGS $PRETRAIN_FLAGS "$@"

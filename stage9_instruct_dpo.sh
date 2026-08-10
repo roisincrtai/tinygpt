@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# stage4_sft.sh -- stage 4: domain-adaptive SFT.
+# stage9_instruct_dpo.sh -- stage 9: DPO.
 #
 # Knobs live in config.sh (and ultimately default_config.py); extra arguments are forwarded:
-#   ./stage4_sft.sh --help
+#   ./stage9_instruct_dpo.sh --help
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh          # which reads config_user.yaml over its defaults
-echo "=== [4/9] domain-adaptive SFT ==============================================="
-exec $PY -m sft.run $COMMON_FLAGS $SFT_FLAGS "$@"
+echo "=== [9/9] DPO ==============================================="
+exec $PY -m instruct_dpo.run $COMMON_FLAGS $DPO_FLAGS "$@"

@@ -5,7 +5,7 @@ BINARY CLASSIFIER with sigmoid + binary cross-entropy.
     RewardModel(base)                the model: r(x, y) = w^T h_last + b, a single scalar
                                      read off the final-layer hidden state of the LAST real
                                      token of "prompt + response"
-    run(model, enc, ...)             the training loop (stage 5 consumes it)
+    run(model, enc, ...)             the training loop (stage 6 consumes it)
 
 Training data are the preference pairs of the preference batches: each pair contributes
 TWO independent examples, (prompt, chosen) with label 1 and (prompt, rejected) with label 0,
@@ -48,7 +48,7 @@ class RewardModel(nn.Module):
         # The trunk arrives already on its device (the model factory moves it), so build the
         # head THERE too. Otherwise the head stays on CPU -- load_state_dict copies into the
         # existing parameters and keeps their device, so a caller that only loads weights
-        # (stage 6) would hit "weight is on cpu but expected on mps" at the first forward.
+        # (stage 7) would hit "weight is on cpu but expected on mps" at the first forward.
         try:
             self.head.to(next(base.parameters()).device)
         except StopIteration:
@@ -160,12 +160,12 @@ def run(model, enc, train_pairs, ev_pairs, ckdir, args, log, monitor):
 
 
 def load(ctx, train_mode=False):
-    """A RewardModel with the stage-4 checkpoint loaded (errors if missing)."""
+    """A RewardModel with the stage-6 checkpoint loaded (errors if missing)."""
     import helpers
     ck = helpers.load_ckpt(ctx["ckdir"], STAGE)
     if not ck or "model" not in ck:
         raise SystemExit(f"[{STAGE}] no checkpoint under {ctx['ckdir']}/{STAGE}/ -- "
-                         f"run stage5_train_rlhf_reward.sh first")
+                         f"run stage6_train_rlhf_reward.sh first")
     rm = RewardModel(ctx["new_model"]())
     rm.load_state_dict(ck["model"])
     rm = rm.to(ctx["device"])            # belt and braces: the whole module on one device

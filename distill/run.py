@@ -1,8 +1,8 @@
 """
-distill/run.py -- stage 9 entry point: distillation of the aligned model into gpt2-small.
+distill/run.py -- distillation of the aligned model into gpt2-small.
+Optional, and not a numbered stage of the pipeline.
 
     python -m distill.run [--distill_steps N --distill_lr LR]
-    ./stage9_distill.sh
 """
 from helpers import common
 

@@ -21,7 +21,7 @@
 # worse than one that refuses it.
 #
 # PRECEDENCE. A variable that was already set IN THE ENVIRONMENT when config.sh started is
-# never overwritten, so `GPU=cpu ./stage3_pretrain.sh` still wins over the YAML. config.sh
+# never overwritten, so `GPU=cpu ./stage4_pretrain.sh` still wins over the YAML. config.sh
 # records that set in ZETAGPT_ENV_SET before applying any default.
 #
 #     command-line flag  >  environment variable  >  config_user.yaml  >  config.sh

@@ -71,28 +71,28 @@ QUESTIONS = [
 STAGE_QUESTIONS = [
     ("stage 2 tokenizer", [
         ("BPE_MERGES", "merge budget", config.BPE["num_merges"], "int")]),
-    ("stage 3 pretraining", [
+    ("stage 4 pretraining", [
         ("PRETRAIN_STEPS", "steps", config.PRETRAIN["steps"], "int"),
         ("PRETRAIN_LR", "peak learning rate", config.PRETRAIN["lr"], None)]),
-    ("stage 4 fine-tuning", [
+    ("stage 5 fine-tuning", [
         ("SFT_STEPS", "steps", config.SFT["steps"], "int"),
         ("SFT_LR", "peak learning rate", config.SFT["lr"], None)]),
-    ("stage 5 reward model", [
+    ("stage 6 reward model", [
         ("REWARD_STEPS", "steps", config.REWARD["steps"], "int"),
         ("REWARD_LR", "peak learning rate", config.REWARD["lr"], None)]),
-    ("stage 6 RLHF", [
+    ("stage 7 RLHF", [
         ("RLHF_STEPS", "steps", config.RLHF["steps"], "int"),
         ("RLHF_LR", "peak learning rate", config.RLHF["lr"], None)]),
-    ("stage 7 chain of thought", [
+    ("stage 8 chain of thought", [
         ("COT_STEPS", "steps", config.COT["steps"], "int"),
         ("COT_LR", "peak learning rate", config.COT["lr"], None),
         ("COT_INIT", "starting checkpoint", config.COT["init_stage"],
          ["", "pretrain", "sft", "rlhf", "dpo"]),
         ("COT_GROUP", "completions per problem (>= 2)", config.COT["group_size"], "int")]),
-    ("stage 8 DPO", [
+    ("stage 9 DPO", [
         ("DPO_STEPS", "steps", config.DPO["steps"], "int"),
         ("DPO_LR", "peak learning rate", config.DPO["lr"], None)]),
-    ("stage 9 distillation", [
+    ("distillation (optional)", [
         ("DISTILL_STEPS", "steps", config.DISTILL["steps"], "int"),
         ("DISTILL_LR", "peak learning rate", config.DISTILL["lr"], None)]),
 ]

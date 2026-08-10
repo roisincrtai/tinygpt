@@ -1,9 +1,9 @@
 """
-cot/run.py -- stage 7 entry point: chain-of-thought reasoning by GRPO, the "aha moment" run.
+cot/run.py -- stage 8 entry point: chain-of-thought reasoning by GRPO, the "aha moment" run.
 
     python -m cot.run [--cot_steps N --cot_lr LR --cot_init pretrain --cot_group 8]
-    ./stage7_cot_aha_moment.sh
-    COT_INIT=sft ./stage7_cot_aha_moment.sh        # start from a different checkpoint
+    ./stage8_cot_aha_moment.sh
+    COT_INIT=sft ./stage8_cot_aha_moment.sh        # start from a different checkpoint
 
 This module owns the STAGE: which checkpoint the policy starts from, which problems it is
 rolled out on, and what the stage is called on disk. The algorithm is in grpo.py and the

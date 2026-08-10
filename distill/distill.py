@@ -1,5 +1,6 @@
 """
-distill.py -- stage 9's logic: distilling the aligned ZetaGPT into gpt2-small.
+distill.py -- distilling the aligned ZetaGPT into gpt2-small. Optional, and not a
+numbered stage: nothing in the pipeline depends on its output.
 
     teacher: OUR ALIGNED TINYGPT -- the RLHF-ed model by default
              (config.DISTILL["teacher_stage"] = "rlhf"; set "dpo" for the DPO-ed model)
@@ -15,7 +16,7 @@ pretrained initialisation.
     build_student(device)   -> (gpt2-small, its tokenizer)
     run(...)                -> the distilled student
 
-stage9_distill.sh is only the command-line wrapper.
+run.py is only the command-line wrapper.
 """
 import glob
 import os
@@ -37,7 +38,7 @@ STAGE = "distill"
 def load_prompts(distill_dir=None):
     """The prompts the teacher is asked to answer, and the file count.
 
-    The SAME bank stage 6 rolls out on, for the same reason the reward model is trained on it:
+    The SAME bank stage 7 rolls out on, for the same reason the reward model is trained on it:
     a student is only worth distilling on the distribution the teacher was actually aligned
     over. Prompts drawn from somewhere else would measure the teacher off-distribution and
     transfer that to the student as if it were the teacher's behaviour."""

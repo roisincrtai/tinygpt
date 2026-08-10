@@ -874,7 +874,7 @@ def holdout_probe(policy, ref, enc, pairs, beta, gen=None, roll_temp=1.0, batch=
 # under a mirror of its path, in a directory named for THE TOKENIZER THAT PRODUCED IT:
 #
 #     data/download/<corpus>/<path>/<name>.parquet
-#         ->  cache/bpe_<vocab>_<fingerprint>/data/download/<corpus>/.../<name>.parquet.<sig>.tokens
+#         ->  cache/tokens/bpe_<vocab>_<fingerprint>/data/download/<corpus>/.../<name>.parquet.<sig>.tokens
 #
 # THE TOKENIZER IS THE DIRECTORY, not a field inside the file, so two vocabularies coexist
 # instead of overwriting each other: retrain the BPE, try the new vocabulary, go back, and the
@@ -963,7 +963,9 @@ def tokenizer_tag(tok, path=None):
 
 
 def token_cache_root(tok, path=None):
-    return os.path.join(config.CACHE_DIR, tokenizer_tag(tok, path))
+    """cache/tokens/<tokenizer>/. The `tokens` level names WHAT is cached, so anything else
+    the pipeline caches later gets its own sibling rather than being mixed in with a corpus."""
+    return os.path.join(config.CACHE_DIR, "tokens", tokenizer_tag(tok, path))
 
 
 def _tok_signature(tok, max_words, text_column=""):
@@ -1026,7 +1028,10 @@ def _parquet_docs(path, column):
             f"[corpus] {os.path.basename(path)} has no column {column!r}.\n"
             f"         Columns present: {', '.join(names)}\n"
             f"         Set PRETRAIN[\"text_column\"] in default_config.py to the right one.")
-    for batch in pf.iter_batches(columns=[column]):
+    # A SMALL BATCH ON PURPOSE. pyarrow's default is 65,536 rows, and a row here is a whole
+    # article: that default materialises hundreds of megabytes of Python strings at a time,
+    # which is precisely the cost this module exists to avoid paying.
+    for batch in pf.iter_batches(batch_size=64, columns=[column]):
         for value in batch.column(0).to_pylist():
             if value:
                 yield str(value).splitlines()
@@ -1047,13 +1052,17 @@ def _source_documents(path, text_column):
 
 
 def _pack(path, max_words, text_column="text"):
-    """Source file -> list of ~max_words-word documents, NEVER CROSSING A SOURCE DOCUMENT.
+    """Source file -> ~max_words-word documents, NEVER CROSSING A SOURCE DOCUMENT.
+
+    A GENERATOR, not a list. A single parquet shard is ~100 MB compressed and several hundred
+    megabytes of Python strings once expanded, and returning them all at once would put the
+    peak cost of tokenising a corpus at one shard rather than at one document -- which is the
+    same mistake, one order of magnitude down, as holding the corpus in RAM.
 
     The boundary is the file for text and the row for parquet, so the same corpus packs
     identically in either format. The tail of each document is kept even when it is short: a
     remainder discarded for being under the budget would drop the end of every article in the
     corpus, which is a systematic loss rather than a rounding one."""
-    docs = []
     for lines in _source_documents(path, text_column):
         buf, wc = [], 0
         for line in lines:
@@ -1063,10 +1072,9 @@ def _pack(path, max_words, text_column="text"):
             buf.append(line)
             wc += len(line.split())
             if wc >= max_words:
-                docs.append(" ".join(buf)); buf, wc = [], 0
+                yield " ".join(buf); buf, wc = [], 0
         if buf:
-            docs.append(" ".join(buf))
-    return docs
+            yield " ".join(buf)
 
 
 def _write(path, sig, st, docs_ids):
@@ -1137,41 +1145,81 @@ def corpus_files(root, exclude_dirs=(), extensions=None):
     return sorted(out)
 
 
-def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=print,
-                      extensions=None, text_column="text"):
-    """Pre-tokenised documents for `stage` from every *.txt under `root`.
+def corpus_signature(tok, root, files, max_words, text_column):
+    """Identifies a whole corpus AND the tokenizer and packing applied to it.
 
-    Returns (docs, n_files, n_tokens). Files whose cache entry is present and current are
-    read from cache/<tokenizer>/; the rest are tokenised now and written there, so the first
-    run pays the cost once and every later run starts immediately. `stage` labels the log line
-    only -- the cache is keyed by the file and the tokenizer, so whichever stage reads a file
-    first pays for it and the others do not."""
+    The manifest -- every source file's path, size and modification time -- is HASHED rather
+    than stored, because a corpus of thirty thousand files would otherwise put a megabyte of
+    file listing in the header of every stream. Hashing keeps the property that matters: any
+    file added, removed, edited or renamed changes the signature, so a stream built from a
+    corpus that has since changed is never mistaken for a current one."""
+    import hashlib
+    h = hashlib.sha256()
+    h.update(_tok_signature(tok, max_words, text_column).encode("utf-8"))
+    h.update(os.path.abspath(root).encode("utf-8"))
+    for fp in files:
+        try:
+            st = os.stat(fp)
+            h.update(f"{os.path.relpath(fp, root)}|{st.st_size}|{int(st.st_mtime)}\0"
+                     .encode("utf-8"))
+        except OSError:
+            h.update(f"{fp}|missing\0".encode("utf-8"))
+    return f"corpus|v1|files={len(files)}|{h.hexdigest()[:32]}"
+
+
+def corpus_stream_path(tok, root, sig):
+    """cache/tokens/<tokenizer>/<mirror of the corpus directory>.<sig>.tokens -- ONE file per corpus,
+    not one per source file. Thirty thousand cache entries is the problem the corpus itself
+    already had; a single stream is opened once and paged in by the OS."""
+    return os.path.join(token_cache_root(tok), f"{_mirror(root)}.{_sig_tag(sig)}.tokens")
+
+
+def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
+                       extensions=None, text_column="text", stage="tokenize", force=False):
+    """Tokenise a corpus into one memory-mapped stream; return (stream, n_files).
+
+    Reused when a current stream already exists, which is what makes this cheap to re-run and
+    what lets the training stages simply OPEN the corpus rather than build it. The tokenising
+    itself is a generator, so at no point does the whole corpus exist as Python objects: one
+    source file is packed, tokenised and appended, and then released."""
+    from . import token_store
     files = corpus_files(root, exclude_dirs, extensions)
     if not files:
-        return [], 0, 0
+        return None, 0
+    sig = corpus_signature(tok, root, files, max_words, text_column)
+    path = corpus_stream_path(tok, root, sig)
+    if not force:
+        st = token_store.open_if_current(path, sig)
+        if st is not None:
+            log(f"[{stage}] token stream: {st.describe()}")
+            log(f"[{stage}]               {path}")
+            return st, len(files)
 
-    sig = _tok_signature(tok, max_words, text_column)
-    docs, n_tokens, n_hit, n_built = [], 0, 0, 0
-    for fp in progress(files, desc=f"[{stage}] tokenizing corpus", total=len(files)):
-        st = os.stat(fp)
-        cp = _tok_path(tok, fp, sig)
-        ids = _read(cp, sig, st)
-        if ids is None:
-            # the leading space matches Encoder's convention for a response, so cached and
-            # freshly tokenised documents are byte-for-byte the same ids
-            ids = [tok(" " + d, add_special_tokens=False)["input_ids"] for d in
-                   _pack(fp, max_words, text_column)]
-            _write(cp, sig, st, ids)
-            n_built += 1
-        else:
-            n_hit += 1
-        for d in ids:
-            if d:
-                docs.append({"prompt": "", "ids": d, "rejected": ""})
-                n_tokens += len(d)
-    log(f"[{stage}] token cache: {n_hit:,} files reused, {n_built:,} tokenised now "
-        f"-> {token_cache_root(tok)}")
-    return docs, len(files), n_tokens
+    def documents():
+        for fp in progress(files, desc=f"[{stage}] tokenizing corpus", total=len(files)):
+            for d in _pack(fp, max_words, text_column):
+                # the leading space matches Encoder's convention for a response, so a document
+                # from the stream and the same document encoded on the fly are the same ids
+                ids = tok(" " + d, add_special_tokens=False)["input_ids"]
+                if ids:
+                    yield ids
+
+    log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
+    token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log)
+    return token_store.TokenStream(path), len(files)
+
+
+def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=print,
+                      extensions=None, text_column="text"):
+    """The corpus as a memory-mapped TokenStream: (stream, n_files, n_tokens).
+
+    A stage that finds no stream builds one, so nothing breaks if the explicit tokenisation
+    stage was skipped; running that stage first simply means training starts immediately."""
+    st, n_files = build_token_stream(root, tok, max_words, exclude_dirs, log, extensions,
+                                     text_column, stage=stage)
+    if st is None:
+        return None, 0, 0
+    return st, n_files, st.n_tokens
 
 
 # --------------------------------------------------------------------------- #
@@ -1179,7 +1227,7 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
 # --------------------------------------------------------------------------- #
 def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print):
     """Attach `prompt_ids` / `chosen_ids` / `rejected_ids` to every preference pair, IN
-    PLACE, reading them from cache/<tokenizer>/<src>.<split>.<sig>.tokens when it is current
+    PLACE, reading them from cache/tokens/<tokenizer>/<src>.<split>.<sig>.tokens when it is current
     and writing it when it is not. The reward and DPO trainers then never tokenise inside
     their step loops. Returns the number of tokens cached.
 

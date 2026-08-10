@@ -57,7 +57,11 @@ pip install -r requirements.txt
 ```
 
 Stage 1 is the only stage that reaches the network; every stage after it reads a local
-directory and stops if it is not there. Already-present datasets are skipped and an
+directory and stops if it is not there. Stage 3 tokenises each corpus once into a
+memory-mapped `.tokens` stream, so training pages the corpus in from disk rather than holding
+it in RAM -- a 2B-token corpus is 4 GB on disk and costs the training process almost nothing.
+It needs no GPU, and training stages rebuild a missing stream themselves, so skipping it costs
+time rather than correctness. Already-present datasets are skipped and an
 interrupted transfer resumes, so re-running is cheap. `./stage1_download_data.sh --list` shows
 what would be fetched and where it goes.
 
@@ -68,13 +72,13 @@ the checkpoint of the one it starts from.
 ```bash
 ./stage1_download_data.sh          # fetch the corpora
 ./stage2_train_bpe_tokenizer.sh    # byte-level BPE
-./stage3_pretrain.sh               # pretraining
-./stage4_sft.sh                    # supervised fine-tuning (needs the pretrain checkpoint)
-./stage5_train_rlhf_reward.sh      # reward model
-./stage6_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
-./stage7_cot_aha_moment.sh         # chain of thought by GRPO
-./stage8_instruct_dpo.sh           # direct preference optimisation
-./stage9_distill.sh                # distillation into GPT-2 small
+./stage3_tokenize_data.sh          # corpora -> memory-mapped token streams
+./stage4_pretrain.sh               # pretraining
+./stage5_sft.sh                    # supervised fine-tuning (needs the pretrain checkpoint)
+./stage6_train_rlhf_reward.sh      # reward model
+./stage7_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
+./stage8_cot_aha_moment.sh         # chain of thought by GRPO
+./stage9_instruct_dpo.sh           # direct preference optimisation
 ```
 
 Equivalently, bypassing the shell layer:
@@ -89,9 +93,9 @@ Every knob is a shell variable in `config.sh`, and every default lives in
 `default_config.py`; a command-line flag beats both. Overrides apply per run:
 
 ```bash
-PRETRAIN_STEPS=20000 ./stage3_pretrain.sh
-MODEL_SCHEME=zetagpt-m ./stage3_pretrain.sh
-GPU=cpu ./stage4_sft.sh
+PRETRAIN_STEPS=20000 ./stage4_pretrain.sh
+MODEL_SCHEME=zetagpt-m ./stage4_pretrain.sh
+GPU=cpu ./stage5_sft.sh
 python -m sft.run --sft_steps 5000
 ```
 
@@ -103,9 +107,9 @@ python -m sft.run --sft_steps 5000
 Point a stage at a directory and it works out the layout by looking at it:
 
 ```bash
-DATASET=/path/to/my_preferences ./stage5_train_rlhf_reward.sh
-SFT_DIR=/path/to/my_demos       ./stage4_sft.sh
-PRETRAIN_DIR=/path/to/my_corpus ./stage3_pretrain.sh
+DATASET=/path/to/my_preferences ./stage6_train_rlhf_reward.sh
+SFT_DIR=/path/to/my_demos       ./stage5_sft.sh
+PRETRAIN_DIR=/path/to/my_corpus ./stage4_pretrain.sh
 ```
 
 A directory holding `*_train/` and `*_test/` subdirectories of json batches keeps **its own

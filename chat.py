@@ -11,7 +11,7 @@ the state dict:
 
     ZetaGPT state dict ('blocks.*')          -> ZetaGPT rebuilt from the ARCHITECTURE STORED
                                                 IN THE CHECKPOINT + the pipeline BPE
-    gpt2 student state dict ('transformer.*') -> the stage-8 distilled gpt2-small + its HF
+    gpt2 student state dict ('transformer.*') -> the distilled gpt2-small + its HF
                                                 tokenizer
 
     # interactive REPL on the most aligned checkpoint present (the default)
@@ -154,7 +154,7 @@ def read_checkpoint(ckpt):
 def build_from_checkpoint(sd, cfg, args, device):
     """(model, tok, max_len) matching the checkpoint's architecture.
 
-    'transformer.*' keys mean the stage-7 gpt2-small student. Otherwise it is a ZetaGPT, and
+    'transformer.*' keys mean the distilled gpt2-small student. Otherwise it is a ZetaGPT, and
     the ARCHITECTURE RECORDED IN THE CHECKPOINT is used -- a model trained at a different
     width or depth must be rebuilt as it was, and rebuilding it from whatever default_config.py currently
     says would fail to load (or load something subtly different). config.MODEL is only the

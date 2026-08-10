@@ -6,18 +6,19 @@
 #   PRETRAIN_FLAGS="--pretrain_steps 50000" ./run_full.sh
 #
 # Stage 1 downloads and is skipped when the data is already present, so re-running the
-# whole pipeline does not re-fetch anything.
+# whole pipeline does not re-fetch anything. Distillation is NOT part of the pipeline:
+# it is an optional extra, run on its own with `python -m distill.run`.
 #   ./run_full.sh --no-resume                      # extra flags are forwarded to every stage
 set -euo pipefail
 cd "$(dirname "$0")"
 
 ./stage1_download_data.sh          "$@"
 ./stage2_train_bpe_tokenizer.sh    "$@"
-./stage3_pretrain.sh               "$@"
-./stage4_sft.sh                    "$@"
-./stage5_train_rlhf_reward.sh      "$@"
-./stage6_instruct_tuning_rlhf.sh   "$@"
-./stage7_cot_aha_moment.sh         "$@"
-./stage8_instruct_dpo.sh           "$@"
-./stage9_distill.sh                "$@"
+./stage3_tokenize_data.sh          "$@"
+./stage4_pretrain.sh               "$@"
+./stage5_sft.sh                    "$@"
+./stage6_train_rlhf_reward.sh      "$@"
+./stage7_instruct_tuning_rlhf.sh   "$@"
+./stage8_cot_aha_moment.sh         "$@"
+./stage9_instruct_dpo.sh           "$@"
 echo "=== done ================================================================="

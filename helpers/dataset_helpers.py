@@ -273,7 +273,7 @@ def load_pretrain_corpus(txt_root, max_words=200, exclude_dirs=()):
     loop can pretrain on them (prompt empty -> the whole chunk is the response it scores).
 
     Returns (docs, n_files) where n_files counts the files actually used. The caller reports
-    the scan (stage 3 prints the number of files and the total token count)."""
+    the scan (stage 4 prints the number of files and the total token count)."""
     from helpers import progress, corpus_files
     files = corpus_files(txt_root, exclude_dirs)
     docs = []

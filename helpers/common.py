@@ -128,7 +128,7 @@ def parse_args(argv=None):
                          "which is <instruct_dir>/rlhf_hh")
     ap.add_argument("--instruct_dir", default="",
                     help="root of the instruction-tuning tree (alpaca_gpt4/, rlhf_hh/) used "
-                         "by stages 4, 5, 6, 8 and 9; empty = "
+                         "by stages 5, 6, 7, 9 and 10; empty = "
                          "default_config.INSTRUCT_DIR")
     ap.add_argument("--context_window", type=int, default=config.PRETRAIN["context_window"],
                     help="context window in tokens; 0 = the scheme's own (512 for tiny and "
@@ -228,18 +228,21 @@ N_PREVIEW = 20                       # generation examples printed every --plot_
 
 def corpus_prompts(corpus, n=N_PREVIEW, n_words=12, seed=0, tok=None):
     """Preview prompts drawn from a corpus: the first `n_words` words of `n` sampled
-    documents. Handles both text records and PRE-TOKENISED ones (token_cache.py), decoding
-    the latter with `tok`."""
+    documents.
+
+    Three corpus shapes, because the previews must work wherever the corpus came from: a
+    memory-mapped TokenStream (sampled by document index -- only those documents are paged
+    in, never the corpus), pre-tokenised records, and plain text records."""
     rng = random.Random(seed)
-    docs = rng.sample(corpus, min(n, len(corpus)))
-    out = []
-    for d in docs:
-        if "ids" in d:
-            text = decode(tok, d["ids"][:4 * n_words]) if tok is not None else ""
-        else:
-            text = d.get("chosen", "")
-        out.append(" ".join(text.split()[:n_words]))
-    return [p for p in out if p]
+    if hasattr(corpus, "doc") and hasattr(corpus, "n_docs"):
+        idx = rng.sample(range(corpus.n_docs), min(n, corpus.n_docs))
+        texts = [decode(tok, corpus.doc(i)[:4 * n_words]) if tok is not None else ""
+                 for i in idx]
+    else:
+        docs = rng.sample(corpus, min(n, len(corpus)))
+        texts = [decode(tok, d["ids"][:4 * n_words]) if ("ids" in d and tok is not None)
+                 else d.get("chosen", "") for d in docs]
+    return [p for p in (" ".join(t.split()[:n_words]) for t in texts) if p]
 
 
 def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW):
@@ -351,7 +354,7 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
         helpers.table("dataset", dsets.stats_rows(args.dataset, train_pairs, ev_pairs, tok,
                                                   source=config.INSTRUCT_DIR),
                       out=log)
-    # Pre-tokenise the preference pairs into cache/<tokenizer>/ -- ONLY for the stages that
+    # Pre-tokenise the preference pairs into cache/tokens/<tokenizer>/ -- ONLY for the stages that
     # train on them, so a corpus stage never touches the instruction data.
     #
     # The cache is keyed by the directory the pairs CAME FROM, not by config.HH_DIR: --dataset
