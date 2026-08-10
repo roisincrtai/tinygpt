@@ -44,7 +44,8 @@ COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
-SCALING_FLAGS"
+SCALING_FLAGS \
+MODEL_FFN_FACTOR MODEL_DROPOUT MODEL_GATED_ATTN MODEL_D_CONV MODEL_SSM_CHUNK CORPUS_EXCLUDE TOKENS_SHARD_MB SFT_SUBSETS SFT_LIMIT REWARD_SUBSETS REWARD_VAL_SUBSETS REWARD_LIMIT RLHF_GEN_TEMP RLHF_PPO_EPOCHS RLHF_CLIP_EPS RLHF_GAMMA RLHF_LAM RLHF_VF_COEF RLHF_ENT_COEF RLHF_WHITEN_ADV RLHF_PROMPT_LIMIT RLHF_PROMPTS_PER_FILE COT_GEN_TEMP COT_CLIP_EPS COT_GRPO_EPOCHS COT_ENT_COEF COT_CORRECT_REWARD COT_FORMAT_REWARD COT_LENGTH_PENALTY COT_LIMIT COT_EVAL_PROBLEMS COT_TRAIN_PREFIX COT_TEST_PREFIX COT_RECORDS_PER_FILE DISTILL_STUDENT_MAX_LEN DISTILL_MAX_NEW_TOKENS DISTILL_GEN_TEMP DISTILL_KL_COEF DISTILL_PROMPTS_PER_FILE SCALING_LR_REF_WIDTH SCALING_EVAL_EVERY SCALING_VAL_WINDOWS"
 
 # Which variables came from the ENVIRONMENT, recorded before a single default is applied:
 # export_yaml.sh must not overwrite these, or `GPU=cpu ./stage4_pretrain.sh` would lose to the
@@ -166,6 +167,14 @@ PE="${PE:-ssm}"                     # ssm | rope
 # four fifths of documents lost their opening to truncation.
 MAX_LEN="${MAX_LEN:-512}"
 
+# The rest of the architecture. Depth, width and the context window come from the scheme
+# above; these are the choices a scheme does not fix.
+MODEL_FFN_FACTOR="${MODEL_FFN_FACTOR:-4}"     # MLP hidden size = this x d_model
+MODEL_DROPOUT="${MODEL_DROPOUT:-0.0}"         # 0 is right for a single pass over a large corpus
+MODEL_GATED_ATTN="${MODEL_GATED_ATTN:-1}"     # 1 = sigmoid gate on the attention output
+MODEL_D_CONV="${MODEL_D_CONV:-4}"             # depthwise conv width inside the state space module
+MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = sqrt(T)
+
 # =========================================================================== #
 # 5. optimisation -- shared by every trainer; per-stage rates are in each stage's section
 # =========================================================================== #
@@ -203,11 +212,16 @@ P_GRID="${P_GRID:-0.0,0.5,1.0}"     # end-of-stage evaluation: comma-separated p
 # =========================================================================== #
 # 8. advanced -- reach anything in default_config.py without a variable here
 # =========================================================================== #
-# The named knobs above cover what is tuned often. Everything else in default_config.py's
-# dictionaries is reachable through --set SECTION.key=value, which takes the type of the value
-# already there and refuses an unknown section or key rather than ignoring it.
+# EVERY configurable value in default_config.py's dictionaries has a named variable in this
+# file -- all 77 of them, 35 through their own command-line flag and 51 through --set. This
+# section is for what remains: a value added to default_config.py since, or one you would
+# rather not give a permanent name.
 #
-#   EXTRA_SET="--set RLHF.ppo_epochs=2 --set COT.format_reward=0.5"
+# --set takes the type of the value already there and refuses an unknown section or key rather
+# than ignoring it, because a silently dropped override is a run that reports settings it did
+# not use.
+#
+#   EXTRA_SET="--set SCALING.val_windows=128"
 #
 # Sections: BPE PRETRAIN SFT REWARD RLHF COT DPO DISTILL TRAIN SCALING MODEL
 EXTRA_SET="${EXTRA_SET:-}"
@@ -238,6 +252,13 @@ CORPUS_MAX_WORDS="${CORPUS_MAX_WORDS:-344}"      # words per packed document; ~1
 CORPUS_TEXT_COLUMN="${CORPUS_TEXT_COLUMN:-text}" # which parquet column holds the text
 TOKENIZE_FLAGS="${TOKENIZE_FLAGS:-}"
 
+CORPUS_EXCLUDE="${CORPUS_EXCLUDE:-test,valid,validation}"  # held-out splits kept OUT of
+                                    # training: a directory of that name, or a file whose
+                                    # leading name token matches (validation-00000-of-...)
+TOKENS_SHARD_MB="${TOKENS_SHARD_MB:-100}"    # MB of tokens per shard. A corpus can be 10 TB;
+                                    # one file that size cannot be resumed, cannot be copied
+                                    # incrementally, and loses everything to one bad byte.
+
 # =========================================================================== #
 # stage 4 -- pretraining
 # =========================================================================== #
@@ -252,12 +273,19 @@ SFT_STEPS="${SFT_STEPS:-2342}"
 SFT_LR="${SFT_LR:-1e-6}"
 SFT_FLAGS="${SFT_FLAGS:-}"
 
+SFT_SUBSETS="${SFT_SUBSETS:-helpful_train,harmless_train}"  # split dirs read from an hh tree
+SFT_LIMIT="${SFT_LIMIT:-0}"         # cap demonstrations per subset; 0 = all
+
 # =========================================================================== #
 # stage 6 -- reward model (sigmoid + BCE)
 # =========================================================================== #
 REWARD_STEPS="${REWARD_STEPS:-2500}"
 REWARD_LR="${REWARD_LR:-1e-5}"
 REWARD_FLAGS="${REWARD_FLAGS:-}"
+
+REWARD_SUBSETS="${REWARD_SUBSETS:-helpful_train,harmless_train}"
+REWARD_VAL_SUBSETS="${REWARD_VAL_SUBSETS:-helpful_test,harmless_test}"
+REWARD_LIMIT="${REWARD_LIMIT:-20000}"   # pairs per subset; 0 = all (~86k train pairs)
 
 # =========================================================================== #
 # stage 7 -- RLHF by PPO
@@ -269,6 +297,18 @@ RLHF_KL_COEF="${RLHF_KL_COEF:-0.05}"            # per-token KL penalty to the fr
                                                 # may drift while chasing reward
 RLHF_MAX_NEW_TOKENS="${RLHF_MAX_NEW_TOKENS:-48}"  # response length of each rollout
 RLHF_FLAGS="${RLHF_FLAGS:-}"
+
+RLHF_GEN_TEMP="${RLHF_GEN_TEMP:-1.0}"       # rollouts are SAMPLED; a greedy rollout is not a
+                                            # draw from the policy and breaks the estimator
+RLHF_PPO_EPOCHS="${RLHF_PPO_EPOCHS:-4}"     # optimisation passes over each batch of rollouts
+RLHF_CLIP_EPS="${RLHF_CLIP_EPS:-0.2}"       # PPO ratio clip
+RLHF_GAMMA="${RLHF_GAMMA:-1.0}"             # discount; 1.0 because a response is short
+RLHF_LAM="${RLHF_LAM:-0.95}"                # GAE lambda
+RLHF_VF_COEF="${RLHF_VF_COEF:-0.5}"         # value-loss weight
+RLHF_ENT_COEF="${RLHF_ENT_COEF:-0.0}"       # entropy bonus
+RLHF_WHITEN_ADV="${RLHF_WHITEN_ADV:-1}"     # 1 = normalise advantages within the batch
+RLHF_PROMPT_LIMIT="${RLHF_PROMPT_LIMIT:-0}" # cap the prompt bank; 0 = all
+RLHF_PROMPTS_PER_FILE="${RLHF_PROMPTS_PER_FILE:-1000}"
 
 # =========================================================================== #
 # stage 8 -- chain of thought by GRPO (the aha moment)
@@ -283,6 +323,20 @@ COT_KL_COEF="${COT_KL_COEF:-0.001}" # much smaller than RLHF's: reasoning needs 
                                     # explore before the verifier rewards it
 COT_MAX_NEW_TOKENS="${COT_MAX_NEW_TOKENS:-200}"  # room for a chain of thought, not a reply
 COT_FLAGS="${COT_FLAGS:-}"
+
+COT_GEN_TEMP="${COT_GEN_TEMP:-1.0}"         # sampling temperature of each completion
+COT_CLIP_EPS="${COT_CLIP_EPS:-0.2}"         # GRPO ratio clip
+COT_GRPO_EPOCHS="${COT_GRPO_EPOCHS:-2}"     # optimisation passes per group of rollouts
+COT_ENT_COEF="${COT_ENT_COEF:-0.0}"         # entropy bonus
+COT_CORRECT_REWARD="${COT_CORRECT_REWARD:-1.0}"   # reward for a VERIFIED answer -- the signal
+COT_FORMAT_REWARD="${COT_FORMAT_REWARD:-0.2}"     # smaller: producing the shape of an answer
+                                            # is worth less than producing a right one
+COT_LENGTH_PENALTY="${COT_LENGTH_PENALTY:-0.0}"   # per-token cost of thinking
+COT_LIMIT="${COT_LIMIT:-0}"                 # cap problems loaded; 0 = all
+COT_EVAL_PROBLEMS="${COT_EVAL_PROBLEMS:-200}"     # held-out problems per evaluation
+COT_TRAIN_PREFIX="${COT_TRAIN_PREFIX:-train}"     # filename prefixes of the two splits
+COT_TEST_PREFIX="${COT_TEST_PREFIX:-test}"
+COT_RECORDS_PER_FILE="${COT_RECORDS_PER_FILE:-1000}"
 
 # =========================================================================== #
 # stage 9 -- direct preference optimisation
@@ -301,6 +355,12 @@ DISTILL_TEACHER="${DISTILL_TEACHER:-rlhf}"   # which aligned checkpoint teaches:
 DISTILL_STUDENT="${DISTILL_STUDENT:-gpt2}"   # any HuggingFace causal LM
 DISTILL_FLAGS="${DISTILL_FLAGS:-}"
 
+DISTILL_STUDENT_MAX_LEN="${DISTILL_STUDENT_MAX_LEN:-256}"   # the student's own truncation
+DISTILL_MAX_NEW_TOKENS="${DISTILL_MAX_NEW_TOKENS:-60}"      # teacher response length
+DISTILL_GEN_TEMP="${DISTILL_GEN_TEMP:-0.8}"                 # teacher sampling temperature
+DISTILL_KL_COEF="${DISTILL_KL_COEF:-0.05}"
+DISTILL_PROMPTS_PER_FILE="${DISTILL_PROMPTS_PER_FILE:-100}"
+
 # =========================================================================== #
 # scaling laws -- NOT a pipeline stage; run by ./run_scaling_laws.sh
 # =========================================================================== #
@@ -313,6 +373,10 @@ SCALING_BATCH="${SCALING_BATCH:-16}"
 SCALING_LR="${SCALING_LR:-6e-4}"             # peak rate at the reference width
 SCALING_LR_RULE="${SCALING_LR_RULE:-sqrt_width}"   # sqrt_width | fixed
 SCALING_FLAGS="${SCALING_FLAGS:-}"
+
+SCALING_LR_REF_WIDTH="${SCALING_LR_REF_WIDTH:-512}"   # width SCALING_LR is quoted at
+SCALING_EVAL_EVERY="${SCALING_EVAL_EVERY:-0}"         # 0 = ten evaluations per point
+SCALING_VAL_WINDOWS="${SCALING_VAL_WINDOWS:-64}"      # validation windows per evaluation
 
 # =========================================================================== #
 # your settings: config_user.yaml overrides everything above
@@ -372,6 +436,48 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$COT_MAX_NEW_TOKENS" ] && COMMON_FLAGS="$COMMON_FLAGS --set COT.max_new_tokens=$COT_MAX_NEW_TOKENS"
 [ -n "$DISTILL_TEACHER" ]    && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.teacher_stage=$DISTILL_TEACHER"
 [ -n "$DISTILL_STUDENT" ]    && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.student=$DISTILL_STUDENT"
+[ -n "$MODEL_FFN_FACTOR" ]        && COMMON_FLAGS="$COMMON_FLAGS --set MODEL.ffn_factor=$MODEL_FFN_FACTOR"
+[ -n "$MODEL_DROPOUT" ]           && COMMON_FLAGS="$COMMON_FLAGS --set MODEL.dropout=$MODEL_DROPOUT"
+[ -n "$MODEL_GATED_ATTN" ]        && COMMON_FLAGS="$COMMON_FLAGS --set MODEL.gated_attn=$MODEL_GATED_ATTN"
+[ -n "$MODEL_D_CONV" ]            && COMMON_FLAGS="$COMMON_FLAGS --set MODEL.d_conv=$MODEL_D_CONV"
+[ -n "$MODEL_SSM_CHUNK" ]         && COMMON_FLAGS="$COMMON_FLAGS --set MODEL.ssm_chunk=$MODEL_SSM_CHUNK"
+[ -n "$CORPUS_EXCLUDE" ]          && COMMON_FLAGS="$COMMON_FLAGS --set PRETRAIN.exclude_dirs=$CORPUS_EXCLUDE"
+[ -n "$TOKENS_SHARD_MB" ]         && COMMON_FLAGS="$COMMON_FLAGS --set TOKENS.shard_mb=$TOKENS_SHARD_MB"
+[ -n "$SFT_SUBSETS" ]             && COMMON_FLAGS="$COMMON_FLAGS --set SFT.subsets=$SFT_SUBSETS"
+[ -n "$SFT_LIMIT" ]               && COMMON_FLAGS="$COMMON_FLAGS --set SFT.limit=$SFT_LIMIT"
+[ -n "$REWARD_SUBSETS" ]          && COMMON_FLAGS="$COMMON_FLAGS --set REWARD.hh_subsets=$REWARD_SUBSETS"
+[ -n "$REWARD_VAL_SUBSETS" ]      && COMMON_FLAGS="$COMMON_FLAGS --set REWARD.hh_val_subsets=$REWARD_VAL_SUBSETS"
+[ -n "$REWARD_LIMIT" ]            && COMMON_FLAGS="$COMMON_FLAGS --set REWARD.hh_limit=$REWARD_LIMIT"
+[ -n "$RLHF_GEN_TEMP" ]           && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.gen_temperature=$RLHF_GEN_TEMP"
+[ -n "$RLHF_PPO_EPOCHS" ]         && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.ppo_epochs=$RLHF_PPO_EPOCHS"
+[ -n "$RLHF_CLIP_EPS" ]           && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.clip_eps=$RLHF_CLIP_EPS"
+[ -n "$RLHF_GAMMA" ]              && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.gamma=$RLHF_GAMMA"
+[ -n "$RLHF_LAM" ]                && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.lam=$RLHF_LAM"
+[ -n "$RLHF_VF_COEF" ]            && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.vf_coef=$RLHF_VF_COEF"
+[ -n "$RLHF_ENT_COEF" ]           && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.ent_coef=$RLHF_ENT_COEF"
+[ -n "$RLHF_WHITEN_ADV" ]         && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.whiten_adv=$RLHF_WHITEN_ADV"
+[ -n "$RLHF_PROMPT_LIMIT" ]       && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.prompt_limit=$RLHF_PROMPT_LIMIT"
+[ -n "$RLHF_PROMPTS_PER_FILE" ]   && COMMON_FLAGS="$COMMON_FLAGS --set RLHF.prompts_per_file=$RLHF_PROMPTS_PER_FILE"
+[ -n "$COT_GEN_TEMP" ]            && COMMON_FLAGS="$COMMON_FLAGS --set COT.gen_temperature=$COT_GEN_TEMP"
+[ -n "$COT_CLIP_EPS" ]            && COMMON_FLAGS="$COMMON_FLAGS --set COT.clip_eps=$COT_CLIP_EPS"
+[ -n "$COT_GRPO_EPOCHS" ]         && COMMON_FLAGS="$COMMON_FLAGS --set COT.grpo_epochs=$COT_GRPO_EPOCHS"
+[ -n "$COT_ENT_COEF" ]            && COMMON_FLAGS="$COMMON_FLAGS --set COT.ent_coef=$COT_ENT_COEF"
+[ -n "$COT_CORRECT_REWARD" ]      && COMMON_FLAGS="$COMMON_FLAGS --set COT.correct_reward=$COT_CORRECT_REWARD"
+[ -n "$COT_FORMAT_REWARD" ]       && COMMON_FLAGS="$COMMON_FLAGS --set COT.format_reward=$COT_FORMAT_REWARD"
+[ -n "$COT_LENGTH_PENALTY" ]      && COMMON_FLAGS="$COMMON_FLAGS --set COT.length_penalty=$COT_LENGTH_PENALTY"
+[ -n "$COT_LIMIT" ]               && COMMON_FLAGS="$COMMON_FLAGS --set COT.limit=$COT_LIMIT"
+[ -n "$COT_EVAL_PROBLEMS" ]       && COMMON_FLAGS="$COMMON_FLAGS --set COT.eval_problems=$COT_EVAL_PROBLEMS"
+[ -n "$COT_TRAIN_PREFIX" ]        && COMMON_FLAGS="$COMMON_FLAGS --set COT.train_prefix=$COT_TRAIN_PREFIX"
+[ -n "$COT_TEST_PREFIX" ]         && COMMON_FLAGS="$COMMON_FLAGS --set COT.test_prefix=$COT_TEST_PREFIX"
+[ -n "$COT_RECORDS_PER_FILE" ]    && COMMON_FLAGS="$COMMON_FLAGS --set COT.records_per_file=$COT_RECORDS_PER_FILE"
+[ -n "$DISTILL_STUDENT_MAX_LEN" ] && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.student_max_len=$DISTILL_STUDENT_MAX_LEN"
+[ -n "$DISTILL_MAX_NEW_TOKENS" ]  && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.max_new_tokens=$DISTILL_MAX_NEW_TOKENS"
+[ -n "$DISTILL_GEN_TEMP" ]        && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.gen_temperature=$DISTILL_GEN_TEMP"
+[ -n "$DISTILL_KL_COEF" ]         && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.kl_coef=$DISTILL_KL_COEF"
+[ -n "$DISTILL_PROMPTS_PER_FILE" ] && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.prompts_per_file=$DISTILL_PROMPTS_PER_FILE"
+[ -n "$SCALING_LR_REF_WIDTH" ]    && COMMON_FLAGS="$COMMON_FLAGS --set SCALING.lr_ref_width=$SCALING_LR_REF_WIDTH"
+[ -n "$SCALING_EVAL_EVERY" ]      && COMMON_FLAGS="$COMMON_FLAGS --set SCALING.eval_every=$SCALING_EVAL_EVERY"
+[ -n "$SCALING_VAL_WINDOWS" ]     && COMMON_FLAGS="$COMMON_FLAGS --set SCALING.val_windows=$SCALING_VAL_WINDOWS"
 [ -n "$EXTRA_SET" ]          && COMMON_FLAGS="$COMMON_FLAGS $EXTRA_SET"
 
 # stage 3 does not take the common trainer flags (it builds no model), so the corpus
