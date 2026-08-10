@@ -102,6 +102,9 @@ python -m sft.run --sft_steps 5000
 `python config_wizard.py` writes `config_user.yaml` holding only the settings you choose;
 `config.sh` reads it over its own defaults.
 
+The tokenizer -- its special tokens, how to register your own, and how digits and whitespace
+are split -- is documented in [`doc/tokenizer.md`](doc/tokenizer.md).
+
 ### Using your own data
 
 Point a stage at a directory and it works out the layout by looking at it:
