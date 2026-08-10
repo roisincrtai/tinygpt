@@ -280,21 +280,26 @@ def load_pretrain_corpus(root, max_words=200, exclude_dirs=(), text_column="text
     # `_pack` is imported from the MODULE, not the package: helpers/__init__ re-exports with
     # `from .utils import *`, which by definition skips underscore names.
     from helpers import corpus_files, bar
-    from helpers.utils import _pack
+    from helpers.utils import _pack, corpus_bytes
     files = corpus_files(root, exclude_dirs)
     docs = []
-    # The bar counts DOCUMENTS, not files. A corpus is three parquet shards now, not thirty
-    # thousand text files, so a per-file bar sits at 0/3 for minutes and says nothing about
-    # whether the scan is progressing or hung. The file counter goes in the postfix, where it
-    # answers "how much is left" without being the only thing that ever moves.
-    with bar("[corpus] scanning corpus", unit="doc") as b:
+    # The bar is measured in BYTES OF TEXT, not in files. A corpus is three parquet shards
+    # now, not thirty thousand text files, so a per-file bar sits at 0/3 for minutes; and a
+    # bar counting documents moves but has no denominator, so it cannot say how much is left.
+    # Bytes are knowable in advance (see corpus_bytes) and are what the time is actually spent
+    # on, so the percentage and the estimate mean something.
+    with bar("[corpus] scanning corpus", unit="B", unit_scale=True,
+             total=corpus_bytes(files, text_column)) as b:
         for i, fp in enumerate(files, 1):
-            b.set_postfix_str(f"file {i}/{len(files)} {os.path.basename(fp)[:28]}")
             try:
                 for d in _pack(fp, max_words, text_column):
-                    docs.append(d); b.update(1)
+                    docs.append(d)
+                    b.update(len(d.encode("utf-8", "ignore")))
+                    if len(docs) % 200 == 0:
+                        b.set_postfix_str(f"file {i}/{len(files)}, {len(docs):,} docs")
             except Exception:                                  # noqa: BLE001
                 continue
+        b.set_postfix_str(f"file {len(files)}/{len(files)}, {len(docs):,} docs")
     return [{"prompt": "", "chosen": d, "rejected": ""} for d in docs], len(files)
 
 

@@ -49,20 +49,25 @@ def progress(it, desc="", initial=0, total=None):
         return it
 
 
-def bar(desc, unit="it", total=None):
-    """A tqdm bar for work whose SIZE IS NOT KNOWN IN ADVANCE -- use it as a context manager
-    and call .update() as items are produced.
+def bar(desc, unit="it", total=None, unit_scale=False):
+    """A tqdm bar driven by .update() rather than by wrapping an iterable.
 
     `progress` wraps an iterable and is right when the count is known. It is wrong when the
     iterable is a handful of very large files: the bar then ticks once per file and sits still
     for minutes, which is indistinguishable from a hang. This counts the units the work is
     actually made of, and the caller puts the coarse position in the postfix.
 
+    ALWAYS PASS A TOTAL. Without one tqdm can print a count and a rate but no percentage and
+    no estimate, and "156163doc [02:57, 900doc/s]" does not answer the only question being
+    asked, which is how much is left. Where the exact count is unknowable in advance, measure
+    the work in a unit that IS knowable -- bytes, usually, via corpus_bytes below.
+
     Absence of tqdm must never be fatal, so a no-op stand-in with the same interface is
     returned instead."""
     try:
         from tqdm import tqdm
-        return tqdm(desc=desc, unit=unit, total=total, leave=False)
+        return tqdm(desc=desc, unit=unit, total=total, leave=False, unit_scale=unit_scale,
+                    dynamic_ncols=True)
     except Exception:                                          # noqa: BLE001
         class _Null:
             def __enter__(self): return self
@@ -1177,6 +1182,35 @@ def _read(path, sig, st):
     return out
 
 
+def corpus_bytes(files, text_column="text"):
+    """Total UNCOMPRESSED bytes of `files` -- the denominator a progress bar needs.
+
+    A parquet file's size on disk is its compressed size, which for prose is two or three
+    times smaller than the text it holds; using it would drive the bar past 100%. Parquet
+    records the uncompressed size of every row group in its FOOTER, so the true figure costs
+    a metadata read and no data. Anything else is its size on disk, which is already the
+    number of bytes that will be read.
+
+    Best-effort: a file that cannot be measured contributes its on-disk size, and a total that
+    is slightly wrong is a bar that is slightly wrong, never a failure."""
+    total = 0
+    for fp in files:
+        try:
+            if os.path.splitext(fp)[1].lower() == ".parquet":
+                import pyarrow.parquet as pq
+                md = pq.ParquetFile(fp).metadata
+                total += sum(md.row_group(i).total_byte_size
+                             for i in range(md.num_row_groups))
+            else:
+                total += os.path.getsize(fp)
+        except Exception:                                      # noqa: BLE001
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
+
+
 def _split_token(name):
     """The leading name token of a file: `validation-00000-of-00001.parquet` -> "validation",
     `test_0003.txt` -> "test", `doc.0.parquet` -> "doc"."""
@@ -1283,14 +1317,19 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
         The leading space matches Encoder's convention for a response, so a document read from
         the stream and the same document encoded on the fly are the same ids.
         """
-        with bar(f"[{stage}] tokenizing corpus", unit="doc") as b:
+        n_docs = 0
+        with bar(f"[{stage}] tokenizing corpus", unit="B", unit_scale=True,
+                 total=corpus_bytes(files, text_column)) as b:
             for i, fp in enumerate(files, 1):
-                b.set_postfix_str(f"file {i}/{len(files)} {os.path.basename(fp)[:28]}")
                 for d in _pack(fp, max_words, text_column):
-                    b.update(1)
+                    n_docs += 1
+                    b.update(len(d.encode("utf-8", "ignore")))
+                    if n_docs % 200 == 0:
+                        b.set_postfix_str(f"file {i}/{len(files)}, {n_docs:,} docs")
                     ids = ordinary(" " + d)
                     if ids:
                         yield ids
+            b.set_postfix_str(f"file {len(files)}/{len(files)}, {n_docs:,} docs")
 
     log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
     token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log)
