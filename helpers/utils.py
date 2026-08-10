@@ -1283,7 +1283,8 @@ def corpus_stream_path(tok, root, sig):
 
 
 def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
-                       extensions=None, text_column="text", stage="tokenize", force=False):
+                       extensions=None, text_column="text", stage="tokenize", force=False,
+                       resume=True):
     """Tokenise a corpus into one memory-mapped stream; return (stream, n_files).
 
     Reused when a current stream already exists, which is what makes this cheap to re-run and
@@ -1343,7 +1344,7 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
     log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
     token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log,
                       shard_bytes=int(getattr(config, "TOKENS", {}).get("shard_mb", 100))
-                      * 1024 * 1024)
+                      * 1024 * 1024, resume=resume and not force)
     return token_store.TokenStream(path), len(files)
 
 

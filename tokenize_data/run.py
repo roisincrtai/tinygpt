@@ -54,7 +54,10 @@ def corpora(args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="tokenise the corpora into token streams")
     ap.add_argument("--only", default="", help="substring of a scheme name, e.g. tiny")
-    ap.add_argument("--force", action="store_true", help="rebuild even if current")
+    ap.add_argument("--force", action="store_true",
+                    help="discard the existing shards and tokenise from the start")
+    ap.add_argument("--no-resume", dest="no_resume", action="store_true",
+                    help="same, spelled as the trainers spell it")
     ap.add_argument("--list", action="store_true", help="show what would be built, and where")
     ap.add_argument("--max_words", type=int, default=config.PRETRAIN["max_words"])
     ap.add_argument("--text_column", default=config.PRETRAIN["text_column"])
@@ -99,7 +102,8 @@ def main(argv=None):
             continue
         stream, n_files = helpers.build_token_stream(
             path, tok, a.max_words, config.PRETRAIN["exclude_dirs"], log=print,
-            text_column=a.text_column, stage=f"tokenize/{scheme}", force=a.force)
+            text_column=a.text_column, stage=f"tokenize/{scheme}",
+            force=a.force or a.no_resume)
         if stream is None:
             print(f"[tokenize] {scheme}: no corpus files under {path}")
             rows += [(scheme, "no corpus files")]

@@ -71,9 +71,12 @@ def convert_split(files, out_dir, split, max_bytes, rows_per_group=200,
                   compression="zstd", root=None, log=print, dry_run=False):
     """Write `files` as <split>-<i>-of-<n>.parquet shards of at most `max_bytes` each.
 
-    Shards are written under a temporary name and renamed at the end, because the `-of-<n>`
-    suffix cannot be known until the last document has been written and a name that has to
-    be corrected afterwards is a name that will one day be left uncorrected."""
+    Shards are written under their FINAL-ish name and given the `-of-<n>` suffix at the end,
+    because that suffix cannot be known until the last document is written. What is not done
+    is holding them under a .part name meanwhile: a conversion killed after nine shards would
+    then leave nine files nothing can read, and at this scale an interrupted run must leave
+    every byte it produced usable. A shard without the suffix is a complete, readable parquet
+    file; only its name is provisional."""
     pa, pq = _pq()
     schema = pa.schema([("id", pa.int32()), ("source", pa.string()), ("text", pa.string())])
     parts, writer, path = [], None, None
@@ -108,7 +111,7 @@ def convert_split(files, out_dir, split, max_bytes, rows_per_group=200,
             n_rows += 1; n_chars += len(text)
             continue
         if writer is None:
-            path = os.path.join(out_dir, f"{split}-{len(parts):05d}.parquet.part")
+            path = os.path.join(out_dir, f"{split}-{len(parts):05d}.parquet")
             parts.append(path)
             writer = pq.ParquetWriter(path, schema, compression=compression)
         buf_id.append(n_rows); buf_src.append(os.path.relpath(fp, root or os.path.dirname(fp)))

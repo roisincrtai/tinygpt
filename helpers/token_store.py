@@ -1,69 +1,71 @@
 """
 token_store.py -- the pre-tokenised corpus as a set of memory-mapped SHARD FILES.
 
-    build(stem, sig, documents, eos, vocab, log)   write it, streaming, once
+    build(stem, sig, documents, eos, vocab, log)   write it, appending as it goes
     TokenStream(stem)                              open it; nothing is read into memory
     stream.batch(B, T, generator, device)          (ids, attn, rmask) for one training step
 
-WHY MEMORY-MAPPED. The corpus used to be a Python list of lists of ints, built at startup and
-held for the whole run. A Python int is a 28-byte object and a list of them costs another 8
-bytes per slot, so 2 billion tokens -- the budget ZetaGPT-S is trained on -- would want
-something like 70 GB of RAM to represent 4 GB of data. This module stores tokens as flat
-arrays of machine integers and lets the OS page in the parts being read, which is what every
-large-scale pretraining pipeline does (GPT-2's and nanoGPT's .bin, Megatron's indexed dataset,
-the mmap'd shards of GPT-NeoX). Resident memory becomes a function of the batch, not of the
-corpus.
+NOTHING IS HELD BACK. Each document is appended to the open shard the moment it is tokenised,
+and the manifest is rewritten every few seconds with the counts that are actually on disk.
+Buffering a shard's worth of tokens before writing would mean a run killed after nine hours
+left an empty directory -- which is exactly what a corpus of 10 TB cannot afford, and what
+this module used to do. The invariant is: what has been read has been written.
 
-WHY SHARDS, AND NOT ONE FILE. A corpus can be 10 TB. One file that size is a single point of
-failure in every sense: an interrupted build starts again from nothing, a copy that fails at
-99% copies nothing, no filesystem or transfer tool likes it, and it cannot be produced or
-consumed in parallel. A set of ~100 MB pieces is resumable (a completed shard is never
-rebuilt), copyable incrementally, and checkable one piece at a time. They sit in the corpus's
-own directory -- EVERY FILE THERE ENDS IN .tokens, with no bare directory whose name looks
-like a truncated filename:
+RESUME IS THE DEFAULT. A build finds the manifest, truncates the last shard back to the last
+recorded position (the bytes after it were written but not yet accounted for), and continues
+from the document after the last one counted. This is sound because the document order is
+deterministic -- the corpus files are sorted, each is packed in order -- so document N is
+always the same document. Pass resume=False to start again.
 
-    <corpus dir>/<name>_<sig>_00000.tokens     shard 0
+    <corpus dir>/<name>_<sig>_00000.tokens     shard 0: RAW tokens, nothing else
     <corpus dir>/<name>_<sig>_00001.tokens     shard 1
     <corpus dir>/<name>_<sig>_index.json       the manifest: dtype, eos, per-shard counts
 
-The signature is in every file NAME rather than in a directory above them, which is what lets
-two packings of one corpus coexist without that extra level.
+A shard is raw tokens with no header, which is what makes appending to it trivial and makes a
+partial file a valid prefix of a whole one rather than a corrupt file. Everything a reader
+needs is in the manifest; document boundaries are recovered from the EOS separators, lazily,
+per shard, and only for the shards a caller actually asks about.
 
-SAMPLING CROSSES SHARD BOUNDARIES. A window that begins near the end of a shard is completed
-from the head of the next one, so the shard size is invisible to training. Drawing the shard
-first and then an offset inside it would have been simpler and slightly wrong: the last T
-positions of every shard would never start a window, which is a small bias that grows as the
-shards get smaller and that nothing downstream could detect.
+WHY SHARDS. A corpus can be 10 TB, and one file that size cannot be resumed, cannot be copied
+incrementally, and loses everything to a single bad byte. ~100 MB pieces are re-fetchable,
+verifiable one at a time, and readable in parallel.
 
-uint16 WHEN THE VOCABULARY ALLOWS IT. A byte-level BPE with 50,000 merges has 50,259 tokens,
-which fits in 16 bits, so every token costs 2 bytes instead of 4 -- half the file, half the
-page cache, half the bytes moved per step. The dtype is chosen from the vocabulary size and
-recorded, so a larger vocabulary silently widens to uint32 rather than wrapping around, which
-would be a silent corruption.
+WHY MEMORY-MAPPED. The corpus was once a Python list of lists of ints: a 28-byte object per
+token plus 8 bytes of list slot, so 2 billion tokens would want ~70 GB of RAM to hold 4 GB of
+data. Flat arrays paged in by the OS make resident memory a function of the batch, not of the
+corpus -- the same choice as GPT-2's and nanoGPT's .bin, Megatron's indexed dataset and the
+mmap'd shards of GPT-NeoX.
 
-CONTIGUOUS, EOS-SEPARATED, the GPT-2/nanoGPT/Megatron arrangement: documents concatenated with
-an end-of-sequence token between them, a sample being T+1 tokens from a random offset. There
-is no padding, so every position in every batch carries a gradient; one document per row
-padded to T would spend 20-40% of a batch on padding at T=512. A sample may straddle a
-document boundary, and the EOS sitting there is precisely what teaches the model where a
-document ends.
+uint16 WHEN THE VOCABULARY ALLOWS IT. 50,259 tokens fit in 16 bits, so each costs 2 bytes
+rather than 4 -- half the file, half the page cache, half the bytes per step. The dtype is
+chosen from the vocabulary size and recorded, so a larger vocabulary widens to uint32 instead
+of wrapping around into a silent corruption.
 
-EACH SHARD IS SELF-DESCRIBING -- a JSON header line, then its document offsets, then its
-tokens -- so a shard can be inspected alone, and the manifest is a convenience rather than the
-only thing that knows the format.
+CONTIGUOUS, EOS-SEPARATED sampling, as in GPT-2, nanoGPT and Megatron: documents concatenated
+with an end-of-sequence token between them, a sample being T+1 tokens from a random offset.
+No padding, so every position carries a gradient. A window that begins near the end of a shard
+is completed from the head of the next, so the shard size is invisible to training -- drawing
+a shard first and then an offset inside it would mean the last T positions of every shard could
+never begin a window, a bias nothing downstream could detect.
 """
 import glob
 import json
 import os
+import time
 
 MAGIC = "zetagpt-tokens"
-VERSION = 2
+VERSION = 3
 SHARD_BYTES = 100 * 1024 * 1024          # ~100 MB of tokens per shard
+FLUSH_SECONDS = 5.0                      # how often the manifest catches up with the file
 
 
 def dtype_for(vocab_size):
-    """The narrowest integer type that can hold every id. numpy names, stored in the header."""
+    """The narrowest integer type that can hold every id. numpy names, stored in the manifest."""
     return "uint16" if int(vocab_size) <= 65535 else "uint32"
+
+
+def _itemsize(dtype):
+    return 2 if dtype == "uint16" else 4
 
 
 def _np():
@@ -75,130 +77,13 @@ def _np():
                          f"         pip install numpy") from e
 
 
-# `path` throughout this module is a FILE STEM, not a directory:
-#
-#     <corpus dir>/<name>_<sig>          the stem
-#     <corpus dir>/<name>_<sig>_00000.tokens
-#     <corpus dir>/<name>_<sig>_index.json
-#
-# The shards live in the corpus's own directory rather than in a subdirectory of their own,
-# so every file there ends in .tokens and nothing is a bare directory whose name looks like a
-# truncated filename. Two packings of one corpus coexist because the signature is in every
-# file name, not in a directory above them.
-def index_path(path):
-    return f"{path}_index.json"
+# `stem` throughout is a FILE STEM, not a directory: <corpus dir>/<name>_<sig>
+def index_path(stem):
+    return f"{stem}_index.json"
 
 
-def shard_path(path, i):
-    return f"{path}_{i:05d}.tokens"
-
-
-# --------------------------------------------------------------------------- #
-# building
-# --------------------------------------------------------------------------- #
-def _write_shard(path, dtype, eos, sig, offsets, flat, np):
-    """One shard: header line, its document offsets, then its tokens. Written to <path>.part
-    and renamed, so an interrupted write can never leave a file a later run would trust."""
-    head = {"magic": MAGIC, "version": VERSION, "dtype": dtype, "eos": int(eos),
-            "sig": sig, "n_tokens": int(len(flat)), "n_docs": len(offsets) - 1}
-    blob = (json.dumps(head) + "\n").encode("utf-8")
-    pad = (-len(blob)) % 4096            # page-align the arrays; a misaligned mmap can cost a
-    head["off_docs"] = len(blob) + pad   # copy on every read
-    head["off_tokens"] = head["off_docs"] + 8 * len(offsets)
-    blob = (json.dumps(head) + "\n").encode("utf-8")
-    blob += b" " * (head["off_docs"] - len(blob))
-    tmp = path + ".part"
-    with open(tmp, "wb") as f:
-        f.write(blob)
-        offsets.tofile(f)
-        flat.tofile(f)
-    os.replace(tmp, path)
-    return head
-
-
-def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES):
-    """Write `documents` (an iterable of id lists) as a set of token shards.
-
-    STREAMING, and RESUMABLE. Documents are consumed from an iterator and flushed a shard at a
-    time, so neither the corpus nor the output is ever fully in memory; and the manifest is
-    rewritten after every completed shard, so a build killed at 8 TB restarts at 8 TB rather
-    than at zero. Resuming skips the documents the finished shards already hold, which is
-    sound because the document order is deterministic: the corpus files are sorted and each is
-    packed in order.
-
-    Returns (n_tokens, n_docs)."""
-    import array
-    np = _np()
-    dtype = dtype_for(vocab_size)
-    os.makedirs(os.path.dirname(stem) or ".", exist_ok=True)
-
-    # what a previous, interrupted run of THIS signature already finished
-    done = _read_index(stem)
-    if done and done.get("sig") == sig and not done.get("complete"):
-        shards = done["shards"]
-        skip_docs = sum(s["n_docs"] for s in shards)
-        log(f"[tokens] resuming: {len(shards)} shard(s) already written, "
-            f"{skip_docs:,} documents; skipping ahead")
-    else:
-        shards, skip_docs = [], 0
-        if done:                       # same stem, different signature: its shards are stale
-            for f in glob.glob(f"{stem}_*.tokens") + glob.glob(f"{stem}_*.part"):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-
-    # array("Q") for the offsets, not a list: a shard of five million documents costs 40 MB as
-    # machine integers and ~200 MB as Python ints, and this is the one structure that scales
-    # with the corpus rather than with the batch
-    offsets = array.array("Q", [0])
-    buf = array.array("H" if dtype == "uint16" else "I")
-    seen, n_tokens_total, n_docs_total = 0, sum(s["n_tokens"] for s in shards), skip_docs
-    per_shard = max(shard_bytes // (2 if dtype == "uint16" else 4), 1)
-
-    def flush():
-        nonlocal offsets, buf, n_tokens_total
-        if not len(buf):
-            return
-        p = shard_path(stem, len(shards))
-        head = _write_shard(p, dtype, eos, sig, offsets, buf, np)
-        shards.append({"file": os.path.basename(p), "n_tokens": head["n_tokens"],
-                       "n_docs": head["n_docs"]})
-        n_tokens_total += head["n_tokens"]
-        _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
-        log(f"[tokens] shard {len(shards) - 1:05d}: {head['n_tokens']:,} tokens, "
-            f"{os.path.getsize(p) / 1048576:.1f} MB")
-        offsets = array.array("Q", [0])
-        buf = array.array("H" if dtype == "uint16" else "I")
-
-    for ids in documents:
-        if not ids:
-            continue
-        seen += 1
-        if seen <= skip_docs:                                  # already in a finished shard
-            continue
-        buf.extend(ids)
-        buf.append(eos)                                        # the join the model learns
-        offsets.append(len(buf))
-        n_docs_total += 1
-        if len(buf) >= per_shard:
-            flush()
-    flush()
-    _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=True)
-    log(f"[tokens] wrote {n_tokens_total:,} tokens ({dtype}) in {len(shards)} shard(s) "
-        f"from {n_docs_total:,} documents -> {stem}")
-    return n_tokens_total, n_docs_total
-
-
-def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete):
-    tmp = index_path(stem) + ".part"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"magic": MAGIC, "version": VERSION, "sig": sig, "dtype": dtype,
-                   "eos": int(eos), "vocab_size": int(vocab_size), "complete": bool(complete),
-                   "n_tokens": sum(s["n_tokens"] for s in shards),
-                   "n_docs": sum(s["n_docs"] for s in shards),
-                   "shards": shards}, f, indent=1)
-    os.replace(tmp, index_path(stem))
+def shard_path(stem, i):
+    return f"{stem}_{i:05d}.tokens"
 
 
 def _read_index(stem):
@@ -209,42 +94,170 @@ def _read_index(stem):
         return None
 
 
+def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete):
+    """Rewrite the manifest, through a .part rename so a reader never sees half of it."""
+    tmp = index_path(stem) + ".part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"magic": MAGIC, "version": VERSION, "sig": sig, "dtype": dtype,
+                   "eos": int(eos), "vocab_size": int(vocab_size), "complete": bool(complete),
+                   "n_tokens": sum(s["n_tokens"] for s in shards),
+                   "n_docs": sum(s["n_docs"] for s in shards),
+                   "shards": shards}, f, indent=1)
+    os.replace(tmp, index_path(stem))
+
+
+# --------------------------------------------------------------------------- #
+# building
+# --------------------------------------------------------------------------- #
+def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES,
+          resume=True, flush_seconds=FLUSH_SECONDS):
+    """Append `documents` (an iterable of id lists) to the shards at `stem`.
+
+    Every document is written as it arrives; the manifest catches up every `flush_seconds`.
+    Returns (n_tokens, n_docs)."""
+    import array
+    dtype = dtype_for(vocab_size)
+    isz = _itemsize(dtype)
+    typecode = "H" if isz == 2 else "I"
+    os.makedirs(os.path.dirname(stem) or ".", exist_ok=True)
+
+    idx = _read_index(stem)
+    stale = idx is not None and idx.get("sig") != sig
+    if stale or not resume:
+        if idx is not None:
+            why = "a different corpus or packing" if stale else "--no-resume"
+            log(f"[tokens] discarding the existing shards ({why})")
+        for f in glob.glob(f"{stem}_*.tokens") + glob.glob(f"{stem}_*.part"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        idx = None
+
+    shards = list(idx["shards"]) if idx else []
+    if idx and idx.get("complete"):
+        log(f"[tokens] already complete: {idx['n_tokens']:,} tokens in {len(shards)} shard(s)")
+        return idx["n_tokens"], idx["n_docs"]
+
+    # RESUME. The last shard may hold bytes written after the manifest was last updated; they
+    # belong to documents the manifest does not count, so they are cut off. Truncating to a
+    # recorded boundary is what makes "written" and "counted" agree again.
+    skip_docs = sum(s["n_docs"] for s in shards)
+    if shards:
+        last = shard_path(stem, len(shards) - 1)
+        want = shards[-1]["n_tokens"] * isz
+        have = os.path.getsize(last) if os.path.exists(last) else 0
+        if have != want:
+            with open(last, "r+b") as f:
+                f.truncate(want)
+            log(f"[tokens] trimmed {(have - want) / 1048576:.1f} MB of uncounted tail from "
+                f"{os.path.basename(last)}")
+        log(f"[tokens] resuming after {skip_docs:,} documents in {len(shards)} shard(s)")
+
+    per_shard = max(shard_bytes // isz, 1)
+    seen = 0
+    fh = None
+    cur = shards[-1] if shards and shards[-1]["n_tokens"] < per_shard else None
+    if cur is None and shards:
+        pass                                     # the last shard is full; a new one starts below
+    last_flush = time.time()
+
+    def open_shard():
+        nonlocal fh, cur
+        if cur is None:
+            cur = {"file": os.path.basename(shard_path(stem, len(shards))),
+                   "n_tokens": 0, "n_docs": 0}
+            shards.append(cur)
+        fh = open(os.path.join(os.path.dirname(stem) or ".", cur["file"]), "ab")
+
+    def close_shard():
+        nonlocal fh, cur
+        if fh is not None:
+            fh.flush(); os.fsync(fh.fileno()); fh.close(); fh = None
+        cur = None
+
+    try:
+        for ids in documents:
+            if not ids:
+                continue
+            seen += 1
+            if seen <= skip_docs:                # already on disk and counted
+                continue
+            if fh is None:
+                open_shard()
+                log(f"[tokens] shard {len(shards) - 1:05d} open")
+            # WRITTEN NOW, not when the shard fills: a run killed at any moment leaves every
+            # document it read on disk, and the manifest at most `flush_seconds` behind.
+            array.array(typecode, ids + [eos]).tofile(fh)
+            cur["n_tokens"] += len(ids) + 1
+            cur["n_docs"] += 1
+            now = time.time()
+            if now - last_flush >= flush_seconds:
+                fh.flush()
+                _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
+                last_flush = now
+            if cur["n_tokens"] >= per_shard:
+                n = len(shards) - 1
+                log(f"[tokens] shard {n:05d} done: {cur['n_tokens']:,} tokens, "
+                    f"{cur['n_tokens'] * isz / 1048576:.1f} MB")
+                close_shard()
+                _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
+                last_flush = time.time()
+    finally:
+        if fh is not None:
+            fh.flush(); os.fsync(fh.fileno()); fh.close(); fh = None
+        # the manifest is brought up to date even when the loop raised, so an interrupted
+        # build resumes from where it truly stopped rather than from the last periodic flush
+        if shards:
+            _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
+
+    _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=True)
+    n_tok = sum(s["n_tokens"] for s in shards)
+    n_doc = sum(s["n_docs"] for s in shards)
+    log(f"[tokens] wrote {n_tok:,} tokens ({dtype}) in {len(shards)} shard(s) from "
+        f"{n_doc:,} documents -> {stem}_*.tokens")
+    return n_tok, n_doc
+
+
 # --------------------------------------------------------------------------- #
 # reading
 # --------------------------------------------------------------------------- #
 class _Shard:
-    """One shard, memory-mapped lazily: opening a stream of ten thousand shards must not open
-    ten thousand files, so the mapping is created on first touch."""
+    """One shard, memory-mapped lazily: a corpus of ten thousand shards must not open ten
+    thousand files to be described, so the mapping is created on first touch."""
 
-    def __init__(self, path, np):
-        self.path, self._np = path, np
-        with open(path, "rb") as f:
-            self.head = json.loads(f.readline().decode("utf-8").rstrip("\0 \n"))
-        self.n_tokens = self.head["n_tokens"]
-        self.n_docs = self.head["n_docs"]
-        self._tokens = self._offsets = None
+    def __init__(self, path, dtype, n_tokens, n_docs, eos, np):
+        self.path, self.dtype, self.eos, self._np = path, dtype, eos, np
+        self.n_tokens, self.n_docs = n_tokens, n_docs
+        self._tokens = self._starts = None
 
     @property
     def tokens(self):
         if self._tokens is None:
-            self._tokens = self._np.memmap(self.path, dtype=self.head["dtype"], mode="r",
-                                           offset=self.head["off_tokens"],
+            self._tokens = self._np.memmap(self.path, dtype=self.dtype, mode="r",
                                            shape=(self.n_tokens,))
         return self._tokens
 
     @property
-    def offsets(self):
-        if self._offsets is None:
-            self._offsets = self._np.memmap(self.path, dtype="uint64", mode="r",
-                                            offset=self.head["off_docs"],
-                                            shape=(self.n_docs + 1,))
-        return self._offsets
+    def starts(self):
+        """Where each document begins, RECOVERED from the EOS separators.
+
+        Not stored: a manifest carrying an offset per document would be gigabytes for a corpus
+        of this size, and the information is already in the stream -- every document ends with
+        exactly one EOS. Derived per shard on first use, so previews touch a handful of shards
+        and training, which never asks, touches none."""
+        if self._starts is None:
+            np = self._np
+            ends = np.flatnonzero(np.asarray(self.tokens) == self.eos)
+            self._starts = np.concatenate(([0], ends[:-1] + 1)) if len(ends) else np.zeros(0, "int64")
+            self._ends = ends
+        return self._starts
 
 
 class TokenStream:
-    """A directory of memory-mapped token shards, read as one contiguous stream.
+    """The shards at a stem, read as one contiguous stream.
 
-    `len(stream)` is the DOCUMENT count, so the stage logs and tables read as they did when the
+    `len(stream)` is the DOCUMENT count, so stage logs and tables read as they did when the
     corpus was a list of documents; `stream.n_tokens` is the token count."""
 
     def __init__(self, path):
@@ -253,14 +266,15 @@ class TokenStream:
         self.path = path
         idx = _read_index(path)
         if not idx or idx.get("magic") != MAGIC:
-            raise ValueError(f"{path}_index.json is not a {MAGIC} manifest")
+            raise ValueError(f"{index_path(path)} is not a {MAGIC} manifest")
         if not idx.get("complete"):
-            raise ValueError(f"{path} is an unfinished build ({len(idx['shards'])} shards)")
+            raise ValueError(f"{path} is an unfinished build "
+                             f"({idx.get('n_tokens', 0):,} tokens so far)")
         self.head, self.sig, self.dtype = idx, idx.get("sig", ""), idx["dtype"]
         self.eos, self.n_tokens, self.n_docs = idx["eos"], idx["n_tokens"], idx["n_docs"]
         base = os.path.dirname(path) or "."
-        self.shards = [_Shard(os.path.join(base, s["file"]), np) for s in idx["shards"]]
-        # cumulative starts, so a global offset maps to (shard, offset) by one bisect
+        self.shards = [_Shard(os.path.join(base, s["file"]), self.dtype, s["n_tokens"],
+                              s["n_docs"], self.eos, np) for s in idx["shards"]]
         self._tok_start, self._doc_start, t, d = [], [], 0, 0
         for s in self.shards:
             self._tok_start.append(t); self._doc_start.append(d)
@@ -279,12 +293,7 @@ class TokenStream:
         return max(0, min(bisect.bisect_right(starts, i) - 1, len(self.shards) - 1))
 
     def read(self, start, n):
-        """`n` tokens from global offset `start`, ACROSS SHARD BOUNDARIES.
-
-        A window is completed from the following shard when it runs off the end of one, so the
-        shard size is invisible to training. Drawing within a single shard would have been
-        simpler and quietly biased: the last n positions of every shard could never begin a
-        window."""
+        """`n` tokens from global offset `start`, ACROSS SHARD BOUNDARIES."""
         np = self._np
         out, k = [], self._locate(self._tok_start, start)
         off = start - self._tok_start[k]
@@ -303,26 +312,26 @@ class TokenStream:
         k = self._locate(self._doc_start, i)
         s = self.shards[k]
         j = i - self._doc_start[k]
-        a, b = int(s.offsets[j]), int(s.offsets[j + 1])
-        return s.tokens[a:b - 1].tolist()
+        starts = s.starts
+        a = int(starts[j])
+        b = int(s._ends[j])
+        return s.tokens[a:b].tolist()
 
     def batch(self, batch, seq_len, generator=None, device=None):
         """One training batch: (ids, attn, rmask), each (batch, seq_len + 1).
 
         seq_len + 1 tokens are drawn so the loop's `logits[:, :-1]` against `ids[:, 1:]` yields
         exactly seq_len predictions. attn and rmask are all ones: a packed stream has no
-        padding to hide and no prompt to exclude, so every position is a target -- which is the
-        entire point of packing.
+        padding to hide and no prompt to exclude, so every position is a target.
 
         Offsets come from the SAME torch generator the training loop checkpoints, so a resumed
-        run continues the data order it would have had rather than starting a new one."""
+        run continues the data order it would have had."""
         import torch
         np = self._np
         n = seq_len + 1
         hi = max(self.n_tokens - n, 1)
         starts = torch.randint(0, hi, (batch,), generator=generator).tolist()
-        arr = np.stack([self.read(s, n) for s in starts])
-        ids = torch.from_numpy(arr)
+        ids = torch.from_numpy(np.stack([self.read(s, n) for s in starts]))
         if device is not None:
             ids = ids.to(device)
         ones = torch.ones_like(ids)
