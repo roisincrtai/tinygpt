@@ -1,8 +1,8 @@
 """
-token_store.py -- the pre-tokenised corpus as a directory of memory-mapped SHARDS.
+token_store.py -- the pre-tokenised corpus as a set of memory-mapped SHARD FILES.
 
-    build(dir, sig, documents, eos, vocab, log)    write it, streaming, once
-    TokenStream(dir)                               open it; nothing is read into memory
+    build(stem, sig, documents, eos, vocab, log)   write it, streaming, once
+    TokenStream(stem)                              open it; nothing is read into memory
     stream.batch(B, T, generator, device)          (ids, attn, rmask) for one training step
 
 WHY MEMORY-MAPPED. The corpus used to be a Python list of lists of ints, built at startup and
@@ -17,12 +17,17 @@ corpus.
 WHY SHARDS, AND NOT ONE FILE. A corpus can be 10 TB. One file that size is a single point of
 failure in every sense: an interrupted build starts again from nothing, a copy that fails at
 99% copies nothing, no filesystem or transfer tool likes it, and it cannot be produced or
-consumed in parallel. A directory of ~100 MB pieces is resumable (a completed shard is never
-rebuilt), copyable incrementally, and checkable one piece at a time. The layout is
+consumed in parallel. A set of ~100 MB pieces is resumable (a completed shard is never
+rebuilt), copyable incrementally, and checkable one piece at a time. They sit in the corpus's
+own directory -- EVERY FILE THERE ENDS IN .tokens, with no bare directory whose name looks
+like a truncated filename:
 
-    <dir>/<name>_<sig>_00000.tokens     shard 0
-    <dir>/<name>_<sig>_00001.tokens     shard 1
-    <dir>/<name>_<sig>_index.json       the manifest: dtype, eos, per-shard counts
+    <corpus dir>/<name>_<sig>_00000.tokens     shard 0
+    <corpus dir>/<name>_<sig>_00001.tokens     shard 1
+    <corpus dir>/<name>_<sig>_index.json       the manifest: dtype, eos, per-shard counts
+
+The signature is in every file NAME rather than in a directory above them, which is what lets
+two packings of one corpus coexist without that extra level.
 
 SAMPLING CROSSES SHARD BOUNDARIES. A window that begins near the end of a shard is completed
 from the head of the next one, so the shard size is invisible to training. Drawing the shard
@@ -47,9 +52,9 @@ EACH SHARD IS SELF-DESCRIBING -- a JSON header line, then its document offsets, 
 tokens -- so a shard can be inspected alone, and the manifest is a convenience rather than the
 only thing that knows the format.
 """
+import glob
 import json
 import os
-import shutil
 
 MAGIC = "zetagpt-tokens"
 VERSION = 2
@@ -70,17 +75,22 @@ def _np():
                          f"         pip install numpy") from e
 
 
-def _tag(path):
-    """<name>_<sig> -- the stem every file in the directory shares."""
-    return os.path.basename(os.path.normpath(path))
+# `path` throughout this module is a FILE STEM, not a directory:
+#
+#     <corpus dir>/<name>_<sig>          the stem
+#     <corpus dir>/<name>_<sig>_00000.tokens
+#     <corpus dir>/<name>_<sig>_index.json
+#
+# The shards live in the corpus's own directory rather than in a subdirectory of their own,
+# so every file there ends in .tokens and nothing is a bare directory whose name looks like a
+# truncated filename. Two packings of one corpus coexist because the signature is in every
+# file name, not in a directory above them.
+def index_path(path):
+    return f"{path}_index.json"
 
 
-def index_path(dir_path):
-    return os.path.join(dir_path, f"{_tag(dir_path)}_index.json")
-
-
-def shard_path(dir_path, i):
-    return os.path.join(dir_path, f"{_tag(dir_path)}_{i:05d}.tokens")
+def shard_path(path, i):
+    return f"{path}_{i:05d}.tokens"
 
 
 # --------------------------------------------------------------------------- #
@@ -106,8 +116,8 @@ def _write_shard(path, dtype, eos, sig, offsets, flat, np):
     return head
 
 
-def build(dir_path, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES):
-    """Write `documents` (an iterable of id lists) as a directory of token shards.
+def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES):
+    """Write `documents` (an iterable of id lists) as a set of token shards.
 
     STREAMING, and RESUMABLE. Documents are consumed from an iterator and flushed a shard at a
     time, so neither the corpus nor the output is ever fully in memory; and the manifest is
@@ -120,10 +130,10 @@ def build(dir_path, sig, documents, eos, vocab_size, log=print, shard_bytes=SHAR
     import array
     np = _np()
     dtype = dtype_for(vocab_size)
-    os.makedirs(dir_path, exist_ok=True)
+    os.makedirs(os.path.dirname(stem) or ".", exist_ok=True)
 
     # what a previous, interrupted run of THIS signature already finished
-    done = _read_index(dir_path)
+    done = _read_index(stem)
     if done and done.get("sig") == sig and not done.get("complete"):
         shards = done["shards"]
         skip_docs = sum(s["n_docs"] for s in shards)
@@ -131,13 +141,12 @@ def build(dir_path, sig, documents, eos, vocab_size, log=print, shard_bytes=SHAR
             f"{skip_docs:,} documents; skipping ahead")
     else:
         shards, skip_docs = [], 0
-        if done and done.get("sig") != sig:
-            for f in os.listdir(dir_path):                     # a different corpus lived here
-                if f.endswith((".tokens", ".tokens.part", "_index.json")):
-                    try:
-                        os.remove(os.path.join(dir_path, f))
-                    except OSError:
-                        pass
+        if done:                       # same stem, different signature: its shards are stale
+            for f in glob.glob(f"{stem}_*.tokens") + glob.glob(f"{stem}_*.part"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
 
     # array("Q") for the offsets, not a list: a shard of five million documents costs 40 MB as
     # machine integers and ~200 MB as Python ints, and this is the one structure that scales
@@ -151,12 +160,12 @@ def build(dir_path, sig, documents, eos, vocab_size, log=print, shard_bytes=SHAR
         nonlocal offsets, buf, n_tokens_total
         if not len(buf):
             return
-        p = shard_path(dir_path, len(shards))
+        p = shard_path(stem, len(shards))
         head = _write_shard(p, dtype, eos, sig, offsets, buf, np)
         shards.append({"file": os.path.basename(p), "n_tokens": head["n_tokens"],
                        "n_docs": head["n_docs"]})
         n_tokens_total += head["n_tokens"]
-        _write_index(dir_path, sig, dtype, eos, vocab_size, shards, complete=False)
+        _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
         log(f"[tokens] shard {len(shards) - 1:05d}: {head['n_tokens']:,} tokens, "
             f"{os.path.getsize(p) / 1048576:.1f} MB")
         offsets = array.array("Q", [0])
@@ -175,26 +184,26 @@ def build(dir_path, sig, documents, eos, vocab_size, log=print, shard_bytes=SHAR
         if len(buf) >= per_shard:
             flush()
     flush()
-    _write_index(dir_path, sig, dtype, eos, vocab_size, shards, complete=True)
+    _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=True)
     log(f"[tokens] wrote {n_tokens_total:,} tokens ({dtype}) in {len(shards)} shard(s) "
-        f"from {n_docs_total:,} documents -> {dir_path}")
+        f"from {n_docs_total:,} documents -> {stem}")
     return n_tokens_total, n_docs_total
 
 
-def _write_index(dir_path, sig, dtype, eos, vocab_size, shards, complete):
-    tmp = index_path(dir_path) + ".part"
+def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete):
+    tmp = index_path(stem) + ".part"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"magic": MAGIC, "version": VERSION, "sig": sig, "dtype": dtype,
                    "eos": int(eos), "vocab_size": int(vocab_size), "complete": bool(complete),
                    "n_tokens": sum(s["n_tokens"] for s in shards),
                    "n_docs": sum(s["n_docs"] for s in shards),
                    "shards": shards}, f, indent=1)
-    os.replace(tmp, index_path(dir_path))
+    os.replace(tmp, index_path(stem))
 
 
-def _read_index(dir_path):
+def _read_index(stem):
     try:
-        with open(index_path(dir_path), encoding="utf-8") as f:
+        with open(index_path(stem), encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
@@ -244,12 +253,13 @@ class TokenStream:
         self.path = path
         idx = _read_index(path)
         if not idx or idx.get("magic") != MAGIC:
-            raise ValueError(f"{path} is not a {MAGIC} directory")
+            raise ValueError(f"{path}_index.json is not a {MAGIC} manifest")
         if not idx.get("complete"):
             raise ValueError(f"{path} is an unfinished build ({len(idx['shards'])} shards)")
         self.head, self.sig, self.dtype = idx, idx.get("sig", ""), idx["dtype"]
         self.eos, self.n_tokens, self.n_docs = idx["eos"], idx["n_tokens"], idx["n_docs"]
-        self.shards = [_Shard(os.path.join(path, s["file"]), np) for s in idx["shards"]]
+        base = os.path.dirname(path) or "."
+        self.shards = [_Shard(os.path.join(base, s["file"]), np) for s in idx["shards"]]
         # cumulative starts, so a global offset maps to (shard, offset) by one bisect
         self._tok_start, self._doc_start, t, d = [], [], 0, 0
         for s in self.shards:
@@ -324,7 +334,7 @@ class TokenStream:
 
 
 def open_if_current(path, sig):
-    """The stream at `path` when it is complete and its signature matches, else None."""
+    """The stream at the stem `path` when it is complete and its signature matches."""
     idx = _read_index(path)
     if not idx or idx.get("sig") != sig or not idx.get("complete"):
         return None

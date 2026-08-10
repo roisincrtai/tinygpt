@@ -1267,14 +1267,16 @@ def corpus_signature(tok, root, files, max_words, text_column):
 
 
 def corpus_stream_path(tok, root, sig):
-    """The DIRECTORY holding a corpus's token shards:
+    """The STEM every shard of a corpus shares:
 
-        cache/tokens/<tokenizer>/<mirror of the corpus dir>/<name>_<sig>/
+        cache/tokens/<tokenizer>/<mirror of the corpus dir>/<name>_<sig>_00000.tokens
+                                                            <name>_<sig>_index.json
 
-    A directory rather than a single file because a corpus can be 10 TB, and one file that
-    size cannot be resumed after an interruption, cannot be copied incrementally, and loses
-    everything to one bad byte. Named after the corpus AND the packing signature, so two
-    packings of the same corpus sit side by side instead of one overwriting the other."""
+    Shards rather than one file because a corpus can be 10 TB, and one file that size cannot
+    be resumed after an interruption, cannot be copied incrementally, and loses everything to
+    one bad byte. They sit in the corpus's own directory, so every file there ends in .tokens;
+    the signature is in each NAME rather than in a directory above them, which is what lets
+    two packings of one corpus coexist without a level of nesting that carries no extension."""
     mirror = _mirror(root)
     name = os.path.basename(os.path.normpath(mirror)) or "corpus"
     return os.path.join(token_cache_root(tok), mirror, f"{name}_{_sig_tag(sig)}")
