@@ -482,6 +482,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 
 # stage 3 does not take the common trainer flags (it builds no model), so the corpus
 # settings it shares with stage 4 are forwarded to it separately
+[ -n "$MODEL_SCHEME" ]       && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --model_scheme $MODEL_SCHEME"
+[ -n "$PRETRAIN_DIR" ]       && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --pretrain_dir $PRETRAIN_DIR"
 [ -n "$CORPUS_MAX_WORDS" ]   && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --max_words $CORPUS_MAX_WORDS"
 [ -n "$CORPUS_TEXT_COLUMN" ] && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --text_column $CORPUS_TEXT_COLUMN"
 [ -n "$EXTRA_SET" ]          && TOKENIZE_FLAGS="$TOKENIZE_FLAGS $EXTRA_SET"
