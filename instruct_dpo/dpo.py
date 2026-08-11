@@ -184,7 +184,7 @@ def run(model, ref, enc, train_pairs, ev_pairs, tok, ckdir, args, log, monitor, 
     # module-level `import helpers` would be a circular import at interpreter start. The cycle is
     # real but harmless once both modules exist, which is exactly what a function-local import
     # expresses.
-    from helpers import (holdout_probe, progress, evaluate, rollout_curve, reward_hist, save_ckpt,
+    from helpers import (tag, holdout_probe, progress, evaluate, rollout_curve, reward_hist, save_ckpt,
                          load_ckpt, save_hist, load_hist, MasterAdamW, restore_rng,
                          exposure_probe, CosineLR, ckpt_path)
 
@@ -225,7 +225,7 @@ def run(model, ref, enc, train_pairs, ev_pairs, tok, ckdir, args, log, monitor, 
     Ntr = len(train_pairs)
     params = list(model.parameters())
     model.train()
-    bar = progress(range(start, total), desc=f"[dpo @{args.dataset}]",
+    bar = progress(range(start, total), desc=tag("dpo"),
                    initial=start, total=total)               # absolute steps
 
     for step in bar:

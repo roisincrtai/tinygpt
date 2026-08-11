@@ -28,7 +28,7 @@ import default_config as config
 import helpers
 from instruct_rlhf import ppo
 from chat import generate as sample_generate, decode as tok_decode
-from helpers import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
+from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
                      restore_rng, CosineLR, ckpt_path)
 
 NAME = "Distill"
@@ -90,7 +90,7 @@ def _teacher_texts(teacher, t_tok, prompts, device, cfg, g, max_len):
                                        device, cfg["max_new_tokens"],
                                        cfg["gen_temperature"], g, max_len)
     out = []
-    for i, p in enumerate(progress(prompts, desc="[distill] decoding teacher text",
+    for i, p in enumerate(progress(prompts, desc=tag("distill") + " decoding teacher text",
                                    total=len(prompts))):
         rids = ids[i][resp_mask[i].bool()].tolist()
         eos = getattr(t_tok, "eos_token_id", None)
@@ -146,7 +146,7 @@ def train(student, s_tok, teacher, t_tok, prompts, ckdir, args, log, monitor, pr
     Np = len(prompts)
     teacher.eval()
     student.train()
-    bar = progress(range(start, steps), desc="[distill]",
+    bar = progress(range(start, steps), desc=tag("distill"),
                    initial=start, total=steps)
     for step in bar:
         cur_lr = sched.step(step)              # cosine, keyed off the ABSOLUTE step

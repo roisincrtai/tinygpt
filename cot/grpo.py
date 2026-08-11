@@ -31,7 +31,7 @@ import torch.nn.functional as F
 
 import default_config as config
 from chat import decode
-from helpers import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
+from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
                      restore_rng, CosineLR, ckpt_path)
 
 from . import verifier
@@ -75,7 +75,7 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len):
     rows = torch.arange(B, device=device)
     # one forward per generated column; the bar erases itself so it does not leave a line per
     # training step
-    for _ in progress(range(max_new), desc="[cot rollout] generating", total=max_new):
+    for _ in progress(range(max_new), desc=tag("cot") + " rollout", total=max_new):
         active = ~done
         if not bool(active.any()):
             break
@@ -174,7 +174,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
 
     N = len(problems)
     params = list(policy.parameters())
-    bar = progress(range(start, total), desc="[cot]", initial=start, total=total)
+    bar = progress(range(start, total), desc=tag("cot"), initial=start, total=total)
     for step in bar:
         cur_lr = sched.step(step)
         # ---- 1. a batch of problems, each repeated group_size times ---- #
@@ -206,7 +206,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         # ---- 5. GRPO epochs ---- #
         policy.train()
         pg_l = kl_l = ent_l = clipped = 0.0
-        for _ in progress(range(cfg["grpo_epochs"]), desc="[grpo] epochs",
+        for _ in progress(range(cfg["grpo_epochs"]), desc=tag("cot") + " grpo epochs",
                           total=cfg["grpo_epochs"]):
             new_lp, ent = forward_logprobs(policy, ids, attn, need_entropy=True)
             ratio = torch.exp((new_lp - old_lp).clamp(-20, 20))

@@ -27,7 +27,7 @@ import random
 import default_config as config
 from . import dataset_helpers as dsets
 from . import utils as helpers
-from .utils import progress
+from .utils import progress, tag
 from chat import generate, decode
 from model import ZetaGPT
 from . import visualization as viz
@@ -269,7 +269,7 @@ def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW):
         was_training = model.training
         model.eval()
         out = print          # plain, untimestamped: the log()'s "[  123s]" prefix ruins it
-        out(f"\n===== {stage} @ step {step}: {len(sel)} generation examples "
+        out(f"\n===== {tag(stage)} @ step {step}: {len(sel)} generation examples "
             f"(temp={s['temperature']} top_k={s['top_k']} top_p={s['top_p']}) =====\n",
             flush=True)
         # NO progress bar here: the block is meant to be READ, and a bar redrawing itself
@@ -280,7 +280,7 @@ def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW):
                            s["top_k"], s["top_p"], eos, max_len)
             out(f"[{i}/{len(sel)}] PROMPT:   {' '.join(pr.split())}", flush=True)
             out(f"        RESPONSE: {' '.join(decode(tok, gen).split())}\n", flush=True)
-        out(f"===== end of {stage} examples @ step {step} =====\n", flush=True)
+        out(f"===== end of {tag(stage)} examples @ step {step} =====\n", flush=True)
         if was_training:
             model.train()
     return preview

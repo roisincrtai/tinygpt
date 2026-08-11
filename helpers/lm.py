@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from model.ssm import collect_stats, layer_stats
 
 from .utils import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
-                     CosineLR, ckpt_path)
+                     CosineLR, ckpt_path, tag)
 
 NAME = "LM"
 STAGE = "sft"          # default stage name; the pretrain package passes its own
@@ -95,7 +95,7 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
             return enc.encode([docs[i] for i in idx], "chosen")
     # initial/total in ABSOLUTE steps: a resumed stage must read 30499/40000, not 499/10000.
     model.train()
-    bar = progress(range(start, steps), desc=f"[{stage}]",
+    bar = progress(range(start, steps), desc=tag(stage),
                    initial=start, total=steps)
     for step in bar:
         cur_lr = sched.step(step)              # cosine, keyed off the ABSOLUTE step

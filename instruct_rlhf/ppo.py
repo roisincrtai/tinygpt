@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import default_config as config
-from helpers import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
+from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
                      restore_rng, CosineLR, ckpt_path)  # progress: every loop reports through tqdm
 
 NAME = "RLHF"
@@ -79,7 +79,7 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len):
     rows = torch.arange(B, device=device)
     # one forward per generated column; the bar erases itself (leave=False) so it does not
     # accumulate a line per training step
-    for _ in progress(range(max_new), desc="[rollout] generating", total=max_new):
+    for _ in progress(range(max_new), desc=tag("rlhf") + " rollout", total=max_new):
         hi = int(cur.max())
         logits = policy(input_ids=ids[:, :hi], attention_mask=attn[:, :hi]).logits
         step_logits = logits[rows, cur - 1].float()                     # (B,V) next-token dists
@@ -182,7 +182,7 @@ def run(policy, ref, rm, tok, train_pairs, ckdir, args, log, monitor, preview=No
 
     Ntr = len(train_pairs)
     params = list(policy.parameters()) + list(vhead.parameters())
-    bar = progress(range(start, total), desc="[rlhf]",
+    bar = progress(range(start, total), desc=tag("rlhf"),
                    initial=start, total=total)
     for step in bar:
         cur_lr = sched.step(step)              # cosine, keyed off the ABSOLUTE step
@@ -220,7 +220,7 @@ def run(policy, ref, rm, tok, train_pairs, ckdir, args, log, monitor, preview=No
         # ---- 6: PPO epochs on the clipped surrogate ---- #
         policy.train()
         pg_l = v_l = ent_l = 0.0
-        for _ in progress(range(cfg["ppo_epochs"]), desc="[ppo] epochs",
+        for _ in progress(range(cfg["ppo_epochs"]), desc=tag("rlhf") + " ppo epochs",
                           total=cfg["ppo_epochs"]):
             new_lp, v_pred, ent = forward_scores(policy, ids, attn, vhead=vhead,
                                                  need_entropy=True)

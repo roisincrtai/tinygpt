@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from helpers import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
+from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
                      restore_rng, CosineLR, ckpt_path)
 
 NAME = "Reward"
@@ -70,7 +70,7 @@ def evaluate(model, enc, pairs, batch=16):
     """Held-out metrics: pair accuracy Pr(s_w > s_l), class accuracies, BCE."""
     model.eval()
     sw, sl = [], []
-    for i in progress(range(0, len(pairs), batch), desc="[reward] held-out eval",
+    for i in progress(range(0, len(pairs), batch), desc=tag("reward") + " held-out eval",
                       total=(len(pairs) + batch - 1) // batch):
         chunk = pairs[i:i + batch]
         W = enc.encode(chunk, "chosen"); L = enc.encode(chunk, "rejected")
@@ -117,7 +117,7 @@ def run(model, enc, train_pairs, ev_pairs, ckdir, args, log, monitor):
         monitor(STAGE, hist, start)
     Ntr = len(train_pairs)
     model.train()
-    bar = progress(range(start, steps), desc="[reward]",
+    bar = progress(range(start, steps), desc=tag("reward"),
                    initial=start, total=steps)
     for step in bar:
         cur_lr = sched.step(step)              # cosine, keyed off the ABSOLUTE step

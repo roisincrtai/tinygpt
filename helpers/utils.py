@@ -178,7 +178,7 @@ def run_tag(llm, dataset):
 def evaluate(policy, ref, enc, pairs, beta, batch=16):
     """Held-out teacher-forced preference accuracy / mean margin / reversal rate."""
     Ms = []
-    for i in progress(range(0, len(pairs), batch), desc="[eval] held-out margins",
+    for i in progress(range(0, len(pairs), batch), desc=tag("eval") + " held-out margins",
                       total=(len(pairs) + batch - 1) // batch):
         W = enc.encode(pairs[i:i + batch], "chosen")
         L = enc.encode(pairs[i:i + batch], "rejected")
@@ -193,7 +193,7 @@ def reward_hist(policy, ref, enc, pairs, beta, batch=16):
     """Per-pair teacher-forced distributions for histograms:
     r_w (chosen reward; win = r_w>0), r_l (rejected reward; lose = r_l<0), margin = r_w-r_l."""
     rw, rl = [], []
-    for i in progress(range(0, len(pairs), batch), desc="[eval] reward histogram",
+    for i in progress(range(0, len(pairs), batch), desc=tag("eval") + " reward histogram",
                       total=(len(pairs) + batch - 1) // batch):
         W = enc.encode(pairs[i:i + batch], "chosen")
         L = enc.encode(pairs[i:i + batch], "rejected")
@@ -423,6 +423,29 @@ def set_run_tag(cfg_or_str):
 
 def get_run_tag():
     return _RUN_TAG
+
+
+def scheme_tag():
+    """The model scheme this run is training -- `zetagpt-s`. Empty before setup() has run.
+
+    Taken from the run tag rather than from a second global, so it cannot drift away from the
+    name every checkpoint, history and figure is written under."""
+    return _RUN_TAG.rsplit("_", 1)[0] if _RUN_TAG else ""
+
+
+def tag(stage):
+    """`[<stage> @<scheme>]` -- the prefix every line a stage prints should carry.
+
+    THE STAGE ALONE IS NOT ENOUGH TO READ A LOG. Nine stages write progress bars that look
+    alike, four model sizes share every one of them, and the same stage is run again and again
+    at different sizes; a bar that says only `[pretrain]` leaves the reader unable to tell which
+    run they are watching, which is exactly when a misconfigured scheme goes unnoticed for
+    hours. `[pretrain @zetagpt-s]` answers both questions in the width of a few characters.
+
+    Falls back to `[<stage>]` when no run tag has been set -- a tool that never builds a model
+    has no scheme to name, and should not print an empty one."""
+    s = scheme_tag()
+    return f"[{stage} @{s}]" if s else f"[{stage}]"
 
 
 def stage_dir(ckdir, stage):
@@ -887,7 +910,7 @@ def holdout_probe(policy, ref, enc, pairs, beta, gen=None, roll_temp=1.0, batch=
     decides the cadence. Returns a dict so the keys land in the history and in the figures under
     the same names."""
     Ms, ebs = [], []
-    for i in progress(range(0, len(pairs), batch), desc="[probe] held-out",
+    for i in progress(range(0, len(pairs), batch), desc=tag("probe") + " held-out",
                       total=(len(pairs) + batch - 1) // batch):
         chunk = pairs[i:i + batch]
         W = enc.encode(chunk, "chosen")
@@ -1658,7 +1681,7 @@ def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print, resu
     n_bytes, n_rec = valid, 3 * done
     with open(path, "ab") as fh:
         for i in progress(range(done, len(pairs)),
-                          desc=f"[{stage}] tokenizing {split or 'pairs'}",
+                          desc=tag(stage) + f" tokenizing {split or 'pairs'}",
                           total=len(pairs), initial=done):
             p = pairs[i]
             p["prompt_ids"] = tok(p["prompt"], add_special_tokens=False)["input_ids"]
