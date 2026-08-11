@@ -1257,6 +1257,77 @@ def corpus_stream_path(tok, root, sig):
     return os.path.join(token_cache_root(tok), mirror, f"{name}_{_sig_tag(sig)}")
 
 
+def _streams_here(path):
+    """Every other stream for THIS corpus under THIS tokenizer: (stem, manifest).
+
+    They share a directory -- the corpus's mirror under the token cache -- because the
+    tokenizer names the directory and the corpus names the path inside it. Only the signature
+    in the file name separates them."""
+    out = []
+    d, want = os.path.dirname(path), os.path.basename(path) + "_index.json"
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for fn in names:
+        # `._name` is an AppleDouble stub, written whenever this tree is copied from or through
+        # a Mac. It ends in _index.json, is not JSON, and names a stream that does not exist.
+        if not fn.endswith("_index.json") or fn == want or fn.startswith("._"):
+            continue
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as f:
+                idx = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if idx.get("magic") == token_store_magic():
+            out.append((os.path.join(d, fn[:-len("_index.json")]), idx))
+    return out
+
+
+def token_store_magic():
+    from . import token_store
+    return token_store.MAGIC
+
+
+def _equivalent_stream(path, packing):
+    """A stream already in cache/tokens that THIS run may use: (stem, manifest, why).
+
+    THE SIGNATURE IS STRICTER THAN IT NEEDS TO BE, and deliberately so: it hashes every source
+    file's path, size and modification time, which is what makes an edited corpus impossible to
+    mistake for the one that was tokenised. But an mtime moves for reasons that have nothing to
+    do with content -- a corpus re-downloaded, rsynced to the training machine, restored from a
+    backup, or simply copied -- and when it does, the finished stream keeps a name this run no
+    longer computes. The tokens are correct and complete and sitting right there, and the run
+    starts again from zero.
+
+    So a signature miss is not the end of the question. What actually has to match for tokens
+    to be reusable is the PACKING: the same tokenizer, the same word budget, the same text
+    column, the same number of source files. When that agrees, the stream is adopted -- and
+    said so in the log, because adopting on weaker evidence than an exact match is a decision
+    somebody may want to overrule with --force.
+
+    A stream written before the packing was recorded carries nothing to compare. It is still
+    adopted, because the alternative is retokenising a corpus that is already on disk, but a
+    FINISHED one is always preferred to a partial one: the case this exists for is a directory
+    holding one complete stream of forty shards and one that has just started from zero.
+    """
+    def rank(si):
+        """Complete beats partial; among equals, the one with more tokens."""
+        return (bool(si[1].get("complete")), si[1].get("n_tokens", 0))
+
+    others = _streams_here(path)
+    same = [(s, i) for s, i in others if (i.get("packing") or "") == packing]
+    if same:
+        s, i = max(same, key=rank)
+        return s, i, "the same tokenizer, word budget, text column and file count"
+    blank = [(s, i) for s, i in others if not i.get("packing")]
+    if blank:
+        s, i = max(blank, key=rank)
+        return s, i, ("it records no packing -- it was written before that field existed -- "
+                      "so only the corpus directory and the tokenizer are known to agree")
+    return None
+
+
 def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
                        extensions=None, text_column="text", stage="tokenize", force=False,
                        resume=True):
@@ -1270,6 +1341,7 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
     files = corpus_files(root, exclude_dirs, extensions)
     if not files:
         return None, 0
+    packing = f"{_tok_signature(tok, max_words, text_column)}|files={len(files)}"
     sig = corpus_signature(tok, root, files, max_words, text_column)
     path = corpus_stream_path(tok, root, sig)
     if not force:
@@ -1278,6 +1350,29 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
             log(f"[{stage}] token stream: {st.describe()}")
             log(f"[{stage}]               {path}")
             return st, len(files)
+        # THE SIGNATURE MISSED. Before spending hours, look in the cache for a stream of this
+        # corpus that this run can use anyway -- a finished one to skip straight to, or a
+        # partial one to continue. Retokenising a corpus that is already tokenised is the most
+        # expensive kind of misconfiguration there is: it looks exactly like ordinary progress,
+        # and the only symptom is that the run begins at zero.
+        found = _equivalent_stream(path, packing)
+        if found is not None:
+            alt, idx, why = found
+            what = "COMPLETE" if idx.get("complete") else f"partial ({len(idx['shards'])} shards)"
+            log(f"[{stage}] the signature does not match any stream, but a {what} one for this "
+                f"corpus is already in the cache:")
+            log(f"[{stage}]   {alt}")
+            log(f"[{stage}]   adopting it: {why}.")
+            log(f"[{stage}]   (a signature also covers each file's size and modification time, "
+                f"and copying a corpus between machines moves the times without changing a "
+                f"byte. Pass --force to tokenise again from the start.)")
+            if idx.get("complete"):
+                st = token_store.TokenStream(alt)
+                log(f"[{stage}] token stream: {st.describe()}")
+                return st, len(files)
+            # continue INTO it, under the signature it was written with, so the store resumes
+            # rather than judging it stale and deleting the shards
+            path, sig = alt, idx.get("sig", sig)
 
     # A tokenizer without encode_ordinary (the gpt2 student's, say) falls back to __call__;
     # the distinction only exists for tokenizers that HAVE registered specials to protect.
@@ -1343,7 +1438,7 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
     log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
     token_store.build(path, sig, documents, tok.eos_token_id, len(tok), log=log,
                       shard_bytes=int(getattr(config, "TOKENS", {}).get("shard_mb", 100))
-                      * 1024 * 1024, resume=resume and not force)
+                      * 1024 * 1024, resume=resume and not force, packing=packing)
     return token_store.TokenStream(path), len(files)
 
 

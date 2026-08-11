@@ -81,13 +81,23 @@ def main(argv=None):
     ap.add_argument("--no-resume", dest="no_resume", action="store_true",
                     help="same, spelled as the trainers spell it")
     ap.add_argument("--list", action="store_true", help="show what would be built, and where")
-    ap.add_argument("--max_words", type=int, default=config.PRETRAIN["max_words"])
-    ap.add_argument("--text_column", default=config.PRETRAIN["text_column"])
+    # THE PACKING DEFAULTS ARE RESOLVED AFTER --set, NOT BEFORE IT. An argparse default is
+    # evaluated when the parser is built, which is before apply_overrides has run, so
+    # `default=config.PRETRAIN["max_words"]` would freeze the value the override was about to
+    # change and this stage would pack the corpus differently from every stage that reads
+    # config.PRETRAIN directly. A different packing is a different stream, and a different
+    # stream is the whole corpus tokenised again. The sentinels defer the question.
+    ap.add_argument("--max_words", type=int, default=0,
+                    help="words per packed document; 0 = PRETRAIN['max_words'] after --set")
+    ap.add_argument("--text_column", default="",
+                    help="parquet column holding the text; empty = PRETRAIN['text_column']")
     ap.add_argument("--set", dest="overrides", action="append", default=[],
                     metavar="SEC.key=v", help="override any default_config value, e.g. "
                          "--set PRETRAIN.max_words=512")
     a, _ = ap.parse_known_args(argv)
     config.apply_overrides(a.overrides, print)
+    a.max_words = a.max_words or config.PRETRAIN["max_words"]
+    a.text_column = a.text_column or config.PRETRAIN["text_column"]
 
     # The tokenizer is READ, never built here. A stream is tied to the vocabulary that
     # produced it -- that is what its cache directory is named after -- so a stage that

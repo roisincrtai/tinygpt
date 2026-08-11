@@ -106,7 +106,7 @@ def _read_index(stem):
         return None
 
 
-def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete, cursor=None):
+def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete, cursor=None, packing=""):
     """Rewrite the manifest, through a .part rename so a reader never sees half of it.
 
     `cursor` is the producer's position AT THE MOMENT these counts were taken. The two are
@@ -120,6 +120,11 @@ def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete, cursor=Non
                    "n_tokens": sum(s["n_tokens"] for s in shards),
                    "n_docs": sum(s["n_docs"] for s in shards),
                    "cursor": cursor,
+                   # WHAT PACKING PRODUCED THESE TOKENS, in words rather than as a hash. `sig`
+                   # decides whether a stream may be reused; this says WHY when it may not, so
+                   # a stage about to retokenise a corpus it already tokenised can name the
+                   # setting that differs instead of starting silently from zero.
+                   "packing": packing,
                    "shards": shards}, f, indent=1)
     os.replace(tmp, index_path(stem))
 
@@ -128,7 +133,7 @@ def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete, cursor=Non
 # building
 # --------------------------------------------------------------------------- #
 def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES,
-          resume=True, flush_seconds=FLUSH_SECONDS):
+          resume=True, flush_seconds=FLUSH_SECONDS, packing=""):
     """Append documents to the shards at `stem`. Returns (n_tokens, n_docs).
 
     `documents` is a PRODUCER FACTORY: `documents(cursor, skip_docs)` returns an iterator of
@@ -238,14 +243,14 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
             now = time.time()
             if now - last_flush >= flush_seconds:
                 fh.flush()
-                _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor)
+                _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor, packing)
                 last_flush = now
             if cur["n_tokens"] >= per_shard:
                 n = len(shards) - 1
                 log(f"[tokens] shard {n:05d} done: {cur['n_tokens']:,} tokens, "
                     f"{cur['n_tokens'] * isz / 1048576:.1f} MB")
                 close_shard()
-                _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor)
+                _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor, packing)
                 last_flush = time.time()
     finally:
         if fh is not None:
@@ -253,9 +258,9 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
         # the manifest is brought up to date even when the loop raised, so an interrupted
         # build resumes from where it truly stopped rather than from the last periodic flush
         if shards:
-            _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor)
+            _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor, packing)
 
-    _write_index(stem, sig, dtype, eos, vocab_size, shards, True, cursor)
+    _write_index(stem, sig, dtype, eos, vocab_size, shards, True, cursor, packing)
     n_tok = sum(s["n_tokens"] for s in shards)
     n_doc = sum(s["n_docs"] for s in shards)
     log(f"[tokens] wrote {n_tok:,} tokens ({dtype}) in {len(shards)} shard(s) from "
