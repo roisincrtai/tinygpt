@@ -49,7 +49,7 @@ def progress(it, desc="", initial=0, total=None):
         return it
 
 
-def bar(desc, unit="it", total=None, unit_scale=False):
+def bar(desc, unit="it", total=None, unit_scale=False, initial=0):
     """A tqdm bar driven by .update() rather than by wrapping an iterable.
 
     `progress` wraps an iterable and is right when the count is known. It is wrong when the
@@ -62,12 +62,18 @@ def bar(desc, unit="it", total=None, unit_scale=False):
     asked, which is how much is left. Where the exact count is unknowable in advance, measure
     the work in a unit that IS knowable -- bytes, usually, via corpus_bytes below.
 
+    `initial` IS THE WORK ALREADY DONE, for a resumed job. A build that restarts its bar at
+    zero having already written a quarter of the corpus reports 0% and an ETA for the whole
+    corpus -- the two numbers a person uses to decide whether the resume worked. Passing the
+    bytes already accounted for makes the percentage and the estimate refer to the corpus
+    rather than to the remainder of it.
+
     Absence of tqdm must never be fatal, so a no-op stand-in with the same interface is
     returned instead."""
     try:
         from tqdm import tqdm
         return tqdm(desc=desc, unit=unit, total=total, leave=False, unit_scale=unit_scale,
-                    dynamic_ncols=True)
+                    dynamic_ncols=True, initial=initial)
     except Exception:                                          # noqa: BLE001
         class _Null:
             def __enter__(self): return self
@@ -1278,12 +1284,25 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
     ordinary = (tok.encode_ordinary if hasattr(tok, "encode_ordinary")
                 else lambda t: tok(t, add_special_tokens=False)["input_ids"])
 
-    def documents():
-        """Every packed document of the corpus, tokenised, one at a time.
+    def documents(cursor=None, skip_docs=0):
+        """Every packed document of the corpus, tokenised, one at a time, from `cursor` on.
 
         Counted in DOCUMENTS rather than files: a corpus is three parquet shards now, not
         thirty thousand text files, so a per-file bar sits still while half a billion tokens
         are encoded -- indistinguishable from a hang. The file position goes in the postfix.
+
+        RESUMING SKIPS WORK, IT DOES NOT REDO IT. The cursor names a file and a document
+        within it, so files already consumed are never opened and documents already stored
+        are never handed to the tokenizer. Encoding is the expensive half by a wide margin --
+        a corpus reads at hundreds of MB/s and encodes at a fraction of that -- so an
+        interrupted build that re-encoded what it had already written would spend longer
+        catching up than it spent getting there. Without a cursor (a manifest written before
+        this existed) the corpus is re-read, which is I/O, but `skip_docs` still keeps those
+        documents away from the encoder.
+
+        A PAIR IS YIELDED FOR EVERY PACKED DOCUMENT, even one that encodes to nothing, so the
+        position advances in step with what was read rather than with what happened to be
+        written. The store drops the empty ones itself.
 
         encode_ordinary, NOT encode: a pretraining corpus is scraped text, and a document that
         merely MENTIONS <|endoftext|> -- any page discussing GPT-2 does -- would otherwise
@@ -1296,22 +1315,33 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
         The leading space matches Encoder's convention for a response, so a document read from
         the stream and the same document encoded on the fly are the same ids.
         """
-        n_docs = 0
+        first = int((cursor or {}).get("file", 0))
+        in_file = int((cursor or {}).get("doc_in_file", 0))
+        n_docs = int((cursor or {}).get("n_read", 0))
+        left = 0 if cursor else max(int(skip_docs), 0)     # count fallback, no cursor
+        done = corpus_bytes(files[:first], text_column) if first else 0
         with bar(f"[{stage}] tokenizing corpus", unit="B", unit_scale=True,
-                 total=corpus_bytes(files, text_column)) as b:
-            for i, fp in enumerate(files, 1):
-                for d in _pack(fp, max_words, text_column):
-                    n_docs += 1
+                 total=corpus_bytes(files, text_column), initial=done) as b:
+            for i in range(first, len(files)):
+                # documents of THIS file already stored: `in_file` of them on the first file
+                # after a seek, none thereafter
+                ahead, in_file = in_file, 0
+                for j, d in enumerate(_pack(files[i], max_words, text_column)):
                     b.update(len(d.encode("utf-8", "ignore")))
+                    if j < ahead:
+                        continue                           # stored; not read past, not encoded
+                    if left:
+                        left -= 1; n_docs += 1
+                        continue                           # stored; re-read but not encoded
+                    n_docs += 1
                     if n_docs % 200 == 0:
-                        b.set_postfix_str(f"file {i}/{len(files)}, {n_docs:,} docs")
-                    ids = ordinary(" " + d)
-                    if ids:
-                        yield ids
+                        b.set_postfix_str(f"file {i + 1}/{len(files)}, {n_docs:,} docs")
+                    yield ordinary(" " + d), {"file": i, "doc_in_file": j + 1,
+                                              "n_read": n_docs}
             b.set_postfix_str(f"file {len(files)}/{len(files)}, {n_docs:,} docs")
 
     log(f"[{stage}] tokenizing {len(files):,} files -> {path}")
-    token_store.build(path, sig, documents(), tok.eos_token_id, len(tok), log=log,
+    token_store.build(path, sig, documents, tok.eos_token_id, len(tok), log=log,
                       shard_bytes=int(getattr(config, "TOKENS", {}).get("shard_mb", 100))
                       * 1024 * 1024, resume=resume and not force)
     return token_store.TokenStream(path), len(files)

@@ -11,11 +11,23 @@ Buffering a shard's worth of tokens before writing would mean a run killed after
 left an empty directory -- which is exactly what a corpus of 10 TB cannot afford, and what
 this module used to do. The invariant is: what has been read has been written.
 
-RESUME IS THE DEFAULT. A build finds the manifest, truncates the last shard back to the last
-recorded position (the bytes after it were written but not yet accounted for), and continues
-from the document after the last one counted. This is sound because the document order is
-deterministic -- the corpus files are sorted, each is packed in order -- so document N is
-always the same document. Pass resume=False to start again.
+RESUME IS THE DEFAULT, AND IT COSTS NOTHING. A build finds the manifest, truncates the last
+shard back to the last recorded position (the bytes after it were written but not yet
+accounted for), and continues from the document after the last one counted. This is sound
+because the document order is deterministic -- the corpus files are sorted, each is packed in
+order -- so document N is always the same document. Pass resume=False to start again.
+
+What makes it cost nothing is the CURSOR. The manifest carries an opaque position handed back
+to the producer, which uses it to seek: files already consumed are never opened, and documents
+already stored are never tokenised again. Resuming by counting instead -- reading the corpus
+from the top and discarding the first N documents -- runs the tokenizer over work already on
+disk, which at 10 TB is days of a GPU-free machine spent producing bytes it already has. The
+rule is that the cost of resuming is proportional to what was LOST, not to what was done.
+
+The cursor is written by the producer and never interpreted here; the store only persists it
+next to the counts it belongs with, and only at the moment those counts are written, so the
+position and the shard contents can never disagree. A manifest from before the cursor existed
+resumes by count instead, which is slower but still correct.
 
     <corpus dir>/<name>_<sig>_00000.tokens     shard 0: RAW tokens, nothing else
     <corpus dir>/<name>_<sig>_00001.tokens     shard 1
@@ -54,7 +66,7 @@ import os
 import time
 
 MAGIC = "zetagpt-tokens"
-VERSION = 3
+VERSION = 4                              # 4 adds "cursor"; a v3 manifest still resumes, by count
 SHARD_BYTES = 100 * 1024 * 1024          # ~100 MB of tokens per shard
 FLUSH_SECONDS = 5.0                      # how often the manifest catches up with the file
 
@@ -94,14 +106,20 @@ def _read_index(stem):
         return None
 
 
-def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete):
-    """Rewrite the manifest, through a .part rename so a reader never sees half of it."""
+def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete, cursor=None):
+    """Rewrite the manifest, through a .part rename so a reader never sees half of it.
+
+    `cursor` is the producer's position AT THE MOMENT these counts were taken. The two are
+    written together, in one file, by one rename: a cursor that could land in the manifest
+    without the shard counts it belongs to would resume from the wrong document, and the
+    corpus would silently gain or lose a stretch of text that nothing downstream could see."""
     tmp = index_path(stem) + ".part"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"magic": MAGIC, "version": VERSION, "sig": sig, "dtype": dtype,
                    "eos": int(eos), "vocab_size": int(vocab_size), "complete": bool(complete),
                    "n_tokens": sum(s["n_tokens"] for s in shards),
                    "n_docs": sum(s["n_docs"] for s in shards),
+                   "cursor": cursor,
                    "shards": shards}, f, indent=1)
     os.replace(tmp, index_path(stem))
 
@@ -111,10 +129,29 @@ def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete):
 # --------------------------------------------------------------------------- #
 def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BYTES,
           resume=True, flush_seconds=FLUSH_SECONDS):
-    """Append `documents` (an iterable of id lists) to the shards at `stem`.
+    """Append documents to the shards at `stem`. Returns (n_tokens, n_docs).
 
-    Every document is written as it arrives; the manifest catches up every `flush_seconds`.
-    Returns (n_tokens, n_docs)."""
+    `documents` is a PRODUCER FACTORY: `documents(cursor, skip_docs)` returns an iterator of
+    `(ids, cursor)` pairs, having already positioned itself. It is called once, here, with
+    whatever the manifest recorded:
+
+        cursor is not None    seek to it; nothing before it is read or tokenised
+        cursor is None,       an older manifest: read from the top but do not TOKENISE the
+        skip_docs > 0         first `skip_docs` documents -- still the expensive half saved
+        neither               a fresh build
+
+    Skipping used to happen here, on the store's side of the generator, which meant every
+    skipped document had already been through the tokenizer before it was thrown away. The
+    producer is the only place that can skip cheaply, so the position is handed to it.
+
+    The producer yields a pair for EVERY document it packs, including one that tokenises to
+    nothing. Empty ids are written as nothing but still advance the cursor, so the recorded
+    position counts packed documents while the manifest's n_docs counts written ones, and the
+    two are never required to agree -- an equality that held by luck would be a desynchronised
+    resume the first time it did not.
+
+    Every document is written as it arrives; the manifest, and the cursor with it, catch up
+    every `flush_seconds`. A plain iterable is still accepted, and resumes by count."""
     import array
     dtype = dtype_for(vocab_size)
     isz = _itemsize(dtype)
@@ -141,8 +178,10 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
 
     # RESUME. The last shard may hold bytes written after the manifest was last updated; they
     # belong to documents the manifest does not count, so they are cut off. Truncating to a
-    # recorded boundary is what makes "written" and "counted" agree again.
+    # recorded boundary is what makes "written" and "counted" agree again, and it is what lets
+    # the cursor beside those counts be trusted.
     skip_docs = sum(s["n_docs"] for s in shards)
+    cursor = idx.get("cursor") if idx else None
     if shards:
         last = shard_path(stem, len(shards) - 1)
         want = shards[-1]["n_tokens"] * isz
@@ -152,10 +191,15 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
                 f.truncate(want)
             log(f"[tokens] trimmed {(have - want) / 1048576:.1f} MB of uncounted tail from "
                 f"{os.path.basename(last)}")
-        log(f"[tokens] resuming after {skip_docs:,} documents in {len(shards)} shard(s)")
+        where = "seeking to the recorded position" if cursor else \
+                "no cursor in this manifest: re-reading the corpus, but NOT re-tokenising it"
+        log(f"[tokens] resuming after {skip_docs:,} documents in {len(shards)} shard(s); "
+            f"{where}")
+
+    # The producer positions itself ONCE, here. Everything after this point is new work.
+    stream = documents(cursor, skip_docs) if callable(documents) else documents
 
     per_shard = max(shard_bytes // isz, 1)
-    seen = 0
     fh = None
     cur = shards[-1] if shards and shards[-1]["n_tokens"] < per_shard else None
     if cur is None and shards:
@@ -177,11 +221,11 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
         cur = None
 
     try:
-        for ids in documents:
-            if not ids:
-                continue
-            seen += 1
-            if seen <= skip_docs:                # already on disk and counted
+        for item in stream:
+            # (ids, cursor) from a producer that can seek; a bare list from one that cannot,
+            # in which case the position simply stays as it was and resume falls back to count
+            ids, cursor = item if isinstance(item, tuple) else (item, cursor)
+            if not ids:                          # tokenised to nothing: the cursor still moved
                 continue
             if fh is None:
                 open_shard()
@@ -194,14 +238,14 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
             now = time.time()
             if now - last_flush >= flush_seconds:
                 fh.flush()
-                _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
+                _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor)
                 last_flush = now
             if cur["n_tokens"] >= per_shard:
                 n = len(shards) - 1
                 log(f"[tokens] shard {n:05d} done: {cur['n_tokens']:,} tokens, "
                     f"{cur['n_tokens'] * isz / 1048576:.1f} MB")
                 close_shard()
-                _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
+                _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor)
                 last_flush = time.time()
     finally:
         if fh is not None:
@@ -209,9 +253,9 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
         # the manifest is brought up to date even when the loop raised, so an interrupted
         # build resumes from where it truly stopped rather than from the last periodic flush
         if shards:
-            _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=False)
+            _write_index(stem, sig, dtype, eos, vocab_size, shards, False, cursor)
 
-    _write_index(stem, sig, dtype, eos, vocab_size, shards, complete=True)
+    _write_index(stem, sig, dtype, eos, vocab_size, shards, True, cursor)
     n_tok = sum(s["n_tokens"] for s in shards)
     n_doc = sum(s["n_docs"] for s in shards)
     log(f"[tokens] wrote {n_tok:,} tokens ({dtype}) in {len(shards)} shard(s) from "
