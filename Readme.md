@@ -32,12 +32,12 @@ stage runnable on its own.
 The head dimension is 64 in every scheme, so width scales by adding heads. Parameter counts
 assume the induced vocabulary of 50,259 with the output head tied to the token embedding.
 
-| Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context windows | Embedding | Blocks | Parameters |
+| Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context | Embedding | Blocks | Parameters |
 |---|---|---|---|---|---|---|---|---|---|
-| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 512 → 1k | 25.7M | 35.8M | 61.5M |
-| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 1k → 4k | 25.7M | 107.3M | **133.0M** |
-| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 1k → 4k → 8k | 25.7M | 143.0M | 168.8M |
-| `zetagpt-l` | 32 | 16 | 1024 | 64 | 4× | 1k → 4k → 8k → 16k → 32k | 51.5M | 571.2M | 622.7M |
+| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 1024 | 25.7M | 35.8M | 61.5M |
+| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 4096 | 25.7M | 107.3M | **133.0M** |
+| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 8192 | 25.7M | 143.0M | 168.8M |
+| `zetagpt-l` | 32 | 16 | 1024 | 64 | 4× | 32768 | 51.5M | 571.2M | 622.7M |
 
 ### Context window scheduling
 
