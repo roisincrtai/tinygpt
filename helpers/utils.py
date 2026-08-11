@@ -433,8 +433,9 @@ def scheme_tag():
     return _RUN_TAG.rsplit("_", 1)[0] if _RUN_TAG else ""
 
 
-def tag(stage):
-    """`[<stage> @<scheme>]` -- the prefix every line a stage prints should carry.
+def tag(stage, ctx=None):
+    """`[<stage> @<scheme>]`, or `[<stage> @<scheme> <context>]` -- the prefix every line a
+    stage prints should carry.
 
     THE STAGE ALONE IS NOT ENOUGH TO READ A LOG. Nine stages write progress bars that look
     alike, four model sizes share every one of them, and the same stage is run again and again
@@ -445,7 +446,11 @@ def tag(stage):
     Falls back to `[<stage>]` when no run tag has been set -- a tool that never builds a model
     has no scheme to name, and should not print an empty one."""
     s = scheme_tag()
-    return f"[{stage} @{s}]" if s else f"[{stage}]"
+    head = f"{stage} @{s}" if s else stage
+    # THE CONTEXT TOO, WHERE IT MOVES. Pretraining lengthens its window as it goes, and the
+    # window decides the batch, the memory and the speed; a bar that showed only the scheme
+    # would leave every one of those changing with nothing on screen to say why.
+    return f"[{head} {int(ctx):,}]" if ctx else f"[{head}]"
 
 
 def stage_dir(ckdir, stage):

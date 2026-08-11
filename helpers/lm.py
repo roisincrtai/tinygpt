@@ -36,6 +36,77 @@ NAME = "LM"
 STAGE = "sft"          # default stage name; the pretrain package passes its own
 
 
+def _chunk_logprob(head, h, tgt):
+    """Log-probability of `tgt` under `head(h)`, for ONE slice of the sequence.
+
+    Called through torch.utils.checkpoint, which is the whole point: the (b, chunk, vocab)
+    logits and their log-softmax exist during this call, are thrown away when it returns, and
+    are recomputed one slice at a time during the backward pass. What survives in memory is the
+    (b, chunk) result. Returns the log-probabilities and, detached, how many positions the model
+    would have got right -- computed here because the logits needed to answer that question are
+    here and nowhere else."""
+    logits = head(h)
+    lp = F.log_softmax(logits, -1).gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+    return lp, (logits.argmax(-1) == tgt).detach()
+
+
+def lm_loss(model, ids, attn, rmask, chunk=0):
+    """Mean per-sequence negative log-likelihood over the response positions, and accuracy.
+
+    THE OBJECTIVE IS LENGTH-NORMALISED: each sequence contributes the mean log-probability of
+    its own response tokens, and the batch averages those. A sum would let one long sequence
+    outweigh several short ones.
+
+    `chunk` > 0 evaluates the vocabulary projection in slices of that many positions instead of
+    all at once. The result is identical -- the same positions, the same targets, the same
+    normalisation -- but the peak memory of the loss becomes 3 x chunk x vocab rather than
+    3 x T x vocab, which at T = 32,768 is the difference between 0.6 GB and 18.4 GB."""
+    tgt, rm = ids[:, 1:], rmask[:, 1:]
+    denom = rm.sum(-1).clamp(min=1).float()
+    if not chunk:
+        logits = model(input_ids=ids, attention_mask=attn).logits
+        lp = F.log_softmax(logits, -1)[:, :-1].gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+        loss = (-(lp * rm).sum(-1) / denom).mean()
+        with torch.no_grad():
+            correct = ((logits[:, :-1].argmax(-1) == tgt) & rm.bool()).sum().float()
+        return loss, correct, rm.sum().clamp(min=1).float()
+
+    from torch.utils.checkpoint import checkpoint
+    h = model.hidden_states(input_ids=ids, attention_mask=attn)[:, :-1]
+    total = torch.zeros(ids.shape[0], device=ids.device, dtype=torch.float32)
+    correct = torch.zeros((), device=ids.device, dtype=torch.float32)
+    for a in range(0, h.shape[1], chunk):
+        b = min(a + chunk, h.shape[1])
+        lp, hit = checkpoint(_chunk_logprob, model.head, h[:, a:b], tgt[:, a:b],
+                             use_reentrant=False)
+        total = total + (lp * rm[:, a:b]).sum(-1)
+        correct = correct + (hit & rm[:, a:b].bool()).sum().float()
+    return (-total / denom).mean(), correct, rm.sum().clamp(min=1).float()
+
+
+def context_schedule(args, steps, docs, log, stage):
+    """The (start, stop, context, batch) segments this run will train through.
+
+    ONE WINDOW UNLESS ALL THREE CONDITIONS HOLD: the corpus is a packed stream (a list of
+    records cannot be re-cut to an arbitrary length), the scheme declares a schedule, and the
+    run has not pinned a context of its own with --context_window or --max_len. A stage that
+    was told which window to use is not second-guessed."""
+    import default_config as config
+    one = [(0, steps, max(int(args.max_len), 2), int(args.batch))]
+    if not (hasattr(docs, "batch") and hasattr(docs, "n_tokens")):
+        return one
+    scheme = getattr(args, "model_scheme", "") or config.PRETRAIN["model_scheme"]
+    windows = config.context_windows(scheme) if scheme in config.SCHEMES else []
+    if len(windows) < 2 or getattr(args, "context_window", 0):
+        return one
+    # The batch in force belongs to the LONGEST window, which is what it was sized against.
+    plan = config.context_plan(windows, steps, int(args.batch))
+    log(f"{stage}: context schedule {' -> '.join(f'{w:,}' for w in windows)} "
+        f"over {steps:,} steps, {steps // len(windows):,} steps each, "
+        f"batch {plan[0][3]} -> {plan[-1][3]} so tokens per step stay constant")
+    return plan
+
+
 def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, lr=None,
           preview=None, ssm_stats_every=0):
     """Train `model` by maximum likelihood on the response tokens; return it in eval mode.
@@ -86,16 +157,33 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         T = max(int(args.max_len) - 1, 1)
         log(f"{stage}: packed stream, {docs.n_tokens:,} tokens, {T + 1} tokens/example "
             f"-> {args.batch * T:,} target tokens per step")
-        def sample(batch, gen):
-            return docs.batch(batch, T, generator=gen, device=enc.device)
+        def sample(batch, gen, seq_len=None):
+            return docs.batch(batch, seq_len or T, generator=gen, device=enc.device)
     else:
         Ntr = len(docs)
-        def sample(batch, gen):
+        def sample(batch, gen, seq_len=None):
             idx = torch.randint(0, Ntr, (batch,), generator=gen).tolist()
             return enc.encode([docs[i] for i in idx], "chosen")
+
+    # THE CONTEXT SCHEDULE. Only a packed stream can serve a window of any length on demand; a
+    # list of records has the length its records have, so the fine-tuning stages keep one window
+    # and the plan collapses to a single segment. `plan` is a list of
+    # (start, stop, context, batch) tiling [0, steps) exactly.
+    plan = context_schedule(args, steps, docs, log, stage)
+    seg = 0
+    # CHUNKED LOSS. 0 evaluates the vocabulary projection over the whole sequence at once, which
+    # is what every stage did before long contexts existed and is still right at 512. Above that
+    # the three vocabulary-sized tensors dominate the step, so the projection is sliced.
+    chunk = int(getattr(args, "loss_chunk", 0) or 0) if getattr(args, "chunked_loss", False) else 0
+    if chunk:
+        V = int(getattr(model, "cfg", {}).get("vocab_size", 0)) or 0
+        longest = max(w for _, _, w, _ in plan)
+        note = (f" ({3 * chunk * V * 4 / 1024**3:.2f} GiB peak instead of "
+                f"{3 * longest * V * 4 / 1024**3:.2f} GiB)") if V else ""
+        log(f"{stage}: chunked loss, {chunk:,} positions per slice{note}")
     # initial/total in ABSOLUTE steps: a resumed stage must read 30499/40000, not 499/10000.
     model.train()
-    bar = progress(range(start, steps), desc=tag(stage),
+    bar = progress(range(start, steps), desc=tag(stage, plan[0][2] if len(plan) > 1 else None),
                    initial=start, total=steps)
     for step in bar:
         cur_lr = sched.step(step)              # cosine, keyed off the ABSOLUTE step
@@ -104,22 +192,42 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         want_ssm = bool(ssm_stats_every) and (step % ssm_stats_every == 0)
         if want_ssm:
             collect_stats(model, True)
-        ids, attn, rmask = sample(args.batch, g)
-        logits = model(input_ids=ids, attention_mask=attn).logits
-        logp = F.log_softmax(logits, -1)
-        lp = logp[:, :-1].gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-        rm = rmask[:, 1:]
-        denom = rm.sum(-1).clamp(min=1).float()
-        loss = (-(lp * rm).sum(-1) / denom).mean()
-        opt.zero_grad(); loss.backward()
+        # WHICH WINDOW THIS STEP BELONGS TO. Advanced rather than searched, so a resumed run at
+        # step 30,000 lands in the same segment it would have reached by running from zero --
+        # the plan is a function of the budget, not of how the budget was consumed.
+        while seg + 1 < len(plan) and step >= plan[seg][1]:
+            seg += 1
+        _, _, cur_ctx, cur_batch = plan[seg]
+        if len(plan) > 1 and step == plan[seg][0]:
+            if hasattr(bar, "set_description"):
+                bar.set_description(tag(stage, cur_ctx))
+            log(f"{stage}: context window {cur_ctx:,} at batch {cur_batch} "
+                f"({cur_batch * (cur_ctx - 1):,} target tokens per step), "
+                f"steps {plan[seg][0]:,}-{plan[seg][1] - 1:,}")
+        # ONE STEP, POSSIBLY SEVERAL FORWARD PASSES. A micro-batch splits the step's sequences
+        # into groups that are each carried through forward and backward alone, so only one
+        # group's activations are ever resident; the gradients add up in the parameters, which
+        # is where a batch is combined anyway. The optimiser sees exactly the step it would have
+        # seen whole -- each group's loss is weighted by its share of the sequences, so the sum
+        # is the mean over all of them, not the mean of the means.
+        opt.zero_grad(set_to_none=True)
+        mb = args.micro_batch if getattr(args, "micro_batch", 0) > 0 else cur_batch
+        mb = max(1, min(int(mb), cur_batch))
+        sum_loss = sum_correct = sum_tokens = 0.0
+        for off in range(0, cur_batch, mb):
+            nb = min(mb, cur_batch - off)
+            ids, attn, rmask = sample(nb, g, max(cur_ctx - 1, 1))
+            loss, correct, ntok = lm_loss(model, ids, attn, rmask, chunk)
+            (loss * (nb / cur_batch)).backward()
+            sum_loss += float(loss.item()) * nb
+            sum_correct += float(correct.item()); sum_tokens += float(ntok.item())
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
+        loss = torch.tensor(sum_loss / cur_batch)
         # Next-token accuracy over the RESPONSE positions only (the tokens the loss is on): the
         # fraction of response positions whose argmax prediction is the true next token. Reported
         # alongside loss/ppl so the LM stages (pretrain, sft) have an accuracy curve, not only a
         # loss curve. grad-norm (pre-clip) is tracked too, as an optimisation-health trace.
-        with torch.no_grad():
-            correct = ((logits[:, :-1].argmax(-1) == ids[:, 1:]) & rm.bool()).sum().float()
-            acc = float((correct / rm.sum().clamp(min=1)).item())
+        acc = sum_correct / max(sum_tokens, 1.0)
         rec = {"step": step, "loss": loss.item(), "ppl": float(loss.exp().item()),
                "acc": acc, "gnorm": float(gnorm), "lr": cur_lr}
         if want_ssm:

@@ -23,6 +23,7 @@ import argparse
 import copy
 import os
 import random
+import sys
 
 import default_config as config
 from . import dataset_helpers as dsets
@@ -117,7 +118,21 @@ def parse_args(argv=None):
     ap.add_argument("--gpu", choices=["auto", "cuda", "mps", "cpu"], default=t["gpu"])
     ap.add_argument("--seed", type=int, default=t["seed"])
     ap.add_argument("--batch", type=int, default=t["batch"])
-    ap.add_argument("--micro_batch", type=int, default=t["micro_batch"])
+    ap.add_argument("--micro_batch", type=int, default=t["micro_batch"],
+                    help="sequences per forward pass; 0 = the whole batch at once (default). "
+                         "Splits one step into several passes whose gradients accumulate, so "
+                         "the optimiser sees the same step at a fraction of the activations.")
+    # CHUNKED LOSS, ON BY DEFAULT. The vocabulary projection is the largest tensor in the step
+    # at any context worth the name, and slicing it changes the memory and nothing else -- the
+    # positions, the targets and the normalisation are identical. --no_chunked_loss returns to
+    # projecting the whole sequence at once, which is what to do when comparing against an
+    # older run or when the sequences are short enough that the slicing only costs time.
+    ap.add_argument("--chunked_loss", dest="chunked_loss", action="store_true", default=True,
+                    help="project the vocabulary in slices (default)")
+    ap.add_argument("--no_chunked_loss", dest="chunked_loss", action="store_false",
+                    help="project the whole sequence at once")
+    ap.add_argument("--loss_chunk", type=int, default=t["loss_chunk"],
+                    help="positions per slice of the vocabulary projection")
     ap.add_argument("--max_len", type=int, default=t["max_len"],
                     help="truncation of an encoded example; 0 = the model's context window")
     ap.add_argument("--model_scheme", default=config.PRETRAIN["model_scheme"],
@@ -217,7 +232,34 @@ def parse_args(argv=None):
     if not args.pretrain_dir:
         args.pretrain_dir = config.PRETRAIN_CORPUS.get(args.model_scheme, "")
     args.pretrain_dir = os.path.abspath(args.pretrain_dir) if args.pretrain_dir else ""
+
+    # THE BATCH BELONGS TO THE SCHEME, because what fits on a card is decided by the model's
+    # width, its depth and its longest context window -- all three of which the scheme fixes.
+    # One batch shared by every size would be wrong for all but one of them: 32 sequences of
+    # 1,024 tokens through 8 layers and 1 sequence of 32,768 through 32 are the same knob set to
+    # numbers that differ by a factor of thirty.
+    #
+    # ONLY WHEN IT WAS NOT ASKED FOR. An explicit --batch, BATCH= in the environment, or a value
+    # from config_user.yaml is the person's own decision and is left exactly as given; the
+    # scheme's value is a default, not an override.
+    if not _was_given("--batch", "batch"):
+        args.batch = int(config.SCHEME_BATCH.get(args.model_scheme, args.batch))
+    # MICRO-BATCHING IS OFF UNLESS ASKED FOR. It costs nothing in accuracy but it does cost
+    # time, and a step that already fits should be run whole. SCHEME_MICRO_BATCH records what
+    # each scheme NEEDS at its longest window; it is applied only when the person asked for
+    # micro-batching without saying how much, never as a silent default.
     return args
+
+
+def _was_given(flag, dest):
+    """Was this setting chosen explicitly, on the command line or in the environment?
+
+    A scheme default must never quietly replace a value somebody typed. argv is checked for the
+    flag and the environment for its shell name, which are the two ways config.sh and a person
+    at a prompt each express a choice."""
+    if any(a == flag or a.startswith(flag + "=") for a in sys.argv[1:]):
+        return True
+    return os.environ.get(dest.upper(), "") != ""
 
 
 def frozen(model):

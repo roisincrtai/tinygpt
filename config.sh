@@ -30,7 +30,7 @@
 ZETAGPT_VARS="PY GPU SEED \
 DATASET PRETRAIN_DIR INSTRUCT_DIR SFT_DIR DATA_LIMIT VAL_FRAC \
 MODEL_SCHEME CONTEXT_WINDOW PE MAX_LEN \
-BATCH MICRO_BATCH LR_SCHEDULE LR_MIN_FACTOR BETA \
+BATCH MICRO_BATCH CHUNKED_LOSS LOSS_CHUNK LR_SCHEDULE LR_MIN_FACTOR BETA \
 PLOT_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
 EVAL_EVERY EVAL_PAIRS EB_EVERY EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID \
 EXTRA_SET COMMON_FLAGS \
@@ -207,8 +207,27 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 # MEASURE with `python -m tools.vram --sweep` on the card you will train on before raising
 # this. MICRO_BATCH splits the step instead and cuts the loss tensors proportionally, at no
 # cost to the result. RECOMPUTE PRETRAIN_STEPS whenever this changes.
-BATCH="${BATCH:-32}"                # examples (or preference pairs) per step
-MICRO_BATCH="${MICRO_BATCH:-0}"     # gradient-accumulation micro-batch; 0 = off
+BATCH="${BATCH:-}"                  # blank = the scheme's own (SCHEME_BATCH); a number here wins
+MICRO_BATCH="${MICRO_BATCH:-0}"     # sequences per forward pass; 0 = OFF, the whole batch at
+                                    # once. Splits one step into several passes whose gradients
+                                    # accumulate: the optimiser sees the same step, the card
+                                    # holds one group's activations. Costs time, not accuracy.
+                                    # zetagpt-l needs 1 at its longest window; the other three
+                                    # schemes do not need it at all.
+
+# CHUNKED LOSS. The vocabulary projection is the largest tensor in a step: logits, their
+# log-softmax and its gradient are each BATCH x CONTEXT x 50,259 in fp32, which at context
+# 32,768 is 6.1 GB apiece. Evaluating the projection LOSS_CHUNK positions at a time and summing
+# gives the identical number -- same positions, same targets, same normalisation -- with a peak
+# of 3 x LOSS_CHUNK x 50,259 instead. The backward pass recomputes each slice, so the trade is
+# roughly 30% more time in the loss for 30x less memory in it.
+#
+#   0.58 GiB at LOSS_CHUNK=1024, against 18.41 GiB for a whole 32,768-token sequence.
+#
+# Set CHUNKED_LOSS=0 to project the whole sequence at once, which is what to do when comparing
+# against a run made before this existed.
+CHUNKED_LOSS="${CHUNKED_LOSS:-1}"   # 1 = slice the projection (default), 0 = whole sequence
+LOSS_CHUNK="${LOSS_CHUNK:-1024}"    # positions per slice
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
 BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and evaluation
@@ -441,6 +460,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$MAX_LEN" ]        && COMMON_FLAGS="$COMMON_FLAGS --max_len $MAX_LEN"
 [ -n "$BATCH" ]          && COMMON_FLAGS="$COMMON_FLAGS --batch $BATCH"
 [ -n "$MICRO_BATCH" ]    && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
+[ "$CHUNKED_LOSS" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no_chunked_loss"
+[ -n "$LOSS_CHUNK" ]     && COMMON_FLAGS="$COMMON_FLAGS --loss_chunk $LOSS_CHUNK"
 [ -n "$LR_SCHEDULE" ]    && COMMON_FLAGS="$COMMON_FLAGS --lr_schedule $LR_SCHEDULE"
 [ -n "$LR_MIN_FACTOR" ]  && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"
 [ -n "$BETA" ]           && COMMON_FLAGS="$COMMON_FLAGS --beta $BETA"

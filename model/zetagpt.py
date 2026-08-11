@@ -98,13 +98,40 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, self.hd).transpose(1, 2)
         if self.rope is not None:                                     # pe="rope" ablation only
             q, k = self.rope(q, k)
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.hd)          # (B, nh, T, T)
-        causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-        att = att.masked_fill(~causal.view(1, 1, T, T), float("-inf"))
-        if attn_mask is not None:                                     # (B, T) padding mask
-            att = att.masked_fill(~attn_mask.view(B, 1, 1, T).bool(), float("-inf"))
-        att = self.drop(F.softmax(att, dim=-1))
-        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        # TWO PATHS, ONE RESULT. On CUDA the fused kernel behind scaled_dot_product_attention
+        # (FlashAttention) is used: it evaluates attention in tiles and recomputes the scores in
+        # the backward pass, so the (B, nh, T, T) matrix below is NEVER MATERIALISED. That
+        # matrix is what makes long context impossible -- at 32 layers, 16 heads and T = 32,768
+        # it is 2,560 GiB per sequence, against 10 GiB for the same attention computed in tiles.
+        #
+        # CUDA ONLY, deliberately. The fused kernels are a CUDA feature; on MPS and CPU
+        # scaled_dot_product_attention falls back to a maths implementation that is no cheaper
+        # than the explicit one and is harder to read when something is wrong. The explicit path
+        # below stays as the reference: it is what the model MEANS, it runs everywhere, and the
+        # two are checked against each other rather than assumed to agree.
+        if q.is_cuda:
+            if attn_mask is None:
+                y = F.scaled_dot_product_attention(
+                    q, k, v, is_causal=True,
+                    dropout_p=self.drop.p if self.training else 0.0)
+            else:
+                # A padding mask cannot be combined with is_causal, so the two are merged into
+                # one bool mask. This costs a T x T bool (one byte per entry, not four) and is
+                # only ever taken by the fine-tuning stages, where sequences are short.
+                keep = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+                keep = keep.view(1, 1, T, T) & attn_mask.view(B, 1, 1, T).bool()
+                y = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=keep,
+                    dropout_p=self.drop.p if self.training else 0.0)
+            y = y.transpose(1, 2).contiguous().view(B, T, C)
+        else:
+            att = (q @ k.transpose(-2, -1)) / math.sqrt(self.hd)      # (B, nh, T, T)
+            causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+            att = att.masked_fill(~causal.view(1, 1, T, T), float("-inf"))
+            if attn_mask is not None:                                 # (B, T) padding mask
+                att = att.masked_fill(~attn_mask.view(B, 1, 1, T).bool(), float("-inf"))
+            att = self.drop(F.softmax(att, dim=-1))
+            y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
         if self.gate is not None:
             y = y * torch.sigmoid(self.gate(x))                       # gated attention output
         return self.proj(y)
@@ -295,3 +322,15 @@ class ZetaGPT(nn.Module):
         x = self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec, sub_ids)
         ml = (x @ self.mask_embed.to(x.dtype)) if mask_logits else None
         return Output(self.head(x), ml)
+
+    def hidden_states(self, input_ids=None, attention_mask=None, mask_positions=None,
+                      mask_gate=None, mask_vec=None, sub_ids=None, **kw):
+        """The trunk's output, (B, T, n_embd), BEFORE the projection to the vocabulary.
+
+        forward() applies `head` to all T positions at once, which produces a (B, T, vocab)
+        tensor -- 6.1 GB at T = 32,768 for a 50,259-token vocabulary, and the loss needs three
+        of them. A caller that intends to project a slice at a time asks for the hidden states
+        instead and applies `head` itself; see helpers/lm.py. Nothing else differs, so the two
+        routes give identical logits."""
+        return self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec,
+                           sub_ids)

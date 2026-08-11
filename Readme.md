@@ -34,10 +34,42 @@ assume the induced vocabulary of 50,259 with the output head tied to the token e
 
 | Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context | Embedding | Blocks | Parameters |
 |---|---|---|---|---|---|---|---|---|---|
-| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 512 | 25.7M | 35.8M | 61.5M |
-| `zetagpt-s` (default) | 16 | 8 | 512 | 64 | 4× | 512 | 25.7M | 71.5M | **97.2M** |
-| `zetagpt-m` | 16 | 12 | 768 | 64 | 4× | 1024 | 38.6M | 160.7M | 199.3M |
-| `zetagpt-l` | 24 | 16 | 1024 | 64 | 4× | 1024 | 51.5M | 428.4M | 479.9M |
+| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 1024 | 25.7M | 35.8M | 61.5M |
+| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 4096 | 25.7M | 107.3M | **133.0M** |
+| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 8192 | 25.7M | 143.0M | 168.8M |
+| `zetagpt-l` | 32 | 16 | 1024 | 64 | 4× | 32768 | 51.5M | 571.2M | 622.7M |
+
+### Context schedule
+
+The **Context** column is the longest window a scheme trains at, not the only one. Pretraining
+starts short and lengthens, and each window takes an equal share of the step budget:
+
+| Scheme | Windows | Steps each | Batch, first → last | Tokens per step |
+|---|---|---|---|---|
+| `zetagpt-tiny` | 512 → 1024 | `steps/2` | 64 → 32 | ~32,700 |
+| `zetagpt-s` | 1024 → 4096 | `steps/2` | 24 → 6 | ~24,500 |
+| `zetagpt-m` | 1024 → 4096 → 8192 | `steps/3` | 16 → 2 | ~16,400 |
+| `zetagpt-l` | 1024 → 4096 → 8192 → 16384 → 32768 | `steps/5` | 32 → 1 | ~32,700 |
+
+Attention costs T² and activations cost T, so a token at 32k costs many times what it costs at
+1k. Vocabulary, syntax and local semantics are all available in a short window; the long
+windows are where distance is learned, and they are worth their price only once the rest is in
+place. The **batch is sized at the longest window and scales up as the window shortens**, so
+tokens per step stay constant and a step means the same thing from the first to the last — which
+is what lets one learning-rate schedule and one step budget span the whole run. The progress bar
+names the window in force: `[pretrain @zetagpt-s 4,096]`.
+
+Three settings keep long contexts affordable, all in `config.sh`:
+
+- **FlashAttention** — used automatically on CUDA via `scaled_dot_product_attention`, so the
+  `(batch, heads, T, T)` score matrix is never built. CPU and MPS keep the explicit reference
+  implementation, which is what the model means and runs everywhere.
+- **`CHUNKED_LOSS=1`, `LOSS_CHUNK=1024`** (default) — the vocabulary projection is evaluated
+  1024 positions at a time. Same number, same gradients; peak memory of the loss falls from
+  `3 × T × 50,259` to `3 × 1024 × 50,259`, which at T = 32,768 is 0.58 GiB instead of 18.4 GiB.
+- **`MICRO_BATCH`** — off by default. Splits one step into several forward/backward passes whose
+  gradients accumulate, so the card holds one group's activations while the optimiser sees the
+  whole step.
 
 ### Customized configuration scheme
 
