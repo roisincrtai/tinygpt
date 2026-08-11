@@ -3,9 +3,10 @@
 **ZetaGPT** is a compact, positional-encoding-free (NoPE) language model architecture that
 uses a state-space-attention mixture block to handle long-context sequences implicitly. It
 provides an end-to-end design blueprint covering tokenizer training, pre-training,
-supervised instruction tuning (SFT), and reward modelling/RLHF. Paper:
+supervised instruction tuning (SFT), and reward modelling/RLHF.
+
 [ZetaGPT: A Positional--Encoding--Free State--Space--Attention Compact Language
-Model](https://arxiv.org/abs/2608.09432).
+Model](https://arxiv.org/abs/2608.09432)
 
 ## Core design philosophy
 
