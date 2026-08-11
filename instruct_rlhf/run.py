@@ -1,8 +1,8 @@
 """
-instruct_rlhf/run.py -- stage 7 entry point: RLHF instruction tuning by PPO.
+instruct_rlhf/run.py -- stage 8 entry point: RLHF instruction tuning by PPO.
 
     python -m instruct_rlhf.run [--rlhf_steps N --rlhf_lr LR]
-    ./stage7_instruct_tuning_rlhf.sh
+    ./stage8_instruct_tuning_rlhf.sh
 """
 from helpers import common
 

@@ -1,5 +1,5 @@
 """
-tokenizer/run.py -- stage 2: the byte-level BPE tokenizer every later stage shares.
+tokenizer/run.py -- stage 3: the byte-level BPE tokenizer every later stage shares.
 
 Trains (or loads, if the checkpoint already exists) the corpus BPE that every later stage
 shares, and saves it WITH its full vocabulary and per-merge build history under
@@ -13,7 +13,7 @@ covers both. build() is the one place the tokenizer is constructed, so every sta
 byte-for-byte identical vocabulary.
 
     python -m tokenizer.run [--bpe_merges N]
-    ./stage2_train_bpe_tokenizer.sh
+    ./stage3_train_bpe_tokenizer.sh
 """
 import os
 
@@ -107,7 +107,7 @@ def build(texts, bpe_path, log, plotdir=None, num_merges=8000, plot_every=200,
 
 
 def main():
-    """Standalone stage 2: build (or reuse) the BPE tokenizer and draw outputs/plots/bpe/bpe_dynamics.pdf."""
+    """Standalone stage 3: build (or reuse) the BPE tokenizer and draw outputs/plots/bpe/bpe_dynamics.pdf."""
     from helpers import common
     args = common.parse_args()
     common.setup(args, need_pairs=True, draw_bpe=True)     # builds/loads the tokenizer and draws bpe_dynamics.pdf

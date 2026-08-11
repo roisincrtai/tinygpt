@@ -6,7 +6,7 @@
 # MUST BE SOURCED, not executed: a child process cannot export into its parent. config.sh
 # sources it as its last act, so a user's config_user.yaml overrides the defaults above it.
 #
-# THE SUBSET OF YAML UNDERSTOOD, which is all config_wizard.py ever writes:
+# THE SUBSET OF YAML UNDERSTOOD, which is all tools/config_wizard.py ever writes:
 #
 #     # comments, to end of line
 #     section:                  # a bare key with no value: a heading, ignored
@@ -21,7 +21,7 @@
 # worse than one that refuses it.
 #
 # PRECEDENCE. A variable that was already set IN THE ENVIRONMENT when config.sh started is
-# never overwritten, so `GPU=cpu ./stage4_pretrain.sh` still wins over the YAML. config.sh
+# never overwritten, so `GPU=cpu ./stage5_pretrain.sh` still wins over the YAML. config.sh
 # records that set in ZETAGPT_ENV_SET before applying any default.
 #
 #     command-line flag  >  environment variable  >  config_user.yaml  >  config.sh

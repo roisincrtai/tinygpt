@@ -38,7 +38,7 @@ STAGE = "distill"
 def load_prompts(distill_dir=None):
     """The prompts the teacher is asked to answer, and the file count.
 
-    The SAME bank stage 7 rolls out on, for the same reason the reward model is trained on it:
+    The SAME bank stage 8 rolls out on, for the same reason the reward model is trained on it:
     a student is only worth distilling on the distribution the teacher was actually aligned
     over. Prompts drawn from somewhere else would measure the teacher off-distribution and
     transfer that to the student as if it were the teacher's behaviour."""

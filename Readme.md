@@ -71,7 +71,7 @@ pip install -r requirements.txt
 ```
 
 Stage 1 is the only stage that reaches the network; every stage after it reads a local
-directory and stops if it is not there. Stage 3 tokenises each corpus once into a
+directory and stops if it is not there. Stage 4 tokenises each corpus once into a
 memory-mapped `.tokens` stream, so training pages the corpus in from disk rather than holding
 it in RAM -- a 2B-token corpus is 4 GB on disk and costs the training process almost nothing.
 It needs no GPU, and training stages rebuild a missing stream themselves, so skipping it costs
@@ -96,14 +96,14 @@ the checkpoint of the one it starts from.
 
 ```bash
 ./stage1_download_data.sh          # fetch the corpora
-./stage2_train_bpe_tokenizer.sh    # byte-level BPE
-./stage3_tokenize_data.sh          # corpora -> memory-mapped token streams
-./stage4_pretrain.sh               # pretraining
-./stage5_sft.sh                    # supervised fine-tuning (needs the pretrain checkpoint)
-./stage6_train_rlhf_reward.sh      # reward model
-./stage7_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
-./stage8_cot_aha_moment.sh         # chain of thought by GRPO
-./stage9_instruct_dpo.sh           # direct preference optimisation
+./stage3_train_bpe_tokenizer.sh    # byte-level BPE
+./stage4_tokenize_data.sh          # corpora -> memory-mapped token streams
+./stage5_pretrain.sh               # pretraining
+./stage6_sft.sh                    # supervised fine-tuning (needs the pretrain checkpoint)
+./stage7_train_rlhf_reward.sh      # reward model
+./stage8_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
+./stage9_cot_aha_moment.sh         # chain of thought by GRPO
+./stage10_instruct_dpo.sh           # direct preference optimisation
 ```
 
 Equivalently, bypassing the shell layer:
@@ -118,13 +118,13 @@ Every knob is a shell variable in `config.sh`, and every default lives in
 `default_config.py`; a command-line flag beats both. Overrides apply per run:
 
 ```bash
-PRETRAIN_STEPS=20000 ./stage4_pretrain.sh
-MODEL_SCHEME=zetagpt-m ./stage4_pretrain.sh
-GPU=cpu ./stage5_sft.sh
+PRETRAIN_STEPS=20000 ./stage5_pretrain.sh
+MODEL_SCHEME=zetagpt-m ./stage5_pretrain.sh
+GPU=cpu ./stage6_sft.sh
 python -m sft.run --sft_steps 5000
 ```
 
-`python config_wizard.py` writes `config_user.yaml` holding only the settings you choose;
+`python -m tools.config_wizard` writes `config_user.yaml` holding only the settings you choose;
 `config.sh` reads it over its own defaults.
 
 The tokenizer -- its special tokens, how to register your own, and how digits and whitespace
@@ -135,9 +135,9 @@ are split -- is documented in [`doc/tokenizer.md`](doc/tokenizer.md).
 Point a stage at a directory and it works out the layout by looking at it:
 
 ```bash
-DATASET=/path/to/my_preferences ./stage6_train_rlhf_reward.sh
-SFT_DIR=/path/to/my_demos       ./stage5_sft.sh
-PRETRAIN_DIR=/path/to/my_corpus ./stage4_pretrain.sh
+DATASET=/path/to/my_preferences ./stage7_train_rlhf_reward.sh
+SFT_DIR=/path/to/my_demos       ./stage6_sft.sh
+PRETRAIN_DIR=/path/to/my_corpus ./stage5_pretrain.sh
 ```
 
 A directory holding `*_train/` and `*_test/` subdirectories of json batches keeps **its own

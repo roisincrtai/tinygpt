@@ -3,7 +3,7 @@
 #
 # NOT one of the eight pipeline stages. It trains a grid of ZetaGPT-S variants from scratch on
 # WikiText-103, fits L(N, D) = E + A/N^alpha + B/D^beta, and writes the figure. Nothing it does
-# feeds the pipeline, and nothing in the pipeline depends on it -- but it needs stage 2, since
+# feeds the pipeline, and nothing in the pipeline depends on it -- but it needs stage 3, since
 # it measures loss in the project's own tokens.
 #
 #   ./run_scaling_laws.sh                      the default grid

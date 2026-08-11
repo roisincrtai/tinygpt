@@ -116,7 +116,7 @@ def main(argv=None):
         return
 
     if not os.path.isfile(config.BPE_PATH):
-        raise SystemExit(f"no tokenizer at {config.BPE_PATH} -- run stage 2 first")
+        raise SystemExit(f"no tokenizer at {config.BPE_PATH} -- run stage 3 first")
     tok = BPETokenizer.load(config.BPE_PATH)
 
     models = gridmod.ladder([m for m in args.models.split(",") if m.strip()])

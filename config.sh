@@ -7,17 +7,17 @@
 #
 #   command-line flag > environment variable > config_user.yaml > config.sh > default_config.py
 #
-#   ./stage4_pretrain.sh                        # this file's settings
-#   PRETRAIN_STEPS=20000 ./stage4_pretrain.sh   # override one knob for one run
-#   GPU=cpu ./stage5_sft.sh                     # override a shared knob for one run
-#   COT_INIT=sft ./stage8_cot_aha_moment.sh     # start the CoT stage from the SFT model
+#   ./stage5_pretrain.sh                        # this file's settings
+#   PRETRAIN_STEPS=20000 ./stage5_pretrain.sh   # override one knob for one run
+#   GPU=cpu ./stage6_sft.sh                     # override a shared knob for one run
+#   COT_INIT=sft ./stage9_cot_aha_moment.sh     # start the CoT stage from the SFT model
 #
-# YOUR OWN SETTINGS GO IN config_user.yaml, not here. `python config_wizard.py` writes it; this
+# YOUR OWN SETTINGS GO IN config_user.yaml, not here. `python -m tools.config_wizard` writes it; this
 # file sources it near the end, through export_yaml.sh, so its values override what is below
 # without editing a tracked file. It is git-ignored. Delete it and this file stands. A variable
 # already set in the environment is never overwritten by the YAML.
 #
-# Each stage script also forwards its own arguments, so `./stage9_instruct_dpo.sh --beta 0.05`
+# Each stage script also forwards its own arguments, so `./stage10_instruct_dpo.sh --beta 0.05`
 # works too.
 #
 # SECTIONS, in order: interpreter; runtime; data; model; optimisation; reporting; probes;
@@ -48,7 +48,7 @@ SCALING_FLAGS \
 MODEL_FFN_FACTOR MODEL_DROPOUT MODEL_GATED_ATTN MODEL_D_CONV MODEL_SSM_CHUNK CORPUS_EXCLUDE TOKENS_SHARD_MB SFT_SUBSETS SFT_LIMIT REWARD_SUBSETS REWARD_VAL_SUBSETS REWARD_LIMIT RLHF_GEN_TEMP RLHF_PPO_EPOCHS RLHF_CLIP_EPS RLHF_GAMMA RLHF_LAM RLHF_VF_COEF RLHF_ENT_COEF RLHF_WHITEN_ADV RLHF_PROMPT_LIMIT RLHF_PROMPTS_PER_FILE COT_GEN_TEMP COT_CLIP_EPS COT_GRPO_EPOCHS COT_ENT_COEF COT_CORRECT_REWARD COT_FORMAT_REWARD COT_LENGTH_PENALTY COT_LIMIT COT_EVAL_PROBLEMS COT_TRAIN_PREFIX COT_TEST_PREFIX COT_RECORDS_PER_FILE DISTILL_STUDENT_MAX_LEN DISTILL_MAX_NEW_TOKENS DISTILL_GEN_TEMP DISTILL_KL_COEF DISTILL_PROMPTS_PER_FILE SCALING_LR_REF_WIDTH SCALING_EVAL_EVERY SCALING_VAL_WINDOWS"
 
 # Which variables came from the ENVIRONMENT, recorded before a single default is applied:
-# export_yaml.sh must not overwrite these, or `GPU=cpu ./stage4_pretrain.sh` would lose to the
+# export_yaml.sh must not overwrite these, or `GPU=cpu ./stage5_pretrain.sh` would lose to the
 # YAML file. `${!v+x}` is set for an exported-but-empty variable too, which is deliberate:
 # GPU= means "explicitly nothing", not "unset".
 ZETAGPT_ENV_SET=""
@@ -87,7 +87,7 @@ SEED="${SEED:-0}"                   # random seed; also seeds the data order, so
 # at VAL_FRAC below.
 DATASET="${DATASET:-hh}"
 
-# PRETRAINING CORPUS -- and, because stage 2 trains the vocabulary on it, THE TOKENIZER'S
+# PRETRAINING CORPUS -- and, because stage 3 trains the vocabulary on it, THE TOKENIZER'S
 # TRAINING CORPUS as well. The ~10 GB (~2B token) FineWeb-Edu subset, which is what
 # zetagpt-s is sized for. zetagpt-tiny uses the smaller WikiText-103 corpus
 # (data/download/zetagpt-tiny_pretrain-corpus_wikitext103), and zetagpt-m and zetagpt-l ship
@@ -95,13 +95,13 @@ DATASET="${DATASET:-hh}"
 # for a 199M or 480M model. Change this WITH MODEL_SCHEME below; the two go together.
 PRETRAIN_DIR="${PRETRAIN_DIR:-data/download/zetagpt-small_pretrain-corpus_fineweb-edu_10GB}"
 
-# INSTRUCTION-TUNING TREE, shared by stages 5, 6, 7 and 9 and by distillation. Its layout is
+# INSTRUCTION-TUNING TREE, shared by stages 6, 7, 8 and 10 and by distillation. Its layout is
 # flat: alpaca_gpt4/ and rlhf_hh/ at its root. Moving this root moves everything derived from
 # it -- the fine-tuning data, the preferences and the prompt bank -- together, so no two
 # stages can read different datasets.
 INSTRUCT_DIR="${INSTRUCT_DIR:-data/download/zetagpt-rlhf-instruction_following}"
 
-# FINE-TUNING DATA for stage 5: the same records stages 6, 7 and 9 read, of which stage 5
+# FINE-TUNING DATA for stage 6: the same records stages 7, 8 and 10 read, of which stage 6
 # takes the CHOSEN response conditioned on its prompt. Point this elsewhere only to fine-tune
 # on something other than the preference data.
 SFT_DIR="${SFT_DIR:-data/download/zetagpt-rlhf-instruction_following/rlhf_hh}"
@@ -158,7 +158,7 @@ CONTEXT_WINDOW="${CONTEXT_WINDOW:-512}"
 # CONTROL: the module is removed and rotary positions are applied inside attention instead.
 # The choice is recorded in the checkpoint and appears in every filename the run writes, so an
 # ablation never overwrites the run it is compared with.
-#   PE=rope ./stage4_pretrain.sh
+#   PE=rope ./stage5_pretrain.sh
 PE="${PE:-ssm}"                     # ssm | rope
 
 # TRUNCATION of an encoded example, in tokens. Keep this EQUAL TO CONTEXT_WINDOW unless you
@@ -205,7 +205,7 @@ CKPT_EVERY="${CKPT_EVERY:-200}"     # checkpoint every N steps
 SSM_STATS_EVERY="${SSM_STATS_EVERY:-200}"   # state space diagnostics -- memory horizon,
                                     # selectivity, residual write ratio -- recorded PER LAYER
                                     # for one step every N, drawn in the pretraining figure.
-                                    # 0 turns them off. Read by stage 4.
+                                    # 0 turns them off. Read by stage 5.
 NO_RESUME="${NO_RESUME:-0}"         # 1 = ignore checkpoints and start from scratch
 
 # =========================================================================== #
@@ -241,7 +241,7 @@ EXTRA_SET="${EXTRA_SET:-}"
 COMMON_FLAGS="${COMMON_FLAGS:-}"
 
 # =========================================================================== #
-# stage 2 -- byte-level BPE tokenizer
+# stage 3 -- byte-level BPE tokenizer
 # =========================================================================== #
 BPE_MERGES="${BPE_MERGES:-50000}"   # merge budget; raising it EXTENDS an existing tokenizer.
                                     # 50,000 is GPT-2's count.
@@ -254,10 +254,10 @@ BPE_MIN_FREQ="${BPE_MIN_FREQ:-2}"
 BPE_FLAGS="${BPE_FLAGS:-}"
 
 # =========================================================================== #
-# stage 3 -- tokenise the corpora into memory-mapped .tokens streams
+# stage 4 -- tokenise the corpora into memory-mapped .tokens streams
 # =========================================================================== #
 # Reads PRETRAIN_DIR above and writes cache/tokens/bpe_<256+merges>_<fingerprint>/. Re-running
-# is free when nothing changed. These two also govern how stage 4 reads the corpus, so they
+# is free when nothing changed. These two also govern how stage 5 reads the corpus, so they
 # live here rather than in the pretraining section.
 CORPUS_MAX_WORDS="${CORPUS_MAX_WORDS:-344}"      # words per packed document; ~1.5 tokens per
                                                  # word fills a 512-token window
@@ -272,7 +272,7 @@ TOKENS_SHARD_MB="${TOKENS_SHARD_MB:-100}"    # MB of tokens per shard. A corpus 
                                     # incrementally, and loses everything to one bad byte.
 
 # =========================================================================== #
-# stage 4 -- pretraining
+# stage 5 -- pretraining
 # =========================================================================== #
 # 2 epochs over the ~2B-token corpus at BATCH x (MAX_LEN-1) = 28,616 tokens per step.
 # CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being two epochs.
@@ -281,7 +281,7 @@ PRETRAIN_LR="${PRETRAIN_LR:-2e-5}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 
 # =========================================================================== #
-# stage 5 -- supervised fine-tuning
+# stage 6 -- supervised fine-tuning
 # =========================================================================== #
 SFT_STEPS="${SFT_STEPS:-2342}"
 SFT_LR="${SFT_LR:-1e-6}"
@@ -291,7 +291,7 @@ SFT_SUBSETS="${SFT_SUBSETS:-helpful_train,harmless_train}"  # split dirs read fr
 SFT_LIMIT="${SFT_LIMIT:-0}"         # cap demonstrations per subset; 0 = all
 
 # =========================================================================== #
-# stage 6 -- reward model (sigmoid + BCE)
+# stage 7 -- reward model (sigmoid + BCE)
 # =========================================================================== #
 REWARD_STEPS="${REWARD_STEPS:-2500}"
 REWARD_LR="${REWARD_LR:-1e-5}"
@@ -302,7 +302,7 @@ REWARD_VAL_SUBSETS="${REWARD_VAL_SUBSETS:-helpful_test,harmless_test}"
 REWARD_LIMIT="${REWARD_LIMIT:-20000}"   # pairs per subset; 0 = all (~86k train pairs)
 
 # =========================================================================== #
-# stage 7 -- RLHF by PPO
+# stage 8 -- RLHF by PPO
 # =========================================================================== #
 RLHF_STEPS="${RLHF_STEPS:-3251}"
 RLHF_LR="${RLHF_LR:-1e-6}"
@@ -325,7 +325,7 @@ RLHF_PROMPT_LIMIT="${RLHF_PROMPT_LIMIT:-0}" # cap the prompt bank; 0 = all
 RLHF_PROMPTS_PER_FILE="${RLHF_PROMPTS_PER_FILE:-1000}"
 
 # =========================================================================== #
-# stage 8 -- chain of thought by GRPO (the aha moment)
+# stage 9 -- chain of thought by GRPO (the aha moment)
 # =========================================================================== #
 COT_STEPS="${COT_STEPS:-1400}"
 COT_LR="${COT_LR:-1e-6}"
@@ -353,7 +353,7 @@ COT_TEST_PREFIX="${COT_TEST_PREFIX:-test}"
 COT_RECORDS_PER_FILE="${COT_RECORDS_PER_FILE:-1000}"
 
 # =========================================================================== #
-# stage 9 -- direct preference optimisation
+# stage 10 -- direct preference optimisation
 # =========================================================================== #
 DPO_STEPS="${DPO_STEPS:-590}"
 DPO_LR="${DPO_LR:-1e-6}"
@@ -395,7 +395,7 @@ SCALING_VAL_WINDOWS="${SCALING_VAL_WINDOWS:-64}"      # validation windows per e
 # =========================================================================== #
 # your settings: config_user.yaml overrides everything above
 # =========================================================================== #
-# Written by `python config_wizard.py`, git-ignored, absent by default. Sourced (not run) so
+# Written by `python -m tools.config_wizard`, git-ignored, absent by default. Sourced (not run) so
 # that the exports land in this shell. Environment variables set before this script started
 # are left alone; see ZETAGPT_ENV_SET at the top.
 ZETAGPT_YAML="${ZETAGPT_YAML:-$(dirname "${BASH_SOURCE[0]}")/config_user.yaml}"
@@ -494,8 +494,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$SCALING_VAL_WINDOWS" ]     && COMMON_FLAGS="$COMMON_FLAGS --set SCALING.val_windows=$SCALING_VAL_WINDOWS"
 [ -n "$EXTRA_SET" ]          && COMMON_FLAGS="$COMMON_FLAGS $EXTRA_SET"
 
-# stage 3 does not take the common trainer flags (it builds no model), so the corpus
-# settings it shares with stage 4 are forwarded to it separately
+# stage 4 does not take the common trainer flags (it builds no model), so the corpus
+# settings it shares with stage 5 are forwarded to it separately
 [ -n "$MODEL_SCHEME" ]       && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --model_scheme $MODEL_SCHEME"
 [ -n "$PRETRAIN_DIR" ]       && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --pretrain_dir $PRETRAIN_DIR"
 [ -n "$CORPUS_MAX_WORDS" ]   && TOKENIZE_FLAGS="$TOKENIZE_FLAGS --max_words $CORPUS_MAX_WORDS"

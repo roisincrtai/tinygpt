@@ -1,8 +1,8 @@
 """
-sft.py -- stage 5's logic: domain-adaptive supervised fine-tuning on the fine-tuning data.
+sft.py -- stage 6's logic: domain-adaptive supervised fine-tuning on the fine-tuning data.
 
 The objective is the SAME length-normalized LM likelihood as pretraining (lm.train); what
-changes is the corpus. Stage 4 buys general language from a large heterogeneous corpus,
+changes is the corpus. Stage 5 buys general language from a large heterogeneous corpus,
 this stage moves the model onto the distribution the alignment stages operate in. Sharing
 one loop is deliberate: the two stages cannot drift apart in their treatment of masking,
 normalisation or padding.
@@ -31,7 +31,7 @@ def load_corpus(tok, corpus_dir, log=print):
     prompt.
 
     Supervised fine-tuning on preference data means training on the chosen continuation and
-    nothing else -- the rejected one is what stages 6 and 9 need, and feeding it here would
+    nothing else -- the rejected one is what stages 7 and 10 need, and feeding it here would
     teach the model the very responses the rest of the pipeline then spends its time pushing
     down. The records are handed back in the same {prompt, chosen, rejected} shape the encoder
     already takes, so the loss lands on the response tokens with the prompt as context: the
@@ -44,7 +44,7 @@ def load_corpus(tok, corpus_dir, log=print):
     `corpus_dir` may be the downloaded hh tree or YOUR OWN FOLDER of json/jsonl records; the
     layout is detected and reported, not declared. Only a prompt and a preferred response are
     needed here, so a folder of plain demonstrations (no rejected field) is enough for this
-    stage even though stages 6 and 9 would refuse it."""
+    stage even though stages 7 and 10 would refuse it."""
     layout = dsets.detect_layout(corpus_dir)
     if layout == "missing":
         raise SystemExit(

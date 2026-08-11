@@ -32,7 +32,7 @@ from chat import generate, decode
 from model import ZetaGPT
 from . import visualization as viz
 
-from tokenizer import run as train_bpe    # stage 2's tokenizer builder (also draws bpe_dynamics)
+from tokenizer import run as train_bpe    # stage 3's tokenizer builder (also draws bpe_dynamics)
 
 ROOT = config.ROOT
 CKDIR = config.CHECKPOINT_DIR
@@ -133,7 +133,7 @@ def parse_args(argv=None):
                          "which is <instruct_dir>/rlhf_hh")
     ap.add_argument("--instruct_dir", default="",
                     help="root of the instruction-tuning tree (alpaca_gpt4/, rlhf_hh/) used "
-                         "by stages 5, 6, 7, 9 and 10; empty = "
+                         "by stages 6, 7, 8 and 10, and by distillation; empty = "
                          "default_config.INSTRUCT_DIR")
     ap.add_argument("--context_window", type=int, default=config.PRETRAIN["context_window"],
                     help="context window in tokens; 0 = the scheme's own (512 for tiny and "

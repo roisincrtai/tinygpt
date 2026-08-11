@@ -593,7 +593,7 @@ class BPETokenizer:
                 f"[bpe] {path} was written with the old id layout "
                 f"({layout or 'specials-first, pre-<|endoftext|>'}), which is not compatible: "
                 f"its ids are offset by the specials.\n"
-                f"      Delete it and re-run ./stage2_train_bpe_tokenizer.sh. Any checkpoint "
+                f"      Delete it and re-run ./stage3_train_bpe_tokenizer.sh. Any checkpoint "
                 f"or token stream built with it must be rebuilt too -- the cache directory is "
                 f"named after the tokenizer's fingerprint, so that happens by itself.")
         tok = cls([(tuple(a), tuple(b)) for a, b in d["merges"]],

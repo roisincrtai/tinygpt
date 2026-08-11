@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# stage4_pretrain.sh -- stage 4: LM pretraining.
+# stage6_sft.sh -- stage 6: domain-adaptive SFT.
 #
 # Knobs live in config.sh (and ultimately default_config.py); extra arguments are forwarded:
-#   ./stage4_pretrain.sh --help
+#   ./stage6_sft.sh --help
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh          # which reads config_user.yaml over its defaults
-echo "=== [4/9] LM pretraining ==============================================="
-exec $PY -m pretrain.run $COMMON_FLAGS $PRETRAIN_FLAGS "$@"
+echo "=== [6/10] domain-adaptive SFT ==============================================="
+exec $PY -m sft.run $COMMON_FLAGS $SFT_FLAGS "$@"

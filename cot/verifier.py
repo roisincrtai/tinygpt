@@ -2,7 +2,7 @@
 verifier.py -- the reward of the chain-of-thought stage: NOT a learned model, an arithmetic
 check.
 
-Stage 6 fits a reward model to human preferences, and stage 7 optimises against it. Reasoning
+Stage 7 fits a reward model to human preferences, and stage 8 optimises against it. Reasoning
 does not need that machinery: a GSM8K problem has one correct final answer, so the reward can
 be COMPUTED. That is the whole reason this stage can produce something the preference stages
 cannot -- a policy optimising a reward it cannot game by sounding plausible.

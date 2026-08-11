@@ -1,6 +1,6 @@
 # The ZetaGPT Tokenizer
 
-**Files:** `tokenizer/bpe.py` (the algorithm), `tokenizer/run.py` (stage 2), `checkpoints/bpe/bpe.json` (the trained vocabulary)
+**Files:** `tokenizer/bpe.py` (the algorithm), `tokenizer/run.py` (stage 3), `checkpoints/bpe/bpe.json` (the trained vocabulary)
 
 A byte-level byte-pair encoding tokenizer, trained from scratch on the pipeline's own corpora.
 Byte-level in the sense GPT-2 introduced: the base alphabet is the 256 possible byte values, so
@@ -188,7 +188,7 @@ for source code.
 
 ## 5. Training the vocabulary
 
-Stage 2 (`./stage2_train_bpe_tokenizer.sh`) trains the merges on **every text the pipeline will
+Stage 3 (`./stage3_train_bpe_tokenizer.sh`) trains the merges on **every text the pipeline will
 see**, so one vocabulary serves every stage: the pretraining corpus as documents, plus the
 instruction data in its parsed form (each prompt, chosen and rejected string). The corpus is read
 through the same packer the training stages use, so parquet, markdown and source code are decoded

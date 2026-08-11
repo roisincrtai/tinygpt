@@ -1,11 +1,11 @@
 """
-instruct_reward/run.py -- stage 6 entry point: the RLHF reward model.
+instruct_reward/run.py -- stage 7 entry point: the RLHF reward model.
 
 A ZetaGPT trunk initialised from the SFT checkpoint plus a scalar head, trained as a binary
 classifier (sigmoid + BCE) on the preference pairs: chosen 1, rejected 0.
 
     python -m instruct_reward.run [--reward_steps N --reward_lr LR]
-    ./stage6_train_rlhf_reward.sh
+    ./stage7_train_rlhf_reward.sh
 """
 from helpers import common
 import default_config as config
@@ -18,8 +18,8 @@ from . import rlhf_reward
 def load_pairs(ctx):
     """The preference pairs this stage trains on.
 
-    Read from --dataset: "hh" for the downloaded rlhf_hh tree -- the same records stage 5
-    fine-tuned on and stage 7 rolls out over, which is what makes this model's scores
+    Read from --dataset: "hh" for the downloaded rlhf_hh tree -- the same records stage 6
+    fine-tuned on and stage 8 rolls out over, which is what makes this model's scores
     meaningful where the policy is actually evaluated -- or a path to your own folder. The
     LAYOUT is detected: a tree with its own *_train / *_test split keeps that split, a plain
     folder of json/jsonl is shuffled and cut at --val_frac.

@@ -142,7 +142,7 @@ def read_checkpoint(ckpt):
         print(("[chat] Available checkpoints:\n[chat]   "
                + "\n[chat]   ".join(have)) if have else
               "[chat] No stage checkpoints exist yet: run a stage first, e.g.\n"
-              "        ./stage4_pretrain.sh",
+              "        ./stage5_pretrain.sh",
               flush=True)
         print("!" * 78 + "\n", flush=True)
         return None, None

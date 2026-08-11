@@ -1,5 +1,5 @@
 """
-pretrain.py -- stage 4's logic: language-model pretraining.
+pretrain.py -- stage 5's logic: language-model pretraining.
 
 Owns everything specific to pretraining and nothing else: which corpus is read, how it is
 reported, which prompts the generation previews use, and which budget and learning rate the

@@ -9,7 +9,7 @@ a run without editing Python, and a command-line flag beats both. Precedence is
 Every stage imports this module as `config`, so the code reads `config.MODEL[...]` while the
 filename says what the values actually are.
 
-Every stage trainer (stage2..stage9, and distill/) reads its defaults from here via
+Every stage trainer (stage3..stage10, and distill/) reads its defaults from here via
 common.parse_args();
 any value can still be overridden on the command line (a flag present in argv wins), so
 `python -m sft.run --sft_steps 5000` works without touching this file.
@@ -30,8 +30,8 @@ instruction tree holds. NOTHING HERE DOWNLOADS; see DATASETS below and tools/dow
                                 PRETRAIN["exclude_dirs"]
     data/download/zetagpt-rlhf-instruction_following/
                                 rlhf_hh/        preference pairs, by subset and split. Serves
-                                                stages 5 (demonstrations), 5 (preferences),
-                                                6 and 9 (prompts) and 8 (preferences)
+                                                stages 6 (demonstrations), 7 (preferences),
+                                                8 (prompts) and 10 (preferences)
                                 alpaca_gpt4/    an alternative prompt bank, unused by default
     data/download/zetagpt-grpo-cot_gsm8k/
                                 reasoning problems: {train,test}_<batch>.json
@@ -93,11 +93,11 @@ DATASETS = {
     "zetagpt-rlhf-instruction_following": {
         "repo": "roisincrtai/zetagpt-rlhf-instruction_following",
         "what": "instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout "
-                "prompts, shared by stages 5, 6 and 9",
+                "prompts, shared by stages 6, 7 and 10",
     },
     "zetagpt-grpo-cot_gsm8k": {
         "repo": "roisincrtai/zetagpt-grpo-cot_gsm8k",
-        "what": "chain-of-thought reasoning problems for the stage-8 GRPO run (GSM8K)",
+        "what": "chain-of-thought reasoning problems for the stage-9 GRPO run (GSM8K)",
     },
 }
 
@@ -165,7 +165,7 @@ def set_instruct_root(path):
 
 COT_DIR = dataset_dir("zetagpt-grpo-cot_gsm8k")             # chain-of-thought / reasoning
 COT_GSM8K_DIR = COT_DIR                                    # {train,test}_<batch>.json
-DISTILL_DIR = HH_DIR        # distillation generates from the same prompts stage 7 rolls out on
+DISTILL_DIR = HH_DIR        # distillation generates from the same prompts stage 8 rolls out on
 CACHE_DIR = os.path.join(ROOT, "cache")                    # cache/tokens/bpe_<256+merges>_<fp>/<mirror>.tokens
 CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints")         # checkpoints/<stage>/checkpoint_*.pt
 OUTPUT_DIR = os.path.join(ROOT, "outputs")                  # everything a run produces
@@ -406,7 +406,7 @@ PRETRAIN = dict(
 SFT = dict(
     steps=2342, lr=1e-6,        # 2 epochs
     # WHICH rlhf_hh SUBSETS the demonstrations come from. The TRAIN splits only: the test
-    # splits are what stages 6 and 9 hold themselves out on, and fine-tuning on them would make
+    # splits are what stages 7 and 10 hold themselves out on, and fine-tuning on them would make
     # every later evaluation a measurement of memorisation instead of generalisation.
     subsets=["helpful_train", "harmless_train"],
     limit=0,                    # cap the pairs taken per subset (0 = all)
@@ -416,7 +416,7 @@ SFT = dict(
 # chosen -> label 1, rejected -> label 0.
 #
 # WHICH PREFERENCES. The reward model must speak the domain the policy will be rolled out in,
-# or its scores are meaningless there -- which is why stages 5, 6, 7 and 9 all read rlhf_hh:
+# or its scores are meaningless there -- which is why stages 6, 7, 8 and 10 all read rlhf_hh:
 # the model is fine-tuned on those demonstrations, scored by a reward model fitted to those
 # preferences, and rolled out on those prompts. The three agreeing is the assumption PPO's
 # objective is written under.
@@ -430,7 +430,7 @@ REWARD = dict(
     hh_limit=20000,             # pairs per subset, 0 = all (~86k train pairs in total)
 )
 
-# RLHF = PPO against the stage-5 reward model, starting FROM THE SFT MODEL, with a per-token
+# RLHF = PPO against the stage-7 reward model, starting FROM THE SFT MODEL, with a per-token
 # KL penalty to the frozen SFT reference (the standard InstructGPT recipe).
 RLHF = dict(
     steps=3251, lr=1e-6,        # 1 epoch over the instruction prompts; KL-anchored
@@ -447,7 +447,7 @@ RLHF = dict(
     # from the instruction batches in <instruct_dir>/alpaca_gpt4/
     # (alpaca_gpt4_<batch>.json, each record carrying `prompt`). Set prompt_dir=None to fall
     # back to the preference file's prompts.
-    prompt_dir=HH_DIR,          # the prompts of the same rlhf_hh records stages 5/5/8 use
+    prompt_dir=HH_DIR,          # the prompts of the same rlhf_hh records stages 6/7/10 use
     prompt_limit=0,             # cap the prompt bank (0 = all ~52k)
     prompts_per_file=1000,      # what alpaca_to_json.py writes
 )
@@ -479,7 +479,7 @@ COT = dict(
                                 #   "pretrain" -- R1-Zero: RL on the base model, no SFT
                                 #   "sft"      -- a sibling of RLHF and DPO
                                 #   "rlhf" / "dpo" -- continue an aligned policy
-                                # Overridable per run: COT_INIT=sft ./stage8_cot_aha_moment.sh
+                                # Overridable per run: COT_INIT=sft ./stage9_cot_aha_moment.sh
     group_size=8,               # completions sampled per prompt; the group IS the baseline
     max_new_tokens=200,         # room to think: a short cap forbids the behaviour we look for
     gen_temperature=1.0,        # rollouts must be SAMPLED for the group to have spread

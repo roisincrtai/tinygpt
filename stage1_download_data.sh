@@ -15,5 +15,5 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh          # which reads config_user.yaml over its defaults
-echo "=== [1/9] download datasets ==========================================="
+echo "=== [1/10] download datasets ==========================================="
 exec $PY -m tools.download_data "$@"

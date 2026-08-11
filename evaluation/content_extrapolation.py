@@ -177,7 +177,7 @@ def parse_args():
 # it is supposed to be accompanying.
 def spec_zetagpt(args, device, dtype, log):
     if not os.path.isfile(config.BPE_PATH):
-        raise SystemExit(f"no tokenizer at {config.BPE_PATH} -- run stage 2 first")
+        raise SystemExit(f"no tokenizer at {config.BPE_PATH} -- run stage 3 first")
     tok = BPETokenizer.load(config.BPE_PATH)
     path = find_checkpoint(args.checkpoint)
     ck = torch.load(path, map_location="cpu")
@@ -260,7 +260,7 @@ def find_checkpoint(given):
                        + glob.glob(os.path.join(d, "checkpoint_*.pt"))
                        + glob.glob(os.path.join(d, "last.pt"))), key=os.path.getmtime)
     if not found:
-        raise SystemExit(f"no pretrain checkpoint under {d}/ -- run stage 4 first")
+        raise SystemExit(f"no pretrain checkpoint under {d}/ -- run stage 5 first")
     return found[-1]
 
 

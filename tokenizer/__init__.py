@@ -1,4 +1,4 @@
-"""Stage 2: the byte-level BPE tokenizer every stage shares."""
+"""Stage 3: the byte-level BPE tokenizer every stage shares."""
 #
 # `run` is NOT imported here. `python -m tokenizer.run` makes runpy import this package
 # first, and if the module it is about to execute is already in sys.modules it runs a

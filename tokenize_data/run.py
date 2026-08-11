@@ -1,8 +1,8 @@
 """
-tokenize_data/run.py -- stage 3: turn this run's corpus into a token stream.
+tokenize_data/run.py -- stage 4: turn this run's corpus into a token stream.
 
     python -m tokenize_data.run [--force] [--list] [--all] [--only tiny]
-    ./stage3_tokenize_data.sh
+    ./stage4_tokenize_data.sh
 
 WHY THIS IS ITS OWN STAGE. Tokenising a corpus is the one expensive, entirely deterministic
 step in the pipeline: it depends on the corpus and the tokenizer and on nothing else, it
@@ -97,7 +97,7 @@ def main(argv=None):
     if tok is None:
         raise SystemExit(
             f"[tokenize] no usable tokenizer at {config.BPE_PATH}\n"
-            f"           Run ./stage2_train_bpe_tokenizer.sh first: a token stream is tied "
+            f"           Run ./stage3_train_bpe_tokenizer.sh first: a token stream is tied "
             f"to the vocabulary that produced it.")
 
     todo = corpora(a)

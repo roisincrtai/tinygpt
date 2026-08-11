@@ -1,5 +1,5 @@
 """
-dpo.py -- stage 9's logic: Direct Preference Optimization, AND the shared sequence-scoring
+dpo.py -- stage 10's logic: Direct Preference Optimization, AND the shared sequence-scoring
 core that the other preference code is built on.
 
 TWO THINGS LIVE HERE, deliberately.
@@ -10,7 +10,7 @@ TWO THINGS LIVE HERE, deliberately.
    read the same number from the same code. Nothing downstream re-implements it.
 
 2. THE STAGE RUNNER -- run(), the preference training loop, which starts from the SFT
-   model and trains it against the frozen SFT reference. stage9_instruct_dpo.sh is only
+   model and trains it against the frozen SFT reference. stage10_instruct_dpo.sh is only
    the command-line wrapper around it.
 
 The objective is
