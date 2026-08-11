@@ -1009,16 +1009,30 @@ def tokenizer_fingerprint(path=None, tok=None, n=8):
             except AttributeError:                 # a tokenizer that forbids new attributes
                 pass
         return cached[1][:n]
-    # No tokenizer object: fall back to the file, which at least separates two different ones.
+    # NO TOKENIZER OBJECT: the same value, derived from the file. It must be THE SAME VALUE.
+    #
+    # This used to hash the whole of bpe.json, and that was a second, disagreeing definition of
+    # the same thing: the file also carries the specials, the full vocab listing, the corpus
+    # signature and the per-merge build history, none of which decide what a corpus tokenises
+    # to. One tokenizer therefore had two fingerprints -- one when a caller happened to hold
+    # the object, another when it held only the path -- and so two cache directories, each
+    # invisible to the other, each worth hours to fill. Registering a special moved the
+    # file-derived one as well, which is the one thing encoding_blob exists to prevent.
+    #
+    # So the merges are read out of the file and hashed through the same canonical blob.
     path = path or config.BPE_PATH
     try:
         st = os.stat(path)
-        key = (path, int(st.st_mtime), st.st_size)
+        key = (path, int(st.st_mtime), st.st_size)     # a MEMO key only; never part of the hash
         if key not in _FINGERPRINTS:
-            with open(path, "rb") as f:
-                _FINGERPRINTS[key] = blob_hash(f.read())
+            from tokenizer.bpe import PRETOK_VERSION
+            with open(path, encoding="utf-8") as f:
+                merges = json.load(f)["merges"]
+            _FINGERPRINTS[key] = blob_hash(json.dumps(
+                {"pretok": PRETOK_VERSION, "merges": merges},
+                separators=(",", ":")).encode("utf-8"))
         return _FINGERPRINTS[key][:n]
-    except OSError:
+    except (OSError, ValueError, KeyError):
         return "nofile00"[:n].ljust(n, "0")
 
 
@@ -1047,9 +1061,17 @@ def token_cache_root(tok, path=None):
 def _tok_signature(tok, max_words, text_column=""):
     """Identifies the tokenizer and the packing; any change invalidates every entry. The
     parquet text column is part of it: reading a different column is a different corpus, and a
-    cache that survived that change would train on tokens nobody asked for."""
+    cache that survived that change would train on tokens nobody asked for.
+
+    THE SIZE COUNTED IS THE ENCODING, 256 + merges, NOT len(tok). len(tok) includes the
+    special tokens, so it rises the moment <|im_start|> is registered -- and a corpus that has
+    not changed by a single token would then sign differently and be tokenised all over again.
+    Registering a special after pretraining must leave every cached stream valid; that is the
+    entire point of being able to register one, it is why tokenizer_tag counts the same way,
+    and encoding_blob explains why the ids do not move."""
     n_merges = len(getattr(tok, "merges", []) or [])
-    return (f"v1|vocab={len(tok)}|merges={n_merges}|max_words={int(max_words)}"
+    n_base = 256 + n_merges if hasattr(tok, "merges") else len(tok)
+    return (f"v2|encoding={n_base}|merges={n_merges}|max_words={int(max_words)}"
             f"|col={text_column}")
 
 
