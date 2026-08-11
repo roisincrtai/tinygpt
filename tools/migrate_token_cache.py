@@ -7,7 +7,7 @@ tools/migrate_token_cache.py -- move an existing token cache onto the portable n
 WHY THIS EXISTS. Token streams used to be named after WHERE a corpus sat and WHEN its files
 were last written: the cache mirrored the corpus's path, and the signature hashed every file's
 modification time. Both are properties of a machine rather than of a dataset, so the same
-corpus on two servers reached two different names, and the second server retokenised a corpus
+one corpus could reach two different names on two hosts, and the second would retokenise what
 the first had already finished. The naming is now the dataset's name and the dataset's
 contents, which are the same everywhere.
 

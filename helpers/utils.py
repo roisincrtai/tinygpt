@@ -1258,7 +1258,7 @@ def corpus_signature(tok, root, files, max_words, text_column):
 
     NOTHING MACHINE-DEPENDENT GOES INTO IT. A signature exists to answer "are these the tokens
     of this corpus?", and that question has the same answer on every machine, so the same
-    corpus must produce the same signature on a laptop, on vulcan1 and on vulcan2. Two inputs
+    corpus must produce the same signature on any host and under any layout. Two inputs
     used to break that, and both were unnecessary:
 
       MODIFICATION TIMES. An mtime records when a file last arrived on THIS filesystem, not
@@ -1267,9 +1267,9 @@ def corpus_signature(tok, root, files, max_words, text_column):
       corpus on two servers signed differently, and a finished token stream became invisible to
       the machine that was about to use it.
 
-      PATHS, absolute or relative. /scratch/roisin/.../fineweb-edu_10GB and
-      /home/roisin/work/.../fineweb-edu_10GB are the same corpus, and so is the copy on a
-      laptop. What identifies a corpus is its NAME -- the dataset directory,
+      PATHS, absolute or relative. A dataset under a scratch filesystem, the same dataset in
+      a home directory and the same dataset on a workstation are one corpus. What identifies
+      it is its NAME -- the dataset directory,
       zetagpt-small_pretrain-corpus_fineweb-edu_10GB -- which is the name it was published
       under and travels with it. Where a given machine chose to put it is that machine's
       business and belongs nowhere near an identity.
@@ -1303,8 +1303,8 @@ def corpus_name(root):
 
     `zetagpt-small_pretrain-corpus_fineweb-edu_10GB`. That is what the dataset is called, it is
     the name it was published under, and it is the same on every machine that has a copy. No
-    part of the path above it is used, because /scratch/roisin/..., /home/roisin/work/... and a
-    laptop's Documents folder hold the same corpus and must reach the same cache."""
+    part of the path above it is used: a scratch filesystem, a home directory and a
+    workstation may each hold the same corpus, and all three must reach the same cache."""
     return os.path.basename(os.path.normpath(os.path.abspath(root))) or "corpus"
 
 
@@ -1400,7 +1400,7 @@ def _equivalent_stream(path, packing, extra_dirs=()):
     A stream written before the packing was recorded carries nothing to compare. It is still
     adopted, because the alternative is retokenising a corpus that is already on disk, but a
     FINISHED one is always preferred to a partial one: the case this exists for is a directory
-    holding one complete stream of forty shards and one that has just started from zero.
+    holding one complete stream and one that has just started from zero.
     """
     def rank(si):
         """Complete beats partial; among equals, the one with more tokens."""

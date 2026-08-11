@@ -70,39 +70,6 @@ pip install -r requirements.txt
 ./stage1_download_data.sh          # fetch the corpora into data/download/
 ```
 
-Stage 1 is the only stage that reaches the network; every stage after it reads a local
-directory and stops if it is not there. Stage 4 tokenises each corpus once into a
-memory-mapped `.tokens` stream, so training pages the corpus in from disk rather than holding
-it in RAM -- a 2B-token corpus is 4 GB on disk and costs the training process almost nothing.
-It needs no GPU, and training stages rebuild a missing stream themselves, so skipping it costs
-time rather than correctness. Already-present datasets are skipped and an
-interrupted transfer resumes, so re-running is cheap. `./stage1_download_data.sh --list` shows
-what would be fetched and where it goes.
-
-A token stream is named after the **dataset**, never after the machine:
-`cache/tokens/<tokenizer>/<dataset>/<dataset>_<signature>_00000.tokens`. The signature covers
-the dataset name, the packing (tokenizer, word budget, text column) and the corpus's own file
-count and byte total. No path, no modification time, no host. The same corpus therefore signs
-identically on a laptop and on two cluster nodes, and a corpus tokenised once is never
-tokenised again because it was copied somewhere else. `python -m tools.migrate_token_cache`
-renames a cache written by an earlier version onto this scheme, by rename rather than copy, so
-nothing has to be rebuilt.
-
-Tokenisation is written in ~100 MB shards as it goes, and it **resumes at the document it
-stopped on**. The shard manifest carries a cursor -- the source file and the document within
-it -- so a build that is killed after nine hours reopens the last shard, trims the bytes it
-wrote but had not yet counted, and continues: files already consumed are never reopened and
-documents already stored are never handed to the tokenizer again. Encoding is the expensive
-half of tokenising a corpus by a wide margin, so a resume that re-encoded what was already on
-disk would cost as much as the work it was recovering. An interrupted build resumed this way
-produces shards byte-identical to an uninterrupted one, across shard boundaries and wherever
-the interruption fell. A manifest written before the cursor existed still resumes correctly,
-re-reading the corpus but not re-encoding it.
-
-Stages are independent and communicate only through files on disk, so each can be run,
-re-run or replaced alone. Every stage requires the tokenizer, and each later stage requires
-the checkpoint of the one it starts from.
-
 ```bash
 ./stage1_download_data.sh          # fetch the corpora
 ./stage3_train_bpe_tokenizer.sh    # byte-level BPE

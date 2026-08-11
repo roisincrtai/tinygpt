@@ -7,7 +7,7 @@ token_store.py -- the pre-tokenised corpus as a set of memory-mapped SHARD FILES
 
 NOTHING IS HELD BACK. Each document is appended to the open shard the moment it is tokenised,
 and the manifest is rewritten every few seconds with the counts that are actually on disk.
-Buffering a shard's worth of tokens before writing would mean a run killed after nine hours
+Buffering a shard's worth of tokens before writing would mean a run killed part way through
 left an empty directory -- which is exactly what a corpus of 10 TB cannot afford, and what
 this module used to do. The invariant is: what has been read has been written.
 
