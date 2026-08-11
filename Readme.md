@@ -1,13 +1,28 @@
 # ZetaGPT: A Positional–Encoding–Free State–Space–Attention Compact Language Models
 
-**ZetaGPT** is a compact language model with no explicit positional encoding: no position
-table and no rotation. Each block is a causal state-space module, gated multi-head
-self-attention and a feed-forward network, pre-normalised with a residual around each
-sub-layer; sequence order enters through the recurrent state rather than through a function
-of the position index. The repository provides the complete training pipeline — byte-level
-BPE tokenizer, pretraining, supervised fine-tuning, reward modelling, RLHF, chain-of-thought
-reinforcement learning, direct preference optimisation and distillation — in plain PyTorch,
-with each stage runnable on its own.
+**ZetaGPT** is a compact, positional-encoding-free (NoPE) language model architecture that
+uses a state-space-attention mixture block to handle long-context sequences implicitly. It
+provides an end-to-end design blueprint covering tokenizer training, pre-training,
+supervised instruction tuning (SFT), and reward modelling/RLHF.
+
+## Core design philosophy
+
+- **No positional encoding (NoPE).** Traditional transformers require explicit position
+  signals — sinusoidal or rotary embeddings — because self-attention is order-invariant.
+  ZetaGPT avoids explicit position vectors entirely: no position table, and no rotation.
+- **State-space-attention mixture.** It relies on hybrid mixture blocks that implicitly
+  capture token order and long-range dependencies, reflecting modern architectural trends
+  aimed at scaling context lengths efficiently.
+- **Compact and product-level pipeline.** Built as an open blueprint to demonstrate full
+  lifecycle engineering for small-scale, highly efficient language models.
+
+Each block is a causal state-space module, gated multi-head self-attention and a
+feed-forward network, pre-normalised with a residual around each sub-layer; sequence order
+enters through the recurrent state rather than through a function of the position index.
+The repository provides the complete training pipeline — byte-level BPE tokenizer,
+pretraining, supervised fine-tuning, reward modelling, RLHF, chain-of-thought reinforcement
+learning, direct preference optimisation and distillation — in plain PyTorch, with each
+stage runnable on its own.
 
 ## Configuration schemes
 
