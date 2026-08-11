@@ -258,21 +258,36 @@ DEFAULT_SCHEME = "zetagpt-s"
 # than at the end, none of those three would mean the same thing twice. Keeping tokens per step
 # fixed makes the schedule invisible to everything except the memory it was introduced to save.
 SCHEME_BATCH = {
-    "zetagpt-tiny": 32,         # ~1024 ctx: 25.5 GiB of a 35 GiB budget
-    "zetagpt-s": 6,             # ~4096 ctx: 29.8 GiB
-    "zetagpt-m": 2,             # ~8192 ctx: 24.3 GiB
-    "zetagpt-l": 1,             # ~32768 ctx: 78 GiB -- does NOT fit 44 GB; see the note below
+    "zetagpt-tiny": 32,         # at ctx 1024 -> 64 at ctx 512
+    "zetagpt-s": 6,             # at ctx 4096 -> 24 at ctx 1024
+    "zetagpt-m": 2,             # at ctx 8192 -> 16 at ctx 1024
+    "zetagpt-l": 1,             # at ctx 32768 -> 32 at ctx 1024
 }
 
-# GRADIENT-ACCUMULATION MICRO-BATCH per scheme; 0 = off. -L is accumulated because its step at
-# the longest window cannot be held whole: see tools/vram.py and the arithmetic in config.sh.
-SCHEME_MICRO_BATCH = {
-    "zetagpt-tiny": 0,
-    "zetagpt-s": 0,
-    "zetagpt-m": 0,
-    "zetagpt-l": 1,
+# MICRO-BATCH BY TOKENS PER PASS, not by sequences. Activations are linear in TOKENS -- one
+# sequence of 8,192 costs exactly what eight of 1,024 cost -- so the quantity that has to be
+# held below what the card can take is tokens per forward pass, and the number of sequences
+# that amounts to is whatever the window makes it. Sizing it in sequences instead ties the
+# micro-batch to the window in the wrong direction: it grows as the window shrinks, and at the
+# shortest window it grows back to the full batch, which is where the saving was supposed to be.
+#
+# WHAT A TOKEN COSTS, per block: roughly 29 tensors the width of d_model are kept for the
+# backward pass -- the state space module's 2d input projection, its convolution, decay and
+# gate, attention's 3d qkv and its gate, and the feed-forward's 4d hidden twice over. That is
+# 29 x d_model x 4 bytes x n_layer: 0.5 MB per token for -tiny, 1.4 MB for -S, 1.9 MB for -M
+# and 3.8 MB for -L. Multiply by the budget below to see what each scheme holds.
+SCHEME_MICRO_TOKENS = {
+    "zetagpt-tiny": 16384,      # ~7.4 GiB of activations per pass
+    "zetagpt-s": 8192,          # ~11.2 GiB
+    "zetagpt-m": 8192,          # ~14.8 GiB
+    # zetagpt-l AT ITS LONGEST WINDOW DOES NOT FIT ONE 44 GB CARD, and no micro-batch can make
+    # it: a single sequence at 32,768 tokens is already ~125 GiB of block activations at 32
+    # layers and d_model 1024, and one sequence is the smallest pass there is. What that needs
+    # is gradient checkpointing over the blocks -- storing each block's input and recomputing
+    # its interior in the backward pass -- which this pipeline does not yet do. Until it does,
+    # -L trains at the windows it fits and the budget below governs those.
+    "zetagpt-l": 4096,          # ~14.8 GiB, up to the 4,096 window
 }
-
 
 def windows(value):
     """A `context_window` entry as a list of ints, whatever shape it was written in.
@@ -299,8 +314,8 @@ def context_window(name=DEFAULT_SCHEME):
     return max(context_windows(name))
 
 
-def context_plan(windows, steps, batch_at_longest):
-    """[(start_step, stop_step, context, batch), ...] covering EXACTLY `steps` steps.
+def context_plan(windows, steps, batch_at_longest, micro_tokens=0):
+    """[(start, stop, context, batch, micro_batch), ...] covering EXACTLY `steps` steps.
 
     Equal steps per window; the remainder goes to the last one, so the segments tile the budget
     with no step unaccounted for and none counted twice. The batch of each segment is scaled so
@@ -312,8 +327,11 @@ def context_plan(windows, steps, batch_at_longest):
     out, at = [], 0
     for i, ctx in enumerate(windows):
         take = (int(steps) - at) if i == n - 1 else per
-        out.append((at, at + take, int(ctx),
-                    max(1, round(batch_at_longest * longest / int(ctx)))))
+        batch = max(1, round(batch_at_longest * longest / int(ctx)))
+        # tokens per pass, turned into sequences by this window; never more than the batch
+        # (there is nothing to split) and never less than one (there is nothing smaller).
+        micro = min(batch, max(1, int(micro_tokens) // int(ctx))) if micro_tokens else 0
+        out.append((at, at + take, int(ctx), batch, micro))
         at += take
     return out
 

@@ -71,17 +71,28 @@ def lm_loss(model, ids, attn, rmask, chunk=0):
             correct = ((logits[:, :-1].argmax(-1) == tgt) & rm.bool()).sum().float()
         return loss, correct, rm.sum().clamp(min=1).float()
 
+    # CHUNKED OVER TOKENS, NOT OVER POSITIONS. The projection produces one vocabulary row per
+    # TOKEN, and a batch of 24 sequences at 1,024 positions is 24,576 of them -- slicing the
+    # position axis alone still hands the projection every sequence at once and saves nothing
+    # the batch does not immediately give back. Flattening first makes `chunk` mean what it
+    # says: this many rows of (vocab) exist at a time, whatever shape the batch has.
     from torch.utils.checkpoint import checkpoint
     h = model.hidden_states(input_ids=ids, attention_mask=attn)[:, :-1]
-    total = torch.zeros(ids.shape[0], device=ids.device, dtype=torch.float32)
+    B, L, D = h.shape
+    hf, tf, rf = h.reshape(B * L, D), tgt.reshape(B * L), rm.reshape(B * L)
+    parts = []
     correct = torch.zeros((), device=ids.device, dtype=torch.float32)
-    for a in range(0, h.shape[1], chunk):
-        b = min(a + chunk, h.shape[1])
-        lp, hit = checkpoint(_chunk_logprob, model.head, h[:, a:b], tgt[:, a:b],
+    for a in range(0, B * L, chunk):
+        b = min(a + chunk, B * L)
+        lp, hit = checkpoint(_chunk_logprob, model.head, hf[a:b], tf[a:b],
                              use_reentrant=False)
-        total = total + (lp * rm[:, a:b]).sum(-1)
-        correct = correct + (hit & rm[:, a:b].bool()).sum().float()
-    return (-total / denom).mean(), correct, rm.sum().clamp(min=1).float()
+        parts.append(lp)
+        correct = correct + (hit & rf[a:b].bool()).sum().float()
+    # (B*L,) floats: four bytes a token, against four bytes a token TIMES THE VOCABULARY for
+    # the logits that produced them. Keeping these is what lets the per-sequence normalisation
+    # below be exact rather than an average of averages.
+    lp = torch.cat(parts).view(B, L)
+    return (-(lp * rm).sum(-1) / denom).mean(), correct, rm.sum().clamp(min=1).float()
 
 
 def context_schedule(args, steps, docs, log, stage):
@@ -92,7 +103,8 @@ def context_schedule(args, steps, docs, log, stage):
     run has not pinned a context of its own with --context_window or --max_len. A stage that
     was told which window to use is not second-guessed."""
     import default_config as config
-    one = [(0, steps, max(int(args.max_len), 2), int(args.batch))]
+    one = [(0, steps, max(int(args.max_len), 2), int(args.batch),
+            int(getattr(args, "micro_batch", 0) or 0))]
     if not (hasattr(docs, "batch") and hasattr(docs, "n_tokens")):
         return one
     # --context_window WINS, and it may itself be a schedule: "1024,4096" pins those two
@@ -109,7 +121,9 @@ def context_schedule(args, steps, docs, log, stage):
     if len(wins) < 2:
         return one
     # The batch in force belongs to the LONGEST window, which is what it was sized against.
-    plan = config.context_plan(wins, steps, int(args.batch))
+    plan = config.context_plan(wins, steps, int(args.batch),
+                               config.SCHEME_MICRO_TOKENS.get(scheme, 0)
+                               if not getattr(args, "micro_batch", 0) else 0)
     log(f"{stage}: context schedule {' -> '.join(f'{w:,}' for w in wins)} "
         f"over {steps:,} steps, {steps // len(wins):,} steps each, "
         f"batch {plan[0][3]} -> {plan[-1][3]} so tokens per step stay constant")
@@ -186,10 +200,12 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
     chunk = int(getattr(args, "loss_chunk", 0) or 0) if getattr(args, "chunked_loss", False) else 0
     if chunk:
         V = int(getattr(model, "cfg", {}).get("vocab_size", 0)) or 0
-        longest = max(w for _, _, w, _ in plan)
+        # the comparison is against the WHOLE STEP -- batch x context tokens -- because that is
+        # what the projection would otherwise be handed at once
+        most = max(b * w for _, _, w, b, _ in plan)
         note = (f" ({3 * chunk * V * 4 / 1024**3:.2f} GiB peak instead of "
-                f"{3 * longest * V * 4 / 1024**3:.2f} GiB)") if V else ""
-        log(f"{stage}: chunked loss, {chunk:,} positions per slice{note}")
+                f"{3 * most * V * 4 / 1024**3:.2f} GiB)") if V else ""
+        log(f"{stage}: chunked loss, {chunk:,} TOKENS per slice{note}")
     # initial/total in ABSOLUTE steps: a resumed stage must read 30499/40000, not 499/10000.
     model.train()
     bar = progress(range(start, steps), desc=tag(stage, plan[0][2] if len(plan) > 1 else None),
@@ -206,13 +222,15 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         # the plan is a function of the budget, not of how the budget was consumed.
         while seg + 1 < len(plan) and step >= plan[seg][1]:
             seg += 1
-        _, _, cur_ctx, cur_batch = plan[seg]
+        _, _, cur_ctx, cur_batch, cur_micro = plan[seg]
         if len(plan) > 1 and step == plan[seg][0]:
             if hasattr(bar, "set_description"):
                 bar.set_description(tag(stage, cur_ctx))
-            log(f"{stage}: context window {cur_ctx:,} at batch {cur_batch} "
-                f"({cur_batch * (cur_ctx - 1):,} target tokens per step), "
-                f"steps {plan[seg][0]:,}-{plan[seg][1] - 1:,}")
+            log(f"{stage}: context window {cur_ctx:,} at batch {cur_batch}"
+                + (f", micro-batch {cur_micro} ({-(-cur_batch // cur_micro)} passes)"
+                   if cur_micro else "")
+                + f" ({cur_batch * (cur_ctx - 1):,} target tokens per step), "
+                  f"steps {plan[seg][0]:,}-{plan[seg][1] - 1:,}")
         # ONE STEP, POSSIBLY SEVERAL FORWARD PASSES. A micro-batch splits the step's sequences
         # into groups that are each carried through forward and backward alone, so only one
         # group's activations are ever resident; the gradients add up in the parameters, which
@@ -220,7 +238,8 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         # seen whole -- each group's loss is weighted by its share of the sequences, so the sum
         # is the mean over all of them, not the mean of the means.
         opt.zero_grad(set_to_none=True)
-        mb = args.micro_batch if getattr(args, "micro_batch", 0) > 0 else cur_batch
+        mb = (args.micro_batch if getattr(args, "micro_batch", 0) > 0
+              else (cur_micro or cur_batch))
         mb = max(1, min(int(mb), cur_batch))
         sum_loss = sum_correct = sum_tokens = 0.0
         for off in range(0, cur_batch, mb):

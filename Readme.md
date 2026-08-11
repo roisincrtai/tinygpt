@@ -32,12 +32,12 @@ stage runnable on its own.
 The head dimension is 64 in every scheme, so width scales by adding heads. Parameter counts
 assume the induced vocabulary of 50,259 with the output head tied to the token embedding.
 
-| Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context | Embedding | Blocks | Parameters |
+| Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context windows | Embedding | Blocks | Parameters |
 |---|---|---|---|---|---|---|---|---|---|
-| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 1024 | 25.7M | 35.8M | 61.5M |
-| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 4096 | 25.7M | 107.3M | **133.0M** |
-| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 8192 | 25.7M | 143.0M | 168.8M |
-| `zetagpt-l` | 32 | 16 | 1024 | 64 | 4× | 32768 | 51.5M | 571.2M | 622.7M |
+| `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 512 → 1k | 25.7M | 35.8M | 61.5M |
+| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 1k → 4k | 25.7M | 107.3M | **133.0M** |
+| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 1k → 4k → 8k | 25.7M | 143.0M | 168.8M |
+| `zetagpt-l` | 32 | 16 | 1024 | 64 | 4× | 1k → 4k → 8k → 16k → 32k | 51.5M | 571.2M | 622.7M |
 
 ### Context window scheduling
 
@@ -48,15 +48,18 @@ window shortens, so tokens per step stay constant across the whole run.
 
 ### Customized configuration scheme
 
-A scheme is four numbers in `default_config.SCHEMES`, so a size of your own is one entry:
+A scheme is one entry in `default_config.SCHEMES`; `context_window` is the list of windows it
+trains through, and its largest entry is the model's context:
 
 ```python
-SCHEMES["zetagpt-xl"] = dict(n_layer=32, n_head=20, n_embd=1280, context_window=2048)
+SCHEMES["zetagpt-xl"] = dict(n_layer=32, n_head=20, n_embd=1280,
+                             context_window=[1024, 4096, 16384])
 ```
 
 Then `MODEL_SCHEME=zetagpt-xl` in `config.sh`, with `PRETRAIN_DIR` pointing at a corpus sized
-for it. Without editing Python, `CONTEXT_WINDOW` overrides the context alone, and `--set
-MODEL.n_layer=20` reaches any other architectural value for one run.
+for it, and entries in `SCHEME_BATCH` and `SCHEME_MICRO_TOKENS` for what fits your card.
+Without editing Python, `CONTEXT_WINDOW=1024,4096` pins a schedule for one run and `--set
+MODEL.n_layer=20` reaches any other architectural value.
 
 ## Niche among compact language models
 
@@ -73,10 +76,10 @@ MODEL.n_layer=20` reaches any other architectural value for one run.
 | nanochat d20 | ~560M | Transformer | RoPE | 1024 |
 | Qwen3-0.6B | ~0.6B | Transformer | RoPE | 32768 |
 | TinyLlama | ~1.1B | Transformer | RoPE | 2048 |
-| **ZetaGPT-Tiny** | **61.5M** | **State–Space–Attention** | **None** | **512** |
-| **ZetaGPT-S** (default) | **97.2M** | **State–Space–Attention** | **None** | **512** |
-| **ZetaGPT-M** | **199.3M** | **State–Space–Attention** | **None** | **1024** |
-| **ZetaGPT-L** | **479.9M** | **State–Space–Attention** | **None** | **1024** |
+| **ZetaGPT-Tiny** | **61.5M** | **State–Space–Attention** | **None** | **1024** |
+| **ZetaGPT-S** (default) | **133.0M** | **State–Space–Attention** | **None** | **4096** |
+| **ZetaGPT-M** | **168.8M** | **State–Space–Attention** | **None** | **8192** |
+| **ZetaGPT-L** | **622.7M** | **State–Space–Attention** | **None** | **32768** |
 
 ## Quick start
 
