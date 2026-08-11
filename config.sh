@@ -233,12 +233,14 @@ MICRO_BATCH="${MICRO_BATCH:-0}"     # sequences per forward pass; 0 = OFF, the w
 # of 3 x LOSS_CHUNK x 50,259 instead. The backward pass recomputes each slice, so the trade is
 # roughly 30% more time in the loss for 30x less memory in it.
 #
-#   0.58 GiB at LOSS_CHUNK=1024, against 18.41 GiB for a whole 32,768-token sequence.
+#   4.6 GiB at LOSS_CHUNK=8192, against 18.4 GiB for a single 32,768-token sequence and
+#   far more once a batch multiplies it. The slice is in TOKENS, so it bounds the
+#   projection whatever shape the batch has.
 #
 # Set CHUNKED_LOSS=0 to project the whole sequence at once, which is what to do when comparing
 # against a run made before this existed.
 CHUNKED_LOSS="${CHUNKED_LOSS:-1}"   # 1 = slice the projection (default), 0 = whole sequence
-LOSS_CHUNK="${LOSS_CHUNK:-1024}"    # positions per slice
+LOSS_CHUNK="${LOSS_CHUNK:-8192}"    # TOKENS per slice (4.6 GiB at this size)
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
 BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and evaluation
@@ -321,10 +323,10 @@ TOKENS_SHARD_MB="${TOKENS_SHARD_MB:-100}"    # MB of tokens per shard. A corpus 
 # =========================================================================== #
 # stage 5 -- pretraining
 # =========================================================================== #
-# 2 epochs over the ~2B-token corpus at BATCH x (MAX_LEN-1) = 32 x 511 = 16,352 tokens per
-# step, so 244,618 steps is 4.00B tokens.
+# 2 epochs over the measured 2,068,028,808-token corpus at 6 x 4095 = 24,570 tokens per step,
+# which the context schedule holds constant at every window, so 168,338 steps is 4.14B tokens.
 # CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being two epochs.
-PRETRAIN_STEPS="${PRETRAIN_STEPS:-244618}"
+PRETRAIN_STEPS="${PRETRAIN_STEPS:-168338}"
 PRETRAIN_LR="${PRETRAIN_LR:-2e-5}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 

@@ -276,17 +276,21 @@ SCHEME_BATCH = {
 # gate, attention's 3d qkv and its gate, and the feed-forward's 4d hidden twice over. That is
 # 29 x d_model x 4 bytes x n_layer: 0.5 MB per token for -tiny, 1.4 MB for -S, 1.9 MB for -M
 # and 3.8 MB for -L. Multiply by the budget below to see what each scheme holds.
+# THESE ARE ANCHORED ON A MEASUREMENT, not on arithmetic: zetagpt-s at 8,192 tokens per pass
+# was 18.1 GiB on the card, which puts a token at 1.88 MB for 24 layers of width 512 -- a third
+# more than the estimate that preceded it. The other schemes are scaled from that by
+# layers x width. Confirm with nvidia-smi on the first hundred steps before trusting them.
 SCHEME_MICRO_TOKENS = {
-    "zetagpt-tiny": 16384,      # ~7.4 GiB of activations per pass
-    "zetagpt-s": 8192,          # ~11.2 GiB
-    "zetagpt-m": 8192,          # ~14.8 GiB
+    "zetagpt-tiny": 47104,      # 0.63 MB/token -> ~34.6 GiB
+    "zetagpt-s": 14336,         # 1.88 MB/token -> ~33.4 GiB (measured basis)
+    "zetagpt-m": 10240,         # 2.51 MB/token -> ~32.8 GiB
     # zetagpt-l AT ITS LONGEST WINDOW DOES NOT FIT ONE 44 GB CARD, and no micro-batch can make
     # it: a single sequence at 32,768 tokens is already ~125 GiB of block activations at 32
     # layers and d_model 1024, and one sequence is the smallest pass there is. What that needs
     # is gradient checkpointing over the blocks -- storing each block's input and recomputing
     # its interior in the backward pass -- which this pipeline does not yet do. Until it does,
     # -L trains at the windows it fits and the budget below governs those.
-    "zetagpt-l": 4096,          # ~14.8 GiB, up to the 4,096 window
+    "zetagpt-l": 3072,          # 5.02 MB/token -> ~31.2 GiB, up to the 4,096 window
 }
 
 def windows(value):
@@ -384,7 +388,10 @@ TRAIN = dict(
     micro_batch=0,              # gradient-accumulation micro-batch; 0 = OFF, the
                                 # default. SCHEME_MICRO_BATCH says what each scheme
                                 # needs at its longest window, applied only on request
-    loss_chunk=1024,            # positions per slice of the vocabulary projection
+    loss_chunk=8192,            # TOKENS per slice of the vocabulary projection. 3 x 8192 x
+                                # 50,259 x 4 = 4.6 GiB, which is worth spending: a slice small
+                                # enough to be free is also small enough that the step becomes
+                                # dozens of tiny matmuls, each recomputed in the backward pass
     max_len=0,                  # 0 = auto: the model's own context window (block_size)
     beta=0.1,                   # implicit-reward beta, shared by DPO / evaluation
     val_frac=0.05,              # validation fraction of the preference file
@@ -475,8 +482,10 @@ BPE = dict(
 # would have needed 838,926 steps. Packing at 344 words fills the window, and the number below
 # means what it says. Recompute both if the batch, the context or the corpus changes.
 PRETRAIN = dict(
-    steps=244618, lr=2e-5,       # 2 epochs over ~2B tokens at 32 x 511 = 16,352 per step;
-                                 # RECOMPUTE whenever TRAIN['batch'] changes
+    steps=168338, lr=2e-5,       # 2 epochs over the MEASURED 2,068,028,808-token corpus
+                                 # at 6 x 4095 = 24,570 tokens per step, which the context
+                                 # schedule holds constant at every window.
+                                 # RECOMPUTE whenever SCHEME_BATCH or the corpus changes
     # WHICH SCHEME IS PRETRAINED, and at what context window. Both are exposed on the command
     # line (--model_scheme / --context_window) and in config.sh, so a size can be changed for
     # one run without editing Python. context_window=0 takes the scheme's own value from
