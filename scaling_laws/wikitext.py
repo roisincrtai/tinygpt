@@ -33,8 +33,12 @@ RAW = {"train": "wiki.train.tokens", "valid": "wiki.valid.tokens"}
 
 
 def signature(tok):
-    """Identifies the vocabulary that produced a cache. Any change invalidates it."""
-    return f"wikitext103|v1|vocab={len(tok)}|merges={len(getattr(tok, 'merges', []) or [])}"
+    """Identifies the vocabulary that produced a cache. Any change invalidates it.
+
+    The ENCODING is counted, 256 + merges, not len(tok): the specials take no part in
+    tokenising a corpus, so registering one must not throw this cache away either."""
+    n = len(getattr(tok, "merges", []) or [])
+    return f"wikitext103|v2|encoding={256 + n if hasattr(tok, 'merges') else len(tok)}|merges={n}"
 
 
 def _cache_path(split):

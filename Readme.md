@@ -79,6 +79,15 @@ time rather than correctness. Already-present datasets are skipped and an
 interrupted transfer resumes, so re-running is cheap. `./stage1_download_data.sh --list` shows
 what would be fetched and where it goes.
 
+A token stream is named after the **dataset**, never after the machine:
+`cache/tokens/<tokenizer>/<dataset>/<dataset>_<signature>_00000.tokens`. The signature covers
+the dataset name, the packing (tokenizer, word budget, text column) and the corpus's own file
+count and byte total. No path, no modification time, no host. The same corpus therefore signs
+identically on a laptop and on two cluster nodes, and a corpus tokenised once is never
+tokenised again because it was copied somewhere else. `python -m tools.migrate_token_cache`
+renames a cache written by an earlier version onto this scheme, by rename rather than copy, so
+nothing has to be rebuilt.
+
 Tokenisation is written in ~100 MB shards as it goes, and it **resumes at the document it
 stopped on**. The shard manifest carries a cursor -- the source file and the document within
 it -- so a build that is killed after nine hours reopens the last shard, trims the bytes it

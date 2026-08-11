@@ -1096,8 +1096,20 @@ def _mirror(src):
     return os.path.join("_external", drive.replace(":", ""), tail.lstrip(os.sep))
 
 
+def _portable_src(src):
+    """A source named the way it travels: <dataset>/<file>, and never where a machine put it.
+
+    The last two components, because the file name alone collides (every preference tree has a
+    batch_0.json) while the absolute path is different on every machine -- which is the whole
+    fault this replaces. Anything further up is that host's directory layout, and a cache keyed
+    on it is a cache the next host cannot find."""
+    src = os.path.normpath(src)
+    parent = os.path.basename(os.path.dirname(src))
+    return os.path.join(parent, os.path.basename(src)) if parent else os.path.basename(src)
+
+
 def _tok_path(tok, src, sig):
-    return os.path.join(token_cache_root(tok), f"{_mirror(src)}.{_sig_tag(sig)}.tokens")
+    return os.path.join(token_cache_root(tok), f"{_portable_src(src)}.{_sig_tag(sig)}.tokens")
 
 
 def _parquet_docs(path, column):
@@ -1255,56 +1267,97 @@ def corpus_signature(tok, root, files, max_words, text_column):
       corpus on two servers signed differently, and a finished token stream became invisible to
       the machine that was about to use it.
 
-      THE ABSOLUTE ROOT. /scratch/roisin/... and /home/roisin/... are the same corpus. The path
-      is already recorded where it belongs: the stream lives under a mirror of the corpus
-      directory, so two different corpora cannot collide even with equal contents.
+      PATHS, absolute or relative. /scratch/roisin/.../fineweb-edu_10GB and
+      /home/roisin/work/.../fineweb-edu_10GB are the same corpus, and so is the copy on a
+      laptop. What identifies a corpus is its NAME -- the dataset directory,
+      zetagpt-small_pretrain-corpus_fineweb-edu_10GB -- which is the name it was published
+      under and travels with it. Where a given machine chose to put it is that machine's
+      business and belongs nowhere near an identity.
 
-    What remains is the relative path and the SIZE of every file, which is portable, costs a
-    stat, and changes under every realistic edit -- a file added, removed, renamed, truncated
-    or rewritten. Content hashing would be stricter still, and reading 10 TB to decide whether
-    10 TB may be skipped defeats the purpose.
+    So: the dataset name, the packing, and two numbers that describe the corpus rather than the
+    host -- how many files it has and how many bytes they hold. Those cost one stat each, are
+    identical wherever the corpus is copied, and still move when a file is added, removed,
+    truncated or rewritten. Content hashing would be stricter, and reading 10 TB to decide
+    whether 10 TB may be skipped defeats the purpose.
 
-    The manifest is HASHED rather than stored: a corpus of thirty thousand files would
-    otherwise put a megabyte of file listing in the header of every stream."""
+    The result is HASHED rather than stored, so a corpus of thirty thousand files does not put
+    a megabyte of file listing in the header of every stream."""
     import hashlib
-    h = hashlib.sha256()
-    h.update(_tok_signature(tok, max_words, text_column).encode("utf-8"))
+    total = 0
     for fp in files:
         try:
-            size = os.path.getsize(fp)
-            h.update(f"{os.path.relpath(fp, root)}|{size}\0".encode("utf-8"))
+            total += os.path.getsize(fp)
         except OSError:
-            h.update(f"{os.path.relpath(fp, root)}|missing\0".encode("utf-8"))
+            pass
+    h = hashlib.sha256()
+    h.update(f"{corpus_name(root)}|{_tok_signature(tok, max_words, text_column)}"
+             f"|files={len(files)}|bytes={total}".encode("utf-8"))
     # v2 is the portable scheme. v1 hashed mtimes and the absolute root, so a stream written by
     # it carries a name no v2 run computes; those are picked up by _equivalent_stream instead of
     # being rebuilt, which is why that fallback exists and stays.
     return f"corpus|v2|files={len(files)}|{h.hexdigest()[:32]}"
 
 
+def corpus_name(root):
+    """THE DATASET NAME, and nothing else: the last component of the corpus directory.
+
+    `zetagpt-small_pretrain-corpus_fineweb-edu_10GB`. That is what the dataset is called, it is
+    the name it was published under, and it is the same on every machine that has a copy. No
+    part of the path above it is used, because /scratch/roisin/..., /home/roisin/work/... and a
+    laptop's Documents folder hold the same corpus and must reach the same cache."""
+    return os.path.basename(os.path.normpath(os.path.abspath(root))) or "corpus"
+
+
 def corpus_stream_path(tok, root, sig):
     """The STEM every shard of a corpus shares:
 
-        cache/tokens/<tokenizer>/<mirror of the corpus dir>/<name>_<sig>_00000.tokens
-                                                            <name>_<sig>_index.json
+        cache/tokens/<tokenizer>/<dataset>/<dataset>_<sig>_00000.tokens
+                                           <dataset>_<sig>_index.json
+
+    NAMED BY THE DATASET, NOT BY WHERE IT SITS. This used to mirror the corpus's path under the
+    cache root -- data/download/<dataset>/ for a corpus inside the project, and _external/ plus
+    the whole absolute path for one outside it. Two machines that had put the same corpus in
+    different places therefore looked in different directories, and the second retokenised a
+    corpus the first had already finished. The dataset name travels with the data; the path
+    does not.
 
     Shards rather than one file because a corpus can be 10 TB, and one file that size cannot
     be resumed after an interruption, cannot be copied incrementally, and loses everything to
-    one bad byte. They sit in the corpus's own directory, so every file there ends in .tokens;
+    one bad byte. They sit in the dataset's own directory, so every file there ends in .tokens;
     the signature is in each NAME rather than in a directory above them, which is what lets
     two packings of one corpus coexist without a level of nesting that carries no extension."""
-    mirror = _mirror(root)
-    name = os.path.basename(os.path.normpath(mirror)) or "corpus"
-    return os.path.join(token_cache_root(tok), mirror, f"{name}_{_sig_tag(sig)}")
+    name = corpus_name(root)
+    return os.path.join(token_cache_root(tok), name, f"{name}_{_sig_tag(sig)}")
 
 
-def _streams_here(path):
+def _legacy_stream_dirs(tok, root):
+    """Where earlier versions put this corpus's shards, so they are still found.
+
+    Streams already on disk were written under a mirror of the corpus PATH. They are correct
+    and they took hours; moving the naming rule must not orphan them."""
+    out, name = [], corpus_name(root)
+    for d in (os.path.join(token_cache_root(tok), _mirror(root)),):
+        if os.path.isdir(d) and os.path.basename(os.path.normpath(d)) == name:
+            out.append(d)
+    return out
+
+
+def _streams_here(path, extra_dirs=()):
     """Every other stream for THIS corpus under THIS tokenizer: (stem, manifest).
 
-    They share a directory -- the corpus's mirror under the token cache -- because the
-    tokenizer names the directory and the corpus names the path inside it. Only the signature
-    in the file name separates them."""
+    They share a directory -- the dataset's, under the token cache -- because the tokenizer
+    names the directory above and the dataset names this one. Only the signature in the file
+    name separates them. `extra_dirs` carries the places earlier versions used, so shards that
+    took hours to write are found rather than orphaned by a change to the naming rule."""
     out = []
-    d, want = os.path.dirname(path), os.path.basename(path) + "_index.json"
+    want = os.path.basename(path) + "_index.json"
+    for d in (os.path.dirname(path),) + tuple(extra_dirs):
+        out.extend(_streams_in(d, want))
+    return out
+
+
+def _streams_in(d, want):
+    out = []
     try:
         names = sorted(os.listdir(d))
     except OSError:
@@ -1329,7 +1382,7 @@ def token_store_magic():
     return token_store.MAGIC
 
 
-def _equivalent_stream(path, packing):
+def _equivalent_stream(path, packing, extra_dirs=()):
     """A stream already in cache/tokens that THIS run may use: (stem, manifest, why).
 
     A CURRENT signature is portable, so two machines agree and this should rarely fire. What it
@@ -1353,7 +1406,7 @@ def _equivalent_stream(path, packing):
         """Complete beats partial; among equals, the one with more tokens."""
         return (bool(si[1].get("complete")), si[1].get("n_tokens", 0))
 
-    others = _streams_here(path)
+    others = _streams_here(path, extra_dirs)
     same = [(s, i) for s, i in others if (i.get("packing") or "") == packing]
     if same:
         s, i = max(same, key=rank)
@@ -1393,7 +1446,7 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
         # partial one to continue. Retokenising a corpus that is already tokenised is the most
         # expensive kind of misconfiguration there is: it looks exactly like ordinary progress,
         # and the only symptom is that the run begins at zero.
-        found = _equivalent_stream(path, packing)
+        found = _equivalent_stream(path, packing, _legacy_stream_dirs(tok, root))
         if found is not None:
             alt, idx, why = found
             what = "COMPLETE" if idx.get("complete") else f"partial ({len(idx['shards'])} shards)"
@@ -1535,7 +1588,7 @@ def _pair_manifest(stem, sig, st, n_records, n_bytes, complete):
     tmp = f"{stem}_index.json.part"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"magic": "zetagpt-pairs", "version": 1, "sig": sig,
-                   "src_mtime": int(st.st_mtime), "src_size": st.st_size,
+                   "src_size": st.st_size,
                    "n_records": n_records, "n_bytes": n_bytes,
                    "complete": bool(complete)}, f)
     os.replace(tmp, f"{stem}_index.json")
@@ -1558,7 +1611,11 @@ def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print, resu
     import array
     if not pairs:
         return 0
-    sig = f"{_tok_signature(tok, 0)}|pairs={len(pairs)}|split={split}"
+    # THE SOURCE IS IDENTIFIED BY ITS SIZE, NOT ITS MODIFICATION TIME. An mtime says when the
+    # file landed on this filesystem; it moves under rsync, a re-download or a restore, and a
+    # cache keyed on it is thrown away every time the data is copied to another machine.
+    sig = (f"{_tok_signature(tok, 0)}|pairs={len(pairs)}|split={split}"
+           f"|src={_portable_src(src)}|bytes={os.path.getsize(src)}")
     st = os.stat(src)
     stem = _pair_stem(tok, src, split, sig)
     os.makedirs(os.path.dirname(stem) or ".", exist_ok=True)
@@ -1569,8 +1626,7 @@ def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print, resu
         try:
             with open(f"{stem}_index.json", encoding="utf-8") as f:
                 head = json.load(f)
-            if (head.get("sig") == sig and head.get("src_size") == st.st_size
-                    and head.get("src_mtime") == int(st.st_mtime)):
+            if head.get("sig") == sig and head.get("src_size") == st.st_size:
                 have, valid = _pair_read(stem, len(pairs))
         except (OSError, ValueError):
             have, valid = [], 0
