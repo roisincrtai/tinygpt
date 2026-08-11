@@ -131,9 +131,12 @@ python chat.py                                # the most aligned checkpoint pres
 ## Citation
 
 ```bibtex
-@misc{luo_zetagpt,
-  title  = {ZetaGPT: A Positional--Encoding--Free State--Space--Attention Compact Language Models},
-  author = {R\'ois\'in Luo},
-  url    = {https://github.com/roisincrtai/zetagpt}
+@article{luo2026zetagpt,
+      title={ZetaGPT: A Positional--Encoding--Free State--Space--Attention Compact Language Model},
+      author={R\'ois\'in Luo},
+      year={2026},
+      eprint={2608.09432},
+      url={https://arxiv.org/abs/2608.09432},
+      notes={https://github.com/roisincrtai/zetagpt},
 }
 ```
