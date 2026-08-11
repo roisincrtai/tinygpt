@@ -1222,23 +1222,41 @@ def corpus_files(root, exclude_dirs=(), extensions=None):
 def corpus_signature(tok, root, files, max_words, text_column):
     """Identifies a whole corpus AND the tokenizer and packing applied to it.
 
-    The manifest -- every source file's path, size and modification time -- is HASHED rather
-    than stored, because a corpus of thirty thousand files would otherwise put a megabyte of
-    file listing in the header of every stream. Hashing keeps the property that matters: any
-    file added, removed, edited or renamed changes the signature, so a stream built from a
-    corpus that has since changed is never mistaken for a current one."""
+    NOTHING MACHINE-DEPENDENT GOES INTO IT. A signature exists to answer "are these the tokens
+    of this corpus?", and that question has the same answer on every machine, so the same
+    corpus must produce the same signature on a laptop, on vulcan1 and on vulcan2. Two inputs
+    used to break that, and both were unnecessary:
+
+      MODIFICATION TIMES. An mtime records when a file last arrived on THIS filesystem, not
+      what is in it. It moves when a corpus is rsynced, re-downloaded, restored from a backup,
+      copied between nodes or checked out again -- none of which changes a byte -- so the same
+      corpus on two servers signed differently, and a finished token stream became invisible to
+      the machine that was about to use it.
+
+      THE ABSOLUTE ROOT. /scratch/roisin/... and /home/roisin/... are the same corpus. The path
+      is already recorded where it belongs: the stream lives under a mirror of the corpus
+      directory, so two different corpora cannot collide even with equal contents.
+
+    What remains is the relative path and the SIZE of every file, which is portable, costs a
+    stat, and changes under every realistic edit -- a file added, removed, renamed, truncated
+    or rewritten. Content hashing would be stricter still, and reading 10 TB to decide whether
+    10 TB may be skipped defeats the purpose.
+
+    The manifest is HASHED rather than stored: a corpus of thirty thousand files would
+    otherwise put a megabyte of file listing in the header of every stream."""
     import hashlib
     h = hashlib.sha256()
     h.update(_tok_signature(tok, max_words, text_column).encode("utf-8"))
-    h.update(os.path.abspath(root).encode("utf-8"))
     for fp in files:
         try:
-            st = os.stat(fp)
-            h.update(f"{os.path.relpath(fp, root)}|{st.st_size}|{int(st.st_mtime)}\0"
-                     .encode("utf-8"))
+            size = os.path.getsize(fp)
+            h.update(f"{os.path.relpath(fp, root)}|{size}\0".encode("utf-8"))
         except OSError:
-            h.update(f"{fp}|missing\0".encode("utf-8"))
-    return f"corpus|v1|files={len(files)}|{h.hexdigest()[:32]}"
+            h.update(f"{os.path.relpath(fp, root)}|missing\0".encode("utf-8"))
+    # v2 is the portable scheme. v1 hashed mtimes and the absolute root, so a stream written by
+    # it carries a name no v2 run computes; those are picked up by _equivalent_stream instead of
+    # being rebuilt, which is why that fallback exists and stays.
+    return f"corpus|v2|files={len(files)}|{h.hexdigest()[:32]}"
 
 
 def corpus_stream_path(tok, root, sig):
@@ -1292,13 +1310,11 @@ def token_store_magic():
 def _equivalent_stream(path, packing):
     """A stream already in cache/tokens that THIS run may use: (stem, manifest, why).
 
-    THE SIGNATURE IS STRICTER THAN IT NEEDS TO BE, and deliberately so: it hashes every source
-    file's path, size and modification time, which is what makes an edited corpus impossible to
-    mistake for the one that was tokenised. But an mtime moves for reasons that have nothing to
-    do with content -- a corpus re-downloaded, rsynced to the training machine, restored from a
-    backup, or simply copied -- and when it does, the finished stream keeps a name this run no
-    longer computes. The tokens are correct and complete and sitting right there, and the run
-    starts again from zero.
+    A CURRENT signature is portable, so two machines agree and this should rarely fire. What it
+    is for is streams written by the OLD scheme, which hashed modification times and the
+    absolute root: those exist on disk now, they are correct, and no machine will ever compute
+    their name again. Rebuilding them would cost hours to reproduce bytes that are already
+    there.
 
     So a signature miss is not the end of the question. What actually has to match for tokens
     to be reusable is the PACKING: the same tokenizer, the same word budget, the same text
