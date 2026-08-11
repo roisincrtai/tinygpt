@@ -74,8 +74,11 @@ def model_cfg_from_args(args, overrides=None):
     cfg = dict(config.MODEL)
     if args is not None and getattr(args, "model_scheme", None):
         cfg.update(config.scheme(args.model_scheme))
-    if args is not None and getattr(args, "context_window", 0):
-        cfg["block_size"] = int(args.context_window)
+    if args is not None and getattr(args, "context_window", ""):
+        # A LIST HERE TOO: --context_window 1024,4096 pins the whole schedule, and a single
+        # number pins one window. block_size is the largest of them, because that is the widest
+        # sequence the model will ever be handed.
+        cfg["block_size"] = max(config.windows(args.context_window))
     if args is not None and getattr(args, "pe", None):
         cfg["pe"] = args.pe
     cfg.update(overrides or {})
@@ -150,7 +153,7 @@ def parse_args(argv=None):
                     help="root of the instruction-tuning tree (alpaca_gpt4/, rlhf_hh/) used "
                          "by stages 6, 7, 8 and 10, and by distillation; empty = "
                          "default_config.INSTRUCT_DIR")
-    ap.add_argument("--context_window", type=int, default=config.PRETRAIN["context_window"],
+    ap.add_argument("--context_window", default=config.PRETRAIN["context_window"],
                     help="context window in tokens; 0 = the scheme's own (512 for tiny and "
                          "-s, 1024 for -m and -l). Not an architectural limit -- the model "
                          "refers to no "

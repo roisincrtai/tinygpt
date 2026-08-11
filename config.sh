@@ -134,14 +134,20 @@ VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layou
 #
 #   1. SCHEMES              add an entry, e.g.
 #                               "zetagpt-xl": dict(n_layer=32, n_head=20, n_embd=1280,
-#                                                  context_window=2048),
+#                                                  context_window=[1024, 4096, 16384]),
 #                           keeping n_embd a multiple of 64 and n_head = n_embd / 64, or the
 #                           model warns that its head dimension is non-standard.
+#                           context_window is the LIST of windows the scheme trains through,
+#                           in order, each taking an equal share of the steps; the largest is
+#                           the model's block_size. The values are arbitrary -- [768, 3000,
+#                           5000] is as valid as [1024, 4096]. A single number is accepted and
+#                           means one window throughout.
 #   2. PRETRAIN_CORPUS      add the same key, pointing at the corpus that size should train on
 #                           (an empty string means "configure PRETRAIN_DIR").
-#   3. helpers/utils.py     add (n_layer, n_head, n_embd) -> name to MODEL_SIZES, so the run's
-#                           checkpoints, histories and figures are named after your scheme
-#                           instead of falling back to a descriptive zetagpt-<L>x<d>.
+#   3. SCHEME_BATCH         and SCHEME_MICRO_BATCH: what fits a card at the LONGEST window.
+#
+# Nothing else. The name a run reports and writes its files under is looked up from SCHEMES
+# itself, so a new size names itself.
 #
 # The new name then works here and in --model_scheme automatically.
 MODEL_SCHEME="${MODEL_SCHEME:-zetagpt-s}"
@@ -151,7 +157,12 @@ MODEL_SCHEME="${MODEL_SCHEME:-zetagpt-s}"
 # absolute position, so no length is forbidden and a trained model can be evaluated at any
 # length. What it costs is attention, which is quadratic in it, so 512 -> 1024 is roughly 4x
 # the attention term per step. This is what the checkpoint records as its block_size.
-CONTEXT_WINDOW="${CONTEXT_WINDOW:-512}"
+CONTEXT_WINDOW="${CONTEXT_WINDOW:-}"  # blank = the scheme's own schedule. A COMMA LIST pins
+                                    # your own: CONTEXT_WINDOW=1024,4096,8192 trains through
+                                    # those three in order, an equal share of the steps each.
+                                    # A single number pins one window for the whole run. The
+                                    # values are arbitrary -- nothing requires powers of two,
+                                    # or that each is a multiple of the last.
 
 # HOW POSITION ENTERS THE MODEL. "ssm" is the proposed architecture: the state space module
 # supplies position and no positional encoding is used anywhere. "rope" is the ABLATION

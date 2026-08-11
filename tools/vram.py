@@ -110,7 +110,7 @@ def main(argv=None):
 
     import helpers
     device = _dev(a.gpu)
-    ctx = a.context or config.SCHEMES[a.model_scheme]["context_window"]
+    ctx = a.context or config.context_window(a.model_scheme)   # the LONGEST window
     if device.type == "cpu":
         print("[vram] no GPU here: on CPU the allocator reports nothing, so this measures\n"
               "       nothing. Run it on the machine you intend to train on.")

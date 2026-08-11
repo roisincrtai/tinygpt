@@ -95,14 +95,23 @@ def context_schedule(args, steps, docs, log, stage):
     one = [(0, steps, max(int(args.max_len), 2), int(args.batch))]
     if not (hasattr(docs, "batch") and hasattr(docs, "n_tokens")):
         return one
+    # --context_window WINS, and it may itself be a schedule: "1024,4096" pins those two
+    # windows regardless of what the scheme says. Only when nothing was asked for does the
+    # scheme's own schedule apply.
+    asked = getattr(args, "context_window", "")
     scheme = getattr(args, "model_scheme", "") or config.PRETRAIN["model_scheme"]
-    windows = config.context_windows(scheme) if scheme in config.SCHEMES else []
-    if len(windows) < 2 or getattr(args, "context_window", 0):
+    if asked:
+        wins = config.windows(asked)
+    elif scheme in config.SCHEMES:
+        wins = config.context_windows(scheme)
+    else:
+        wins = []
+    if len(wins) < 2:
         return one
     # The batch in force belongs to the LONGEST window, which is what it was sized against.
-    plan = config.context_plan(windows, steps, int(args.batch))
-    log(f"{stage}: context schedule {' -> '.join(f'{w:,}' for w in windows)} "
-        f"over {steps:,} steps, {steps // len(windows):,} steps each, "
+    plan = config.context_plan(wins, steps, int(args.batch))
+    log(f"{stage}: context schedule {' -> '.join(f'{w:,}' for w in wins)} "
+        f"over {steps:,} steps, {steps // len(wins):,} steps each, "
         f"batch {plan[0][3]} -> {plan[-1][3]} so tokens per step stay constant")
     return plan
 

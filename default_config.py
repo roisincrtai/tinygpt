@@ -229,33 +229,25 @@ CORPUS_EXTENSIONS = [
 #
 # Tiny and S share a width, a context and therefore the same 25.7M embedding, and differ only
 # in depth -- which makes the pair a clean depth comparison on identical data.
+# `context_window` IS A LIST: the windows this scheme trains through, in order. Pretraining
+# does not sit at one sequence length -- it starts short and lengthens -- so the schedule is
+# part of the scheme rather than a table kept alongside it, where the two could disagree.
+#
+# THE VALUES ARE ARBITRARY. Nothing anywhere assumes they are powers of two, that each is a
+# multiple of the last, or that there are two of them: [768, 3000, 5000] is as valid as
+# [1024, 4096]. A single number is accepted too and means one window all the way through.
+# The LARGEST entry is the model's block_size, since that is the widest it is ever asked for.
 SCHEMES = {
-    "zetagpt-tiny": dict(n_layer=8,  n_head=8,  n_embd=512,  context_window=1024),
-    "zetagpt-s": dict(n_layer=24, n_head=8,  n_embd=512,  context_window=4096),
-    "zetagpt-m": dict(n_layer=32, n_head=8,  n_embd=512,  context_window=8192),
-    "zetagpt-l": dict(n_layer=32, n_head=16, n_embd=1024, context_window=32768),
+    "zetagpt-tiny": dict(n_layer=8,  n_head=8,  n_embd=512,
+                         context_window=[512, 1024]),
+    "zetagpt-s": dict(n_layer=24, n_head=8,  n_embd=512,
+                      context_window=[1024, 4096]),
+    "zetagpt-m": dict(n_layer=32, n_head=8,  n_embd=512,
+                      context_window=[1024, 4096, 8192]),
+    "zetagpt-l": dict(n_layer=32, n_head=16, n_embd=1024,
+                      context_window=[1024, 4096, 8192, 16384, 32768]),
 }
 DEFAULT_SCHEME = "zetagpt-s"
-
-# CONTEXT SCHEDULE. Pretraining does not sit at one sequence length: it starts short and
-# lengthens, and each window gets an EQUAL share of the step budget (steps // len(windows),
-# with the remainder going to the last window so the total is exactly `steps`).
-#
-# WHY LENGTHEN RATHER THAN TRAIN LONG THROUGHOUT. Attention costs T^2 and activations cost T,
-# so a token at 32k costs many times what it costs at 1k. Nearly all of what a model learns --
-# vocabulary, syntax, local semantics -- is available in a short window, and paying long-context
-# prices for it buys nothing. The long windows are where the model learns to USE distance, and
-# they are worth their cost only once the rest is in place. Every large model is trained this
-# way for this reason.
-#
-# The last entry of each schedule is the scheme's context_window above, because that is the
-# widest the model is ever asked for and therefore what the checkpoint must declare.
-CONTEXT_SCHEDULE = {
-    "zetagpt-tiny": [512, 1024],
-    "zetagpt-s": [1024, 4096],
-    "zetagpt-m": [1024, 4096, 8192],
-    "zetagpt-l": [1024, 4096, 8192, 16384, 32768],
-}
 
 # BATCH AT THE LONGEST WINDOW, and the shorter windows scale UP from it. The batch is sized
 # where memory is tightest -- the last window -- and every shorter window then runs at
@@ -282,9 +274,29 @@ SCHEME_MICRO_BATCH = {
 }
 
 
+def windows(value):
+    """A `context_window` entry as a list of ints, whatever shape it was written in.
+
+    A list stays a list, a bare number becomes a list of one, and a string of numbers -- which
+    is what a shell variable can carry -- is split on commas. Everything downstream then has
+    one shape to handle, and CONTEXT_WINDOW=1024,4096,8192 works from config.sh exactly as the
+    Python list does."""
+    if isinstance(value, str):
+        value = [p for p in value.replace(" ", "").split(",") if p]
+    elif not isinstance(value, (list, tuple)):
+        value = [value]
+    out = [int(v) for v in value if int(v) > 0]
+    return out or [0]
+
+
 def context_windows(name=DEFAULT_SCHEME):
-    """The schedule for a scheme, falling back to its single context window."""
-    return list(CONTEXT_SCHEDULE.get(name) or [SCHEMES[name]["context_window"]])
+    """The windows a scheme trains through, in the order it trains through them."""
+    return windows(SCHEMES[name]["context_window"])
+
+
+def context_window(name=DEFAULT_SCHEME):
+    """The LONGEST window a scheme trains at, which is the model's block_size."""
+    return max(context_windows(name))
 
 
 def context_plan(windows, steps, batch_at_longest):
@@ -307,11 +319,12 @@ def context_plan(windows, steps, batch_at_longest):
 
 
 def scheme(name=DEFAULT_SCHEME):
-    """A scheme's architecture as ZetaGPT constructor arguments. `context_window` becomes
+    """A scheme's architecture as ZetaGPT constructor arguments. The LONGEST `context_window`
+    becomes
     `block_size`, which is the model's own name for the same number and is what travels with
     the weights in the checkpoint."""
     s = dict(SCHEMES[name])
-    s["block_size"] = s.pop("context_window")
+    s["block_size"] = max(windows(s.pop("context_window")))
     return s
 
 
@@ -715,7 +728,8 @@ SHELL_DEFAULTS = {
     "INSTRUCT_DIR": os.path.relpath(INSTRUCT_DIR, ROOT),
     "SFT_DIR": os.path.relpath(SFT_DIR, ROOT),
     # 0 means "the scheme's own", so report the number that ends up in force
-    "CONTEXT_WINDOW": PRETRAIN["context_window"] or SCHEMES[PRETRAIN["model_scheme"]]["context_window"],
+    "CONTEXT_WINDOW": PRETRAIN["context_window"] or ",".join(
+        str(w) for w in context_windows(PRETRAIN["model_scheme"])),
     "LR_SCHEDULE": TRAIN["lr_schedule"],
     "LR_MIN_FACTOR": TRAIN["lr_min_factor"],
     "PLOT_EVERY": TRAIN["plot_every_steps"],

@@ -387,18 +387,25 @@ def stage_label(stage):
 # EVERY SIZE HAS A HEAD DIMENSION OF 64: 512/8 = 768/12 = 1024/16 = 64. See
 # model.zetagpt.HEAD_DIM. Width therefore scales by adding heads, never by widening them.
 # Tiny and S differ only in depth, so the key must carry n_layer -- which it does.
-MODEL_SIZES = {
-    (8, 8, 512): "zetagpt-tiny",
-    (16, 8, 512): "zetagpt-s",
-    (16, 12, 768): "zetagpt-m",
-    (24, 16, 1024): "zetagpt-l",
-}
+def _model_sizes():
+    """(n_layer, n_head, n_embd) -> scheme name, DERIVED FROM SCHEMES rather than repeated.
+
+    This was a hand-written table beside default_config.SCHEMES, and the two fell out of step
+    the first time the schemes changed: every run then reported itself as `zetagpt-24x512`,
+    the descriptive fallback, and wrote its checkpoints and figures under that name. A scheme
+    is defined in exactly one place, so its name must be looked up from that place."""
+    return {(s["n_layer"], s["n_head"], s["n_embd"]): name
+            for name, s in config.SCHEMES.items()}
 
 
 def model_name(cfg):
-    """The size label of a model configuration dict (or a ZetaGPT's .cfg)."""
+    """The size label of a model configuration dict (or a ZetaGPT's .cfg).
+
+    Falls back to `zetagpt-<layers>x<width>` for an architecture no scheme describes, which is
+    what a hand-built or checkpoint-restored configuration may be. Seeing that name where a
+    scheme was expected means the two have diverged."""
     key = (cfg.get("n_layer"), cfg.get("n_head"), cfg.get("n_embd"))
-    return MODEL_SIZES.get(key, f"zetagpt-{cfg.get('n_layer')}x{cfg.get('n_embd')}")
+    return _model_sizes().get(key, f"zetagpt-{cfg.get('n_layer')}x{cfg.get('n_embd')}")
 
 
 def run_name(cfg):
