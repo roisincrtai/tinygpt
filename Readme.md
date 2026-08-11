@@ -3,7 +3,9 @@
 **ZetaGPT** is a compact, positional-encoding-free (NoPE) language model architecture that
 uses a state-space-attention mixture block to handle long-context sequences implicitly. It
 provides an end-to-end design blueprint covering tokenizer training, pre-training,
-supervised instruction tuning (SFT), and reward modelling/RLHF.
+supervised instruction tuning (SFT), and reward modelling/RLHF. Paper:
+[ZetaGPT: A Positional--Encoding--Free State--Space--Attention Compact Language
+Model](https://arxiv.org/abs/2608.09432).
 
 ## Core design philosophy
 
@@ -36,11 +38,17 @@ assume the induced vocabulary of 50,259 with the output head tied to the token e
 | `zetagpt-m` | 16 | 12 | 768 | 64 | 4× | 1024 | 38.6M | 160.7M | 199.3M |
 | `zetagpt-l` | 24 | 16 | 1024 | 64 | 4× | 1024 | 51.5M | 428.4M | 479.9M |
 
-Select a scheme with `MODEL_SCHEME=zetagpt-m`, or override the context alone with
-`CONTEXT_WINDOW`. The **Context** column is the window each scheme is *trained* at, not a limit:
-nothing in the model refers to an absolute position. `zetagpt-tiny` and `zetagpt-s` share a
-width, a context and a corpus, differing only in depth; point `PRETRAIN_DIR` at your own for
-the two larger schemes.
+### Customized configuration scheme
+
+A scheme is four numbers in `default_config.SCHEMES`, so a size of your own is one entry:
+
+```python
+SCHEMES["zetagpt-xl"] = dict(n_layer=32, n_head=20, n_embd=1280, context_window=2048)
+```
+
+Then `MODEL_SCHEME=zetagpt-xl` in `config.sh`, with `PRETRAIN_DIR` pointing at a corpus sized
+for it. Without editing Python, `CONTEXT_WINDOW` overrides the context alone, and `--set
+MODEL.n_layer=20` reaches any other architectural value for one run.
 
 ## Niche among compact language models
 
@@ -72,6 +80,7 @@ pip install -r requirements.txt
 
 ```bash
 ./stage1_download_data.sh          # fetch the corpora
+./stage2_config.sh                 # choose this run's settings -> config_user.yaml
 ./stage3_train_bpe_tokenizer.sh    # byte-level BPE
 ./stage4_tokenize_data.sh          # corpora -> memory-mapped token streams
 ./stage5_pretrain.sh               # pretraining
@@ -79,7 +88,8 @@ pip install -r requirements.txt
 ./stage7_train_rlhf_reward.sh      # reward model
 ./stage8_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
 ./stage9_cot_aha_moment.sh         # chain of thought by GRPO
-./stage10_instruct_dpo.sh           # direct preference optimisation
+./stage10_instruct_dpo.sh          # direct preference optimisation
+python -m distill.run              # sequence-level distillation into gpt2-small
 ```
 
 Equivalently, bypassing the shell layer:
@@ -115,14 +125,6 @@ DATASET=/path/to/my_preferences ./stage7_train_rlhf_reward.sh
 SFT_DIR=/path/to/my_demos       ./stage6_sft.sh
 PRETRAIN_DIR=/path/to/my_corpus ./stage5_pretrain.sh
 ```
-
-A directory holding `*_train/` and `*_test/` subdirectories of json batches keeps **its own
-split**; anything else is read as a plain folder of `.json` / `.jsonl` records, shuffled and
-cut at `VAL_FRAC`. Records may be a list, one per jsonl line, or wrapped under `pairs` /
-`records` / `data`, and the fields may be spelled `prompt` / `instruction` / `question`,
-`chosen` / `response` / `output`, `rejected` / `reject`. A prompt-only bank may also be a
-folder of `.txt`, one prompt per line. Every stage prints the directory it read and the layout
-it read it as.
 
 Talk to a trained checkpoint:
 
