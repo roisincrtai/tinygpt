@@ -26,12 +26,12 @@ THE HEAD DIMENSION IS FIXED AT 64 (HEAD_DIM below) in every configuration, so n_
 not a free parameter but n_embd / 64. Width is scaled by adding heads, never by widening
 them, which is what keeps a result measured at one size interpretable at another.
 
-    ZetaGPT-Tiny  8 layers,  8 heads,  512-dim,  61.5M parameters, context  512
-    ZetaGPT-S    16 layers,  8 heads,  512-dim,  97.2M,             context  512  (default)
-    ZetaGPT-M    16 layers, 12 heads,  768-dim, 199.3M,             context 1024
-    ZetaGPT-L    24 layers, 16 heads, 1024-dim, 479.9M,             context 1024
+THE SIZES ARE NOT LISTED HERE. They live in default_config.SCHEMES, which is the one place a
+scheme is defined; a copy in this docstring went stale the first time they changed and
+described a model nobody was training. `python -c "import default_config as c; print(c.SCHEMES)"`
+prints them, and doc/vram_usage.md gives what each costs on a card.
 
-Default config: ZetaGPT-S, MLP 4x, context 512, pe="ssm" (default_config.MODEL).
+Default config: default_config.DEFAULT_SCHEME, MLP 4x, pe="ssm" (default_config.MODEL).
 
 HuggingFace-compatible forward, so evaluation and generation code runs unchanged:
     out = model(input_ids, attention_mask=..., mask_positions=...)
@@ -102,7 +102,7 @@ class CausalSelfAttention(nn.Module):
         # (FlashAttention) is used: it evaluates attention in tiles and recomputes the scores in
         # the backward pass, so the (B, nh, T, T) matrix below is NEVER MATERIALISED. That
         # matrix is what makes long context impossible -- at 32 layers, 16 heads and T = 32,768
-        # it is 2,560 GiB per sequence, against 10 GiB for the same attention computed in tiles.
+        # it is 2,048 GiB per sequence, against 10 GiB for the same attention computed in tiles.
         #
         # CUDA ONLY, deliberately. The fused kernels are a CUDA feature; on MPS and CPU
         # scaled_dot_product_attention falls back to a maths implementation that is no cheaper

@@ -110,7 +110,7 @@ def dataset_dir(name):
 # PRETRAINING CORPUS PER SCHEME. Tiny trains on WikiText-103 and S on the FineWeb-Edu subset:
 # a 61.5M model does not need 2B tokens, and a corpus small enough to tokenise quickly is what
 # makes Tiny useful as the scheme you try a change on first. M and L are left EMPTY on purpose,
-# since neither corpus is the right diet for a 199M or 480M model and defaulting them to one
+# since neither corpus is the right diet for a 169M or 623M model and defaulting them to one
 # would be worse than refusing. Point them at your own with PRETRAIN_DIR, or --pretrain_dir.
 #
 # NOTE that Tiny and S therefore differ in corpus as well as depth, so the pair is no longer a
@@ -219,16 +219,16 @@ CORPUS_EXTENSIONS = [
 # to an absolute position, so no length is forbidden and a trained model can be evaluated at
 # any length; the window here is what the scheme is PRETRAINED at, chosen against the cost of
 # attention, which is quadratic in it. The small scheme is the one meant to run on a single
-# machine, so it takes 512; the two larger schemes take 1024.
+# machine. The `context` column is the SCHEDULE each scheme trains through, shortest first;
 #
 #     scheme          layers  heads  d_model  d_h  context  embedding  blocks   parameters
 #     ZetaGPT-Tiny         8      8      512   64      512      25.7M   35.8M        61.5M
-#     ZetaGPT-S           16      8      512   64      512      25.7M   71.5M        97.2M
-#     ZetaGPT-M           16     12      768   64     1024      38.6M  160.7M       199.3M
-#     ZetaGPT-L           24     16     1024   64     1024      51.5M  428.4M       479.9M
+#     ZetaGPT-S           24      8      512   64  1k..4k      25.7M  107.3M       133.0M
+#     ZetaGPT-M           32      8      512   64  1k..8k      25.7M  143.0M       168.8M
+#     ZetaGPT-L           32     16     1024   64  1k..32k     51.5M  571.2M       622.7M
 #
-# Tiny and S share a width, a context and therefore the same 25.7M embedding, and differ only
-# in depth -- which makes the pair a clean depth comparison on identical data.
+# Tiny, S and M share a width and therefore the same 25.7M embedding, and differ only in depth
+# -- 8, 24 and 32 layers -- which makes the three a clean depth series.
 # `context_window` IS A LIST: the windows this scheme trains through, in order. Pretraining
 # does not sit at one sequence length -- it starts short and lengthens -- so the schedule is
 # part of the scheme rather than a table kept alongside it, where the two could disagree.

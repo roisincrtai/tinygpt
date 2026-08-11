@@ -121,9 +121,9 @@ VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layou
 #
 #     scheme          layers  heads  d_model  d_h  context  parameters
 #     zetagpt-tiny         8      8      512   64      512       61.5M
-#     zetagpt-s           16      8      512   64      512       97.2M   (default)
-#     zetagpt-m           16     12      768   64     1024      199.3M
-#     zetagpt-l           24     16     1024   64     1024      479.9M
+#     zetagpt-s           24      8      512   64   1k..4k     133.0M   (default)
+#     zetagpt-m           32      8      512   64   1k..8k      168.8M
+#     zetagpt-l           32     16     1024   64   1k..32k     622.7M
 #
 # together, because those are not independent choices: a scheme is a point on a size ladder,
 # and a model assembled from parts of two of them is one that no reported number describes.
@@ -206,7 +206,7 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 # arithmetic alone (the run held 43.9 GiB and asked for 5.4 GiB more at batch 56):
 #
 #     weights + AdamW state    1.8 GiB   fixed: 5 param-sized copies (live, grad, fp32
-#                                        master, 2 moments) at 97.2M parameters
+#                                        master, 2 moments) at 133.0M parameters
 #     per sequence            0.85 GiB   of which 0.29 GiB is the loss alone --
 #                                        3 x T x 50,259 in fp32: logits, log-softmax, its
 #                                        gradient. The largest single term at this size.
