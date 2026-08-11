@@ -186,12 +186,27 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 #     batch 32   ~21 GB      batch 56   ~35 GB  (88% of 40 GB)
 #     batch 48   ~30 GB      batch 64   ~40 GB  (no headroom -- expect OOM)
 #
-# 32, MEASURED. The earlier 56 was arithmetic and ran out of memory on a 44 GB card at
-# zetagpt-s / context 512: the vocabulary-sized tensors in the loss (logits, log-softmax and
-# its gradient, 3 x B x T x 50,259) are the largest single term, and an estimate cannot know
-# what the allocator rounds up or what a kernel asks for in workspace. MEASURE with
-# `python -m tools.vram --sweep` on the machine you will train on before raising it.
-# MICRO_BATCH splits the step instead, and costs no accuracy.
+# 32, for a ~44 GB card BUDGETED TO ~35 GB. The gap is deliberate: a card's nameplate size is
+# not what a run may use. Fragmentation, allocator rounding, kernel workspaces, a second
+# process and the driver's own reservation all come out of the same 44 GB, and a step that
+# fits on average but not at its peak fails hours in rather than at once.
+#
+# Where it goes at zetagpt-s / context 512, anchored on a real out-of-memory rather than on
+# arithmetic alone (the run held 43.9 GiB and asked for 5.4 GiB more at batch 56):
+#
+#     weights + AdamW state    1.8 GiB   fixed: 5 param-sized copies (live, grad, fp32
+#                                        master, 2 moments) at 97.2M parameters
+#     per sequence            0.85 GiB   of which 0.29 GiB is the loss alone --
+#                                        3 x T x 50,259 in fp32: logits, log-softmax, its
+#                                        gradient. The largest single term at this size.
+#
+#     batch 24  22.1 GiB      batch 36  32.3 GiB
+#     batch 32  28.9 GiB      batch 40  35.7 GiB  over budget
+#                             batch 56  49.2 GiB  out of memory, observed
+#
+# MEASURE with `python -m tools.vram --sweep` on the card you will train on before raising
+# this. MICRO_BATCH splits the step instead and cuts the loss tensors proportionally, at no
+# cost to the result. RECOMPUTE PRETRAIN_STEPS whenever this changes.
 BATCH="${BATCH:-32}"                # examples (or preference pairs) per step
 MICRO_BATCH="${MICRO_BATCH:-0}"     # gradient-accumulation micro-batch; 0 = off
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant

@@ -276,9 +276,11 @@ TRAIN = dict(
                                 # own folder of records (the layout is detected)
     gpu="auto",                 # auto | cuda | mps | cpu
     seed=0,
-    batch=32,                   # examples (or preference pairs) per step; MEASURED to fit a
-                                # ~44 GB card at zetagpt-s / context 512. 56 was an
-                                # arithmetic estimate and ran out of memory in the loss.
+    batch=32,                   # examples (or preference pairs) per step. ~28.9 GiB at
+                                # zetagpt-s / context 512: sized for a ~44 GB card budgeted
+                                # to ~35 GB, because fragmentation, allocator rounding and
+                                # kernel workspaces all come out of the nameplate figure.
+                                # 56 was an estimate and ran out of memory in the loss.
                                 # `python -m tools.vram --sweep` measures it for real.
     micro_batch=0,              # gradient-accumulation micro-batch (0 = off)
     max_len=0,                  # 0 = auto: the model's own context window (block_size)
