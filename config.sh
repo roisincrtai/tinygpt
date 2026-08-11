@@ -186,11 +186,13 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 #     batch 32   ~21 GB      batch 56   ~35 GB  (88% of 40 GB)
 #     batch 48   ~30 GB      batch 64   ~40 GB  (no headroom -- expect OOM)
 #
-# 56 rather than 63 because the estimate is arithmetic: it cannot know what the allocator
-# rounds up or what a kernel asks for in workspace, and a card that fits in theory and not in
-# practice costs a whole run. MEASURE it with `python -m tools.vram --sweep` on the machine
-# you will train on, then raise this if there is room. MICRO_BATCH splits the step if not.
-BATCH="${BATCH:-56}"                # examples (or preference pairs) per step
+# 32, MEASURED. The earlier 56 was arithmetic and ran out of memory on a 44 GB card at
+# zetagpt-s / context 512: the vocabulary-sized tensors in the loss (logits, log-softmax and
+# its gradient, 3 x B x T x 50,259) are the largest single term, and an estimate cannot know
+# what the allocator rounds up or what a kernel asks for in workspace. MEASURE with
+# `python -m tools.vram --sweep` on the machine you will train on before raising it.
+# MICRO_BATCH splits the step instead, and costs no accuracy.
+BATCH="${BATCH:-32}"                # examples (or preference pairs) per step
 MICRO_BATCH="${MICRO_BATCH:-0}"     # gradient-accumulation micro-batch; 0 = off
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
@@ -274,9 +276,10 @@ TOKENS_SHARD_MB="${TOKENS_SHARD_MB:-100}"    # MB of tokens per shard. A corpus 
 # =========================================================================== #
 # stage 5 -- pretraining
 # =========================================================================== #
-# 2 epochs over the ~2B-token corpus at BATCH x (MAX_LEN-1) = 28,616 tokens per step.
+# 2 epochs over the ~2B-token corpus at BATCH x (MAX_LEN-1) = 32 x 511 = 16,352 tokens per
+# step, so 244,618 steps is 4.00B tokens.
 # CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being two epochs.
-PRETRAIN_STEPS="${PRETRAIN_STEPS:-139782}"
+PRETRAIN_STEPS="${PRETRAIN_STEPS:-244618}"
 PRETRAIN_LR="${PRETRAIN_LR:-2e-5}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 

@@ -276,8 +276,9 @@ TRAIN = dict(
                                 # own folder of records (the layout is detected)
     gpu="auto",                 # auto | cuda | mps | cpu
     seed=0,
-    batch=56,                   # examples (or preference pairs) per step; sized to fill a
-                                # 40 GB card at zetagpt-s / context 512 with headroom.
+    batch=32,                   # examples (or preference pairs) per step; MEASURED to fit a
+                                # ~44 GB card at zetagpt-s / context 512. 56 was an
+                                # arithmetic estimate and ran out of memory in the loss.
                                 # `python -m tools.vram --sweep` measures it for real.
     micro_batch=0,              # gradient-accumulation micro-batch (0 = off)
     max_len=0,                  # 0 = auto: the model's own context window (block_size)
@@ -370,7 +371,7 @@ BPE = dict(
 # would have needed 838,926 steps. Packing at 344 words fills the window, and the number below
 # means what it says. Recompute both if the batch, the context or the corpus changes.
 PRETRAIN = dict(
-    steps=139782, lr=2e-5,       # 2 epochs over ~2B tokens at 56 x 511 = 28,616 per step;
+    steps=244618, lr=2e-5,       # 2 epochs over ~2B tokens at 32 x 511 = 16,352 per step;
                                  # RECOMPUTE whenever TRAIN['batch'] changes
     # WHICH SCHEME IS PRETRAINED, and at what context window. Both are exposed on the command
     # line (--model_scheme / --context_window) and in config.sh, so a size can be changed for
