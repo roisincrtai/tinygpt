@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from model.ssm import collect_stats, layer_stats
 
 from .utils import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
-                     CosineLR, ckpt_path, tag)
+                     CosineLR, ckpt_path, tag, restore_rng)
 
 NAME = "LM"
 STAGE = "sft"          # default stage name; the pretrain package passes its own
@@ -166,7 +166,16 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
     start = 0
     if ck is not None and (not ck["done"] or extend):
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
-        start = ck["step"]; g.set_state(ck["gens"][0])
+        # THE GLOBAL STREAM TOO, not only the data generator. `g` covers the data order; dropout
+        # and anything else drawing from torch's default generator do not, so an uninterrupted
+        # run and a resumed one saw different dropout masks from the resume point onwards. Every
+        # other trainer here already restored it -- reward, rlhf, dpo, cot and distill -- and
+        # this one, which serves pretrain, the instruction SFT, the CoT SFT and the language
+        # adaptation, did not. save_ckpt has always written it; nothing read it back.
+        #
+        # Harmless at MODEL["dropout"] = 0.0, which is the default. Not harmless the first time
+        # someone sets it, and silent then.
+        start = ck["step"]; g.set_state(ck["gens"][0]); restore_rng(ck)
         log(f"resume {stage} @ {start}" + (f" (budget {ck.get('total')} -> {steps})"
                                            if extend else ""))
     # truncated at the resume point, so the appended records extend a strictly increasing
@@ -198,7 +207,15 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
     # and the plan collapses to a single segment. `plan` is a list of
     # (start, stop, context, batch) tiling [0, steps) exactly.
     plan = context_schedule(args, steps, docs, log, stage)
+    # THE SEGMENT THE RUN ACTUALLY STARTS IN, not the first one. A resumed run begins in the
+    # middle of the schedule, and seg=0 was only ever corrected INSIDE the loop -- after the
+    # progress bar had already been labelled with plan[0]'s window. So a run resumed at 150,000
+    # trained at 8,192 while its bar said 1,024, and the line that would have said otherwise
+    # only fires at a segment boundary, which a mid-segment resume is not. The training was
+    # right and everything a person could see about it was wrong, which is the worst way round.
     seg = 0
+    while seg + 1 < len(plan) and start >= plan[seg][1]:
+        seg += 1
     # CHUNKED LOSS. 0 evaluates the vocabulary projection over the whole sequence at once, which
     # is what every stage did before long contexts existed and is still right at 512. Above that
     # the three vocabulary-sized tensors dominate the step, so the projection is sliced.
@@ -213,7 +230,7 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         log(f"{stage}: chunked loss, {chunk:,} TOKENS per slice{note}")
     # initial/total in ABSOLUTE steps: a resumed stage must read 30499/40000, not 499/10000.
     model.train()
-    bar = progress(range(start, steps), desc=tag(stage, plan[0][2] if len(plan) > 1 else None),
+    bar = progress(range(start, steps), desc=tag(stage, plan[seg][2] if len(plan) > 1 else None),
                    initial=start, total=steps)
     for step in bar:
         cur_lr = sched.step(step)              # cosine, keyed off the ABSOLUTE step
@@ -228,7 +245,8 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         while seg + 1 < len(plan) and step >= plan[seg][1]:
             seg += 1
         _, _, cur_ctx, cur_batch, cur_micro = plan[seg]
-        if len(plan) > 1 and step == plan[seg][0]:
+        # ...at a boundary, AND on the first step of a resumed run, which is not one
+        if len(plan) > 1 and (step == plan[seg][0] or step == start):
             if hasattr(bar, "set_description"):
                 bar.set_description(tag(stage, cur_ctx))
             log(f"{stage}: context window {cur_ctx:,} at batch {cur_batch}"
