@@ -1,23 +1,30 @@
 # ZetaGPT: A Positional–Encoding–Free State–Space–Attention Compact Language Model
 
-**ZetaGPT** is a compact, positional-encoding-free (NoPE) language model architecture that
-uses a state-space-attention mixture block to handle long-context sequences implicitly. It
-provides an end-to-end design blueprint covering tokenizer training, pre-training,
-supervised instruction tuning (SFT), and reward modelling/RLHF.
+**ZetaGPT** is a positional-encoding-free (NoPE) language model architecture. Sequence order is
+carried by the recurrence of a causal state-space module — position is a property of the
+operator, not a vector added to it — so there is no position table, no rotation, and nothing to
+rescale or interpolate when the context grows. The architecture is the subject of the work; the
+full training pipeline, from byte-level BPE through pretraining, instruction tuning, reward
+modelling, RLHF, GRPO and DPO, is here so that the claim can be reproduced end to end rather
+than asserted from a single loss curve.
 
 [ZetaGPT: A Positional--Encoding--Free State--Space--Attention Compact Language
 Model](https://arxiv.org/abs/2608.09432)
 
 ## Core design philosophy
 
-- **No positional encoding (NoPE).** Traditional transformers require explicit position
-  signals — sinusoidal or rotary embeddings — because self-attention is order-invariant.
-  ZetaGPT avoids explicit position vectors entirely: no position table, and no rotation.
-- **State-space-attention mixture.** It relies on hybrid mixture blocks that implicitly
-  capture token order and long-range dependencies, reflecting modern architectural trends
-  aimed at scaling context lengths efficiently.
-- **Compact and product-level pipeline.** Built as an open blueprint to demonstrate full
-  lifecycle engineering for small-scale, highly efficient language models.
+- **No positional encoding, by construction.** Not a position signal that has been removed and
+  compensated for elsewhere: the causal state-space module is order-sensitive as an operator,
+  so order is already present when attention receives it. There is no position table and no
+  rotation anywhere in the model.
+- **State-space-attention mixture.** Every block is a causal selective state-space module,
+  gated multi-head attention and a feed-forward network. The recurrence carries order and
+  locality; attention is left free to carry content.
+- **Built for length.** Context is what the architecture is for. With no rotary base to retune
+  and no interpolation scheme to choose, extending the window is a training decision rather
+  than a surgical one — the same weights simply run longer.
+- **Reproducible end to end.** Every stage runs on its own, in plain PyTorch, from a bare
+  checkout.
 
 Each block is a causal state-space module, gated multi-head self-attention and a
 feed-forward network, pre-normalised with a residual around each sub-layer; sequence order
