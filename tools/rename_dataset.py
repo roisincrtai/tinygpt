@@ -41,22 +41,44 @@ at them have to move. That is what makes this seconds rather than hours.
 --dry-run prints every move and changes nothing. Run it first.
 """
 import argparse
+import importlib.util
 import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 import default_config as config                                        # noqa: E402
-import helpers                                                         # noqa: E402
-from helpers.utils import _sig_tag                                     # noqa: E402
+
+
+def _module(name, relpath):
+    """Load one module BY FILE PATH, without importing the package it sits in.
+
+    NOTHING HERE NEEDS TORCH -- this renames directories and rewrites a manifest, work for a
+    login node -- but `import helpers` runs helpers/__init__.py, which imports utils, which
+    imports torch, the model and the DPO stage. Loading the two torch-free modules directly
+    keeps the tool importable wherever python is, and keeps it using the pipeline's OWN
+    definitions rather than a copy of them: a signature computed two ways is two answers to the
+    one question a signature exists to answer."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, relpath))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+corpus_id = _module("_corpus_id", "helpers/corpus_id.py")
+token_store = _module("_token_store", "helpers/token_store.py")
+corpus_files, corpus_signature = corpus_id.corpus_files, corpus_id.corpus_signature
+_sig_tag = corpus_id._sig_tag
 
 
 class TokenizerTag:
     """Just enough tokenizer for the signature: the MERGE COUNT, read off the cache directory.
 
     corpus_signature reaches into the tokenizer for exactly one thing -- how many merges it has
-    (helpers.utils._tok_signature) -- and the cache directory is named bpe_<256 + merges>_<fp>,
+    (helpers.corpus_id._tok_signature) -- and the cache directory is named bpe_<256 + merges>_<fp>,
     so the count is already in the path. Standing in for the vocabulary this way means the
     pipeline's OWN signature function computes the new signature, with no second implementation
     of the hash to drift from the first, and means four vocabularies can be re-signed without
@@ -79,7 +101,7 @@ class TokenizerTag:
 
 def corpus_files_and_bytes(root):
     """The two numbers the signature is built from, for the corpus AT ITS NEW PATH."""
-    files = helpers.corpus_files(root, config.PRETRAIN["exclude_dirs"])
+    files = corpus_files(root, config.PRETRAIN["exclude_dirs"])
     total = 0
     for f in files:
         try:
@@ -131,7 +153,7 @@ def streams_for(name, log=print):
                 except (OSError, ValueError, UnicodeDecodeError) as e:
                     skipped.append((os.path.join(dirpath, fn), type(e).__name__))
                     continue
-                if idx.get("magic") != helpers.token_store_magic():
+                if idx.get("magic") != token_store.MAGIC:
                     skipped.append((os.path.join(dirpath, fn), "not a token-store manifest"))
                     continue
                 out.append((dirpath, fn, idx))
@@ -216,7 +238,7 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
             raise SystemExit(
                 f"[rename] cannot read a merge count from the cache directory {tok_tag!r}, so "
                 f"the new signature cannot be computed. Expected bpe_<256+merges>_<fingerprint>.")
-        new_sig = helpers.corpus_signature(shim, new_dir, files,
+        new_sig = corpus_signature(shim, new_dir, files,
                                            config.PRETRAIN["max_words"],
                                            config.PRETRAIN["text_column"])
         new_tag = _sig_tag(new_sig)

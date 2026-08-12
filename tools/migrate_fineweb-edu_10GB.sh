@@ -9,15 +9,13 @@
 # renames the data, moves the cache, re-signs every shard and rewrites the manifest, without
 # reading a single token.
 #
-#   ./tools/migrate_fineweb-edu_10GB.sh              DRY RUN -- prints the plan, changes nothing
-#   ./tools/migrate_fineweb-edu_10GB.sh --apply      do it
-#   APPLY=1 ./tools/migrate_fineweb-edu_10GB.sh      do it, for a job runner that submits this
-#                                                    script by path and cannot pass arguments
+#   ./tools/migrate_fineweb-edu_10GB.sh              DO IT
+#   ./tools/migrate_fineweb-edu_10GB.sh --dryrun     print the plan and change nothing
 #
-# IT IS A DRY RUN UNLESS ASKED, and that is the right default for something that renames four
-# gigabytes: the cost of a needless dry run is two seconds, and the cost of an unintended
-# rename is a hunt for where the corpus went. Safe to re-run either way -- once the data has
-# moved it says so and leaves everything alone.
+# NEEDS NOTHING BUT PYTHON. No torch, no GPU virtualenv: it renames directories and rewrites
+# one json, so it runs on a login node.
+#
+# Safe to re-run: once the data has moved it says so and leaves everything alone.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,19 +23,19 @@ OLD="zetagpt-small_pretrain-corpus_fineweb-edu_10GB"
 NEW="zetagpt-pretrain_fineweb-edu-2BT"
 PY="${PY:-python}"
 
-if [ "${1:-}" = "--apply" ] || [ "${APPLY:-0}" = "1" ]; then
-  echo "=== MIGRATING $OLD -> $NEW ==="
-  $PY -m tools.rename_dataset "$OLD" "$NEW"
-  echo
-  echo "Done. Confirm the cache is reachable under the new name -- it should PRINT the stream,"
-  echo "not start tokenising:"
-  echo "    ./stage4_tokenize_data.sh --list"
-  exit 0
-fi
+case "${1:-}" in
+  --dryrun|--dry-run)
+    echo "=== DRY RUN: $OLD -> $NEW ==="
+    $PY -m tools.rename_dataset "$OLD" "$NEW" --dry-run
+    echo
+    echo "Nothing was changed. Drop --dryrun to do it."
+    exit 0
+    ;;
+esac
 
-echo "=== DRY RUN: $OLD -> $NEW ==="
-$PY -m tools.rename_dataset "$OLD" "$NEW" --dry-run
+echo "=== MIGRATING $OLD -> $NEW ==="
+$PY -m tools.rename_dataset "$OLD" "$NEW"
 echo
-echo "NOTHING WAS CHANGED. This script is a dry run unless you ask for the rename:"
-echo "    ./tools/migrate_fineweb-edu_10GB.sh --apply"
-echo "    APPLY=1 ./tools/migrate_fineweb-edu_10GB.sh      # if your runner cannot pass arguments"
+echo "Confirm the cache is reachable under the new name -- it should PRINT the stream,"
+echo "not start tokenising:"
+echo "    ./stage4_tokenize_data.sh --list"

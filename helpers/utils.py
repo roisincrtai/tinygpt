@@ -20,6 +20,12 @@ import torch
 import torch.nn.functional as F
 
 import default_config as config
+# THE CORPUS IDENTITY LIVES IN A TORCH-FREE MODULE, and is imported rather than
+# duplicated: tools/rename_dataset.py needs a signature on a login node with no GPU
+# virtualenv, and a signature computed two ways is two answers to the one question
+# a signature exists to answer. See helpers/corpus_id.py.
+from .corpus_id import (_split_token, corpus_files, corpus_name,  # noqa: F401
+                        corpus_signature, _sig_tag, _tok_signature)
 from instruct_dpo.dpo import margin as dpo_margin, rewards as dpo_rewards
 
 
@@ -1218,29 +1224,6 @@ def token_cache_root(tok, path=None):
     return os.path.join(config.CACHE_DIR, "tokens", tokenizer_tag(tok, path))
 
 
-def _tok_signature(tok, max_words, text_column=""):
-    """Identifies the tokenizer and the packing; any change invalidates every entry. The
-    parquet text column is part of it: reading a different column is a different corpus, and a
-    cache that survived that change would train on tokens nobody asked for.
-
-    THE SIZE COUNTED IS THE ENCODING, 256 + merges, NOT len(tok). len(tok) includes the
-    special tokens, so it rises the moment <|im_start|> is registered -- and a corpus that has
-    not changed by a single token would then sign differently and be tokenised all over again.
-    Registering a special after pretraining must leave every cached stream valid; that is the
-    entire point of being able to register one, it is why tokenizer_tag counts the same way,
-    and encoding_blob explains why the ids do not move."""
-    n_merges = len(getattr(tok, "merges", []) or [])
-    n_base = 256 + n_merges if hasattr(tok, "merges") else len(tok)
-    return (f"v2|encoding={n_base}|merges={n_merges}|max_words={int(max_words)}"
-            f"|col={text_column}")
-
-
-def _sig_tag(sig):
-    """Eight hex characters of the signature, for the file name."""
-    import hashlib
-    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:8]
-
-
 def _mirror(src):
     """A source path as a path RELATIVE to the cache root, mirroring it from the project root.
 
@@ -1379,93 +1362,6 @@ def corpus_bytes(files, text_column="text"):
             except OSError:
                 pass
     return total
-
-
-def _split_token(name):
-    """The leading name token of a file: `validation-00000-of-00001.parquet` -> "validation",
-    `test_0003.txt` -> "test", `doc.0.parquet` -> "doc"."""
-    stem = os.path.splitext(name)[0]
-    for sep in ("-", "_", "."):
-        stem = stem.split(sep)[0]
-    return stem.lower()
-
-def corpus_files(root, exclude_dirs=(), extensions=None):
-    """Every corpus file under `root`, recursively: any file whose extension is in
-    `extensions` (config.CORPUS_EXTENSIONS by default -- prose, markdown AND source code),
-    skipping anything excluded by `exclude_dirs`. Sorted, so a run is reproducible.
-
-    An entry in `exclude_dirs` excludes a DIRECTORY of that name and also any FILE whose
-    leading name token matches it. Both, because a corpus keeps its held-out split in whichever
-    of the two shapes its format favours: thirty thousand text files are laid out as valid/ and
-    test/ subdirectories, while the same corpus as parquet is a handful of files named
-    validation-00000-of-00001.parquet in one flat directory -- the layout the Hugging Face Hub
-    infers splits from. A directories-only rule silently pretrains on the test split the moment
-    a corpus is converted, and a model evaluated on text it was trained on reports a perplexity
-    that means nothing."""
-    exts = {("." + e.lower().lstrip(".")) for e in (extensions or config.CORPUS_EXTENSIONS)}
-    excl = {d.lower() for d in (exclude_dirs or ())}
-    out = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d.lower() not in excl]
-        for fn in filenames:
-            if os.path.splitext(fn)[1].lower() in exts and _split_token(fn) not in excl:
-                out.append(os.path.join(dirpath, fn))
-    return sorted(out)
-
-
-def corpus_signature(tok, root, files, max_words, text_column):
-    """Identifies a whole corpus AND the tokenizer and packing applied to it.
-
-    NOTHING MACHINE-DEPENDENT GOES INTO IT. A signature exists to answer "are these the tokens
-    of this corpus?", and that question has the same answer on every machine, so the same
-    corpus must produce the same signature on any host and under any layout. Two inputs
-    used to break that, and both were unnecessary:
-
-      MODIFICATION TIMES. An mtime records when a file last arrived on THIS filesystem, not
-      what is in it. It moves when a corpus is rsynced, re-downloaded, restored from a backup,
-      copied between nodes or checked out again -- none of which changes a byte -- so the same
-      corpus on two servers signed differently, and a finished token stream became invisible to
-      the machine that was about to use it.
-
-      PATHS, absolute or relative. A dataset under a scratch filesystem, the same dataset in
-      a home directory and the same dataset on a workstation are one corpus. What identifies
-      it is its NAME -- the dataset directory,
-      zetagpt-pretrain_fineweb-edu-2BT -- which is the name it was published
-      under and travels with it. Where a given machine chose to put it is that machine's
-      business and belongs nowhere near an identity.
-
-    So: the dataset name, the packing, and two numbers that describe the corpus rather than the
-    host -- how many files it has and how many bytes they hold. Those cost one stat each, are
-    identical wherever the corpus is copied, and still move when a file is added, removed,
-    truncated or rewritten. Content hashing would be stricter, and reading 10 TB to decide
-    whether 10 TB may be skipped defeats the purpose.
-
-    The result is HASHED rather than stored, so a corpus of thirty thousand files does not put
-    a megabyte of file listing in the header of every stream."""
-    import hashlib
-    total = 0
-    for fp in files:
-        try:
-            total += os.path.getsize(fp)
-        except OSError:
-            pass
-    h = hashlib.sha256()
-    h.update(f"{corpus_name(root)}|{_tok_signature(tok, max_words, text_column)}"
-             f"|files={len(files)}|bytes={total}".encode("utf-8"))
-    # v2 is the portable scheme. v1 hashed mtimes and the absolute root, so a stream written by
-    # it carries a name no v2 run computes; those are picked up by _equivalent_stream instead of
-    # being rebuilt, which is why that fallback exists and stays.
-    return f"corpus|v2|files={len(files)}|{h.hexdigest()[:32]}"
-
-
-def corpus_name(root):
-    """THE DATASET NAME, and nothing else: the last component of the corpus directory.
-
-    `zetagpt-pretrain_fineweb-edu-2BT`. That is what the dataset is called, it is
-    the name it was published under, and it is the same on every machine that has a copy. No
-    part of the path above it is used: a scratch filesystem, a home directory and a
-    workstation may each hold the same corpus, and all three must reach the same cache."""
-    return os.path.basename(os.path.normpath(os.path.abspath(root))) or "corpus"
 
 
 def corpus_stream_path(tok, root, sig):
