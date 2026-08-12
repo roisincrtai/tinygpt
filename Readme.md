@@ -95,22 +95,46 @@ learned embedding rows sit against different tokens.
 
 A scheme fixes depth, width, the context schedule and the corpus together. Here is a small one
 end to end — `zetagpt-baby`, 6 layers at `d_model` 512, training through 256 then 512 tokens on
-WikiText-103. In `default_config.py`:
+WikiText-103.
+
+**Step 1 — edit `default_config.py`.** Add one entry to each of four dictionaries. They are
+already in the file; add your line inside each, beside the existing schemes:
 
 ```python
-SCHEMES["zetagpt-baby"] = dict(n_layer=6, n_head=8, n_embd=512,
-                               context_window=[256, 512])
-PRETRAIN_CORPUS["zetagpt-baby"] = dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")
-SCHEME_BATCH["zetagpt-baby"] = 64             # sequences per step at the LONGEST window
-SCHEME_MICRO_TOKENS["zetagpt-baby"] = 0       # 0 = no micro-batching; it fits in one pass
+SCHEMES = {                                          # default_config.py, ~line 266
+    ...
+    "zetagpt-baby": dict(n_layer=6, n_head=8, n_embd=512,
+                         context_window=[256, 512]),
+}
+
+PRETRAIN_CORPUS = {                                  # ~line 144: which corpus it trains on
+    ...
+    "zetagpt-baby": dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
+}
+
+SCHEME_BATCH = {                                     # ~line 286: sequences per step at the
+    ...                                              #            LONGEST window
+    "zetagpt-baby": 64,
+}
+
+SCHEME_MICRO_TOKENS = {                              # ~line 309: 0 = no micro-batching,
+    ...                                              #            this one fits in one pass
+    "zetagpt-baby": 0,
+}
 ```
 
 `n_head` is not a free choice: the head dimension is 64 everywhere, so it is `n_embd / 64` —
 512 / 64 = 8. `context_window` is the list of windows the run trains through and its largest
-entry is the model's context, so this model has a 512-token context. Then:
+entry is the model's context, so this model has a 512-token context.
+
+**Step 2 — set the scheme in `config.sh`**, or override it per run:
 
 ```bash
-MODEL_SCHEME=zetagpt-baby ./stage5_pretrain.sh
+MODEL_SCHEME="${MODEL_SCHEME:-zetagpt-baby}"      # config.sh, ~line 165
+```
+
+```bash
+MODEL_SCHEME=zetagpt-baby ./stage5_pretrain.sh    # or just for this run
 ```
 
 The batch is sized at the longest window and scales up as the window shortens, so tokens per
@@ -119,9 +143,11 @@ with batch 128, then steps 10,000–19,999 at context 512 with batch 64.
 
 Nothing else needs changing: `PRETRAIN_DIR` is blank in `config.sh` so each scheme uses its own
 corpus, and every artefact is named after the scheme
-(`checkpoint_zetagpt-baby_ssm_pretrain.pt`). Without editing Python at all,
-`CONTEXT_WINDOW=256,512` pins a schedule for one run and `--set MODEL.n_layer=6` reaches any
-other architectural value.
+(`checkpoints/pretrain/checkpoint_zetagpt-baby_ssm_pretrain.pt`).
+
+**Without editing Python at all**, `config.sh` reaches the same values for one run:
+`CONTEXT_WINDOW=256,512` pins a schedule, `BATCH=64` the batch, and `EXTRA_SET="--set
+MODEL.n_layer=6"` any other architectural value.
 
 ## Niche among compact language models
 
