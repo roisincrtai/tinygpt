@@ -93,18 +93,35 @@ learned embedding rows sit against different tokens.
 
 ### Customized configuration scheme
 
-A scheme is one entry in `default_config.SCHEMES`; `context_window` is the list of windows it
-trains through, and its largest entry is the model's context:
+A scheme fixes depth, width, the context schedule and the corpus together. Here is a small one
+end to end — `zetagpt-baby`, 6 layers at `d_model` 512, training through 256 then 512 tokens on
+WikiText-103. In `default_config.py`:
 
 ```python
-SCHEMES["zetagpt-xl"] = dict(n_layer=32, n_head=20, n_embd=1280,
-                             context_window=[1024, 4096, 16384])
+SCHEMES["zetagpt-baby"] = dict(n_layer=6, n_head=8, n_embd=512,
+                               context_window=[256, 512])
+PRETRAIN_CORPUS["zetagpt-baby"] = dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")
+SCHEME_BATCH["zetagpt-baby"] = 64             # sequences per step at the LONGEST window
+SCHEME_MICRO_TOKENS["zetagpt-baby"] = 0       # 0 = no micro-batching; it fits in one pass
 ```
 
-Then `MODEL_SCHEME=zetagpt-xl` in `config.sh`, with `PRETRAIN_DIR` pointing at a corpus sized
-for it, and entries in `SCHEME_BATCH` and `SCHEME_MICRO_TOKENS` for what fits your card.
-Without editing Python, `CONTEXT_WINDOW=1024,4096` pins a schedule for one run and `--set
-MODEL.n_layer=20` reaches any other architectural value.
+`n_head` is not a free choice: the head dimension is 64 everywhere, so it is `n_embd / 64` —
+512 / 64 = 8. `context_window` is the list of windows the run trains through and its largest
+entry is the model's context, so this model has a 512-token context. Then:
+
+```bash
+MODEL_SCHEME=zetagpt-baby ./stage5_pretrain.sh
+```
+
+The batch is sized at the longest window and scales up as the window shortens, so tokens per
+step stay constant — over a 20,000-step budget this scheme runs steps 0–9,999 at context 256
+with batch 128, then steps 10,000–19,999 at context 512 with batch 64.
+
+Nothing else needs changing: `PRETRAIN_DIR` is blank in `config.sh` so each scheme uses its own
+corpus, and every artefact is named after the scheme
+(`checkpoint_zetagpt-baby_ssm_pretrain.pt`). Without editing Python at all,
+`CONTEXT_WINDOW=256,512` pins a schedule for one run and `--set MODEL.n_layer=6` reaches any
+other architectural value.
 
 ## Niche among compact language models
 
