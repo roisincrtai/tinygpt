@@ -35,14 +35,14 @@ assume the induced vocabulary of 50,259 with the output head tied to the token e
 | Scheme | Layers | Heads | `d_model` | `d_h` | MLP | Context | Embedding | Blocks | Parameters |
 |---|---|---|---|---|---|---|---|---|---|
 | `zetagpt-tiny` | 8 | 8 | 512 | 64 | 4× | 1024 | 25.7M | 35.8M | 61.5M |
-| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 4096 | 25.7M | 107.3M | **133.0M** |
-| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 8192 | 25.7M | 143.0M | 168.8M |
+| `zetagpt-s` (default) | 24 | 8 | 512 | 64 | 4× | 8192 | 25.7M | 107.3M | **133.0M** |
+| `zetagpt-m` | 32 | 8 | 512 | 64 | 4× | 16384 | 25.7M | 143.0M | 168.8M |
 | `zetagpt-l` | 32 | 16 | 1024 | 64 | 4× | 32768 | 51.5M | 571.2M | 622.7M |
 
 ### Context window scheduling
 
 Pretraining does not sit at one sequence length. Each scheme lists the windows it trains
-through — `zetagpt-m` is `[1024, 4096, 8192]` — and each window takes an equal share of the
+through — `zetagpt-m` is `[1024, 2048, 4096, 8192, 16384]` — and each window takes an equal share of the
 step budget, shortest first. The batch is sized at the longest window and scales up as the
 window shortens, so tokens per step stay constant across the whole run.
 
@@ -77,8 +77,8 @@ MODEL.n_layer=20` reaches any other architectural value.
 | Qwen3-0.6B | ~0.6B | Transformer | RoPE | 32768 |
 | TinyLlama | ~1.1B | Transformer | RoPE | 2048 |
 | **ZetaGPT-Tiny** | **61.5M** | **State–Space–Attention** | **None** | **1024** |
-| **ZetaGPT-S** (default) | **133.0M** | **State–Space–Attention** | **None** | **4096** |
-| **ZetaGPT-M** | **168.8M** | **State–Space–Attention** | **None** | **8192** |
+| **ZetaGPT-S** (default) | **133.0M** | **State–Space–Attention** | **None** | **8192** |
+| **ZetaGPT-M** | **168.8M** | **State–Space–Attention** | **None** | **16384** |
 | **ZetaGPT-L** | **622.7M** | **State–Space–Attention** | **None** | **32768** |
 
 ## Quick start

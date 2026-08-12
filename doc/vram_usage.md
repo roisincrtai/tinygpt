@@ -123,6 +123,57 @@ than at once.
 
 ---
 
+## Every window of every scheme
+
+The peak is not one number per scheme: the context schedule changes `T`, which changes the
+sequences per pass and therefore the tokens per pass. `B` is the batch the optimiser sees and
+does not enter the memory; `m` is what is resident. Figures in GiB.
+
+**`zetagpt-tiny`** — 8 layers, `d` 512, 0.63 MB/token, fixed 1.15 GiB, `SCHEME_BATCH` 32, `SCHEME_MICRO_TOKENS` 47,104
+
+| Window `T` | `B` | `m` | passes | tokens/pass | activations | loss | attention | **peak** |
+|---|---|---|---|---|---|---|---|---|
+| 512 | 64 | 64 | 1 | 32,768 | 20.1 | 4.6 | 1.0 | **26.8** |
+| 1,024 | 32 | 32 | 1 | 32,768 | 20.1 | 4.6 | 1.0 | **26.8** |
+
+**`zetagpt-s`** — 24 layers, `d` 512, 1.88 MB/token, fixed 2.48 GiB, `SCHEME_BATCH` 3, `SCHEME_MICRO_TOKENS` 14,336
+
+| Window `T` | `B` | `m` | passes | tokens/pass | activations | loss | attention | **peak** |
+|---|---|---|---|---|---|---|---|---|
+| 1,024 | 24 | 14 | 2 | 14,336 | 26.3 | 4.6 | 1.3 | **34.7** |
+| 2,048 | 12 | 7 | 2 | 14,336 | 26.3 | 4.6 | 1.3 | **34.7** |
+| 4,096 | 6 | 3 | 2 | 12,288 | 22.6 | 4.6 | 1.1 | **30.8** |
+| 8,192 | 3 | 1 | 3 | 8,192 | 15.0 | 4.6 | 0.8 | **22.9** |
+
+**`zetagpt-m`** — 32 layers, `d` 512, 2.51 MB/token, fixed 3.14 GiB, `SCHEME_BATCH` 1, `SCHEME_MICRO_TOKENS` 10,240
+
+| Window `T` | `B` | `m` | passes | tokens/pass | activations | loss | attention | **peak** |
+|---|---|---|---|---|---|---|---|---|
+| 1,024 | 16 | 10 | 2 | 10,240 | 25.1 | 4.6 | 1.2 | **34.1** |
+| 2,048 | 8 | 5 | 2 | 10,240 | 25.1 | 4.6 | 1.2 | **34.1** |
+| 4,096 | 4 | 2 | 2 | 8,192 | 20.1 | 4.6 | 1.0 | **28.8** |
+| 8,192 | 2 | 1 | 2 | 8,192 | 20.1 | 4.6 | 1.0 | **28.8** |
+| 16,384 | 1 | 1 | 1 | 16,384 | 40.1 | 4.6 | 2.0 | **49.9**  ⚠ over 35 |
+
+**`zetagpt-l`** — 32 layers, `d` 1024, 5.01 MB/token, fixed 11.60 GiB, `SCHEME_BATCH` 1, `SCHEME_MICRO_TOKENS` 3,072
+
+| Window `T` | `B` | `m` | passes | tokens/pass | activations | loss | attention | **peak** |
+|---|---|---|---|---|---|---|---|---|
+| 1,024 | 32 | 3 | 11 | 3,072 | 15.0 | 1.7 | 0.8 | **29.1** |
+| 2,048 | 16 | 1 | 16 | 2,048 | 10.0 | 1.2 | 0.5 | **23.3** |
+| 4,096 | 8 | 1 | 8 | 4,096 | 20.1 | 2.3 | 1.0 | **35.0** |
+| 8,192 | 4 | 1 | 4 | 8,192 | 40.1 | 4.6 | 2.0 | **58.3**  ⚠ over 35 |
+| 16,384 | 2 | 1 | 2 | 16,384 | 80.2 | 4.6 | 4.0 | **100.4**  ⚠ over 35 |
+| 32,768 | 1 | 1 | 1 | 32,768 | 160.4 | 4.6 | 8.0 | **184.6**  ⚠ over 35 |
+
+Two things the tables make plain. `zetagpt-tiny` and `zetagpt-s` fit their whole schedules,
+`zetagpt-m` fits until 16,384 and `zetagpt-l` until 4,096 — and the windows that do not fit
+are not close, they are two to five times over. And the peak is highest at the SHORT windows
+for `-tiny` and `-s`, because the token budget is filled there and the longest window cannot
+even reach it with one sequence.
+
+---
+
 ## Sizing a scheme for your own card
 
 1. **Choose a working budget.** Leave 20–25% of the card unspent, for the reasons above.
@@ -171,7 +222,7 @@ noise whichever way the step is divided.
 
 ## The case that does not fit
 
-`zetagpt-l` at its 32,768 window needs about 177 GiB for a **single sequence**, and one
+`zetagpt-l` at its 32,768 window needs about 185 GiB for a **single sequence**, and one
 sequence is the smallest pass there is — no micro-batch can reduce it. What that needs is
 gradient checkpointing over the blocks: storing each block's input and recomputing its
 interior during the backward pass, which trades roughly 30% more compute for activations that

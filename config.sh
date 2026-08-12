@@ -121,8 +121,8 @@ VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layou
 #
 #     scheme          layers  heads  d_model  d_h  context  parameters
 #     zetagpt-tiny         8      8      512   64      512       61.5M
-#     zetagpt-s           24      8      512   64   1k..4k     133.0M   (default)
-#     zetagpt-m           32      8      512   64   1k..8k      168.8M
+#     zetagpt-s           24      8      512   64   1k..8k     133.0M   (default)
+#     zetagpt-m           32      8      512   64   1k..16k     168.8M
 #     zetagpt-l           32     16     1024   64   1k..32k     622.7M
 #
 # together, because those are not independent choices: a scheme is a point on a size ladder,
@@ -323,10 +323,10 @@ TOKENS_SHARD_MB="${TOKENS_SHARD_MB:-100}"    # MB of tokens per shard. A corpus 
 # =========================================================================== #
 # stage 5 -- pretraining
 # =========================================================================== #
-# 2 epochs over the measured 2,068,028,808-token corpus at 6 x 4095 = 24,570 tokens per step,
-# which the context schedule holds constant at every window, so 168,338 steps is 4.14B tokens.
+# 2 epochs over the measured 2,068,028,808-token corpus at 3 x 8191 = 24,573 tokens per step,
+# which the context schedule holds constant at every window, so 168,317 steps is 4.14B tokens.
 # CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being two epochs.
-PRETRAIN_STEPS="${PRETRAIN_STEPS:-168338}"
+PRETRAIN_STEPS="${PRETRAIN_STEPS:-168317}"
 PRETRAIN_LR="${PRETRAIN_LR:-2e-5}"
 PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 

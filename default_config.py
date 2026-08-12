@@ -223,8 +223,8 @@ CORPUS_EXTENSIONS = [
 #
 #     scheme          layers  heads  d_model  d_h  context  embedding  blocks   parameters
 #     ZetaGPT-Tiny         8      8      512   64      512      25.7M   35.8M        61.5M
-#     ZetaGPT-S           24      8      512   64  1k..4k      25.7M  107.3M       133.0M
-#     ZetaGPT-M           32      8      512   64  1k..8k      25.7M  143.0M       168.8M
+#     ZetaGPT-S           24      8      512   64  1k..8k      25.7M  107.3M       133.0M
+#     ZetaGPT-M           32      8      512   64  1k..16k     25.7M  143.0M       168.8M
 #     ZetaGPT-L           32     16     1024   64  1k..32k     51.5M  571.2M       622.7M
 #
 # Tiny, S and M share a width and therefore the same 25.7M embedding, and differ only in depth
@@ -241,11 +241,11 @@ SCHEMES = {
     "zetagpt-tiny": dict(n_layer=8,  n_head=8,  n_embd=512,
                          context_window=[512, 1024]),
     "zetagpt-s": dict(n_layer=24, n_head=8,  n_embd=512,
-                      context_window=[1024, 4096]),
+                      context_window=[1024, 2048, 4096, 8192]),
     "zetagpt-m": dict(n_layer=32, n_head=8,  n_embd=512,
-                      context_window=[1024, 4096, 8192]),
+                      context_window=[1024, 2048, 4096, 8192, 16384]),
     "zetagpt-l": dict(n_layer=32, n_head=16, n_embd=1024,
-                      context_window=[1024, 4096, 8192, 16384, 32768]),
+                      context_window=[1024, 2048, 4096, 8192, 16384, 32768]),
 }
 DEFAULT_SCHEME = "zetagpt-s"
 
@@ -259,8 +259,8 @@ DEFAULT_SCHEME = "zetagpt-s"
 # fixed makes the schedule invisible to everything except the memory it was introduced to save.
 SCHEME_BATCH = {
     "zetagpt-tiny": 32,         # at ctx 1024 -> 64 at ctx 512
-    "zetagpt-s": 6,             # at ctx 4096 -> 24 at ctx 1024
-    "zetagpt-m": 2,             # at ctx 8192 -> 16 at ctx 1024
+    "zetagpt-s": 3,             # at ctx 8192 -> 24 at ctx 1024
+    "zetagpt-m": 1,             # at ctx 16384 -> 16 at ctx 1024
     "zetagpt-l": 1,             # at ctx 32768 -> 32 at ctx 1024
 }
 
@@ -482,8 +482,8 @@ BPE = dict(
 # would have needed 838,926 steps. Packing at 344 words fills the window, and the number below
 # means what it says. Recompute both if the batch, the context or the corpus changes.
 PRETRAIN = dict(
-    steps=168338, lr=2e-5,       # 2 epochs over the MEASURED 2,068,028,808-token corpus
-                                 # at 6 x 4095 = 24,570 tokens per step, which the context
+    steps=168317, lr=2e-5,       # 2 epochs over the MEASURED 2,068,028,808-token corpus
+                                 # at 3 x 8191 = 24,573 tokens per step, which the context
                                  # schedule holds constant at every window.
                                  # RECOMPUTE whenever SCHEME_BATCH or the corpus changes
     # WHICH SCHEME IS PRETRAINED, and at what context window. Both are exposed on the command
