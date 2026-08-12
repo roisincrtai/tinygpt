@@ -80,6 +80,31 @@ DOWNLOAD_DIR = os.path.join(DATA_DIR, "download")          # data/download/<data
 # into part_0000/, part_0001/, ... of at most that many each. A corpus of tens of thousands of
 # files in ONE directory is slow to list on most filesystems and unpleasant to look at; the
 # corpus scanner walks recursively, so the split is invisible to every stage.
+def _datasets_from_shell():
+    """download_config.sh's list, when the environment carries it.
+
+    ONE PLACE NAMES THE REMOTES. download_config.sh is that place, so a dataset is added by
+    adding a line there and nothing in Python has to change. The dictionary below is the
+    fallback for a run that did not go through the shell -- `python -m tools.download_data`
+    straight from a checkout -- and the two are kept in step because the shell wins whenever
+    it is present."""
+    raw = os.environ.get("ZETAGPT_DATASETS", "")
+    out = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        name, repo = parts[0], parts[1]
+        per = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        out[name] = {"repo": repo, "what": parts[3] if len(parts) > 3 else name}
+        if per:
+            out[name]["files_per_subdir"] = per
+    return out
+
+
 DATASETS = {
     "zetagpt-tiny_pretrain-corpus_wikitext103": {
         "repo": "roisincrtai/zetagpt-tiny_pretrain-corpus_wikitext103",
@@ -95,11 +120,17 @@ DATASETS = {
         "what": "instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout "
                 "prompts, shared by stages 6, 7 and 10",
     },
+    "zetagpt-cot-countdown-game-20k": {
+        "repo": "roisincrtai/zetagpt-cot-countdown-game-20k",
+        "what": "stage 9 GRPO: 20k Countdown arithmetic problems, each with a target, its "
+                "numbers and a reference trace",
+    },
     "zetagpt-grpo-cot_gsm8k": {
         "repo": "roisincrtai/zetagpt-grpo-cot_gsm8k",
-        "what": "chain-of-thought reasoning problems for the stage-9 GRPO run (GSM8K)",
+        "what": "grade-school word problems, the alternative stage 9 task (set COT_TASK=gsm8k)",
     },
 }
+DATASETS.update(_datasets_from_shell())            # download_config.sh wins when it is loaded
 
 
 def dataset_dir(name):
@@ -165,6 +196,7 @@ def set_instruct_root(path):
 
 COT_DIR = dataset_dir("zetagpt-grpo-cot_gsm8k")             # chain-of-thought / reasoning
 COT_GSM8K_DIR = COT_DIR                                    # {train,test}_<batch>.json
+COT_COUNTDOWN_DIR = dataset_dir("zetagpt-cot-countdown-game-20k")
 DISTILL_DIR = HH_DIR        # distillation generates from the same prompts stage 8 rolls out on
 CACHE_DIR = os.path.join(ROOT, "cache")                    # cache/tokens/bpe_<256+merges>_<fp>/<mirror>.tokens
 CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints")         # checkpoints/<stage>/checkpoint_*.pt
@@ -612,9 +644,25 @@ COT = dict(
     correct_reward=1.0,         # answer matches the gold answer
     format_reward=0.2,          # <think>...</think><answer>...</answer> present and ordered
     length_penalty=0.0,         # per-token penalty on the response (0 = let it grow freely)
-    # DATA. Any {train,test}_<batch>.json under data/download/zetagpt-grpo-cot_gsm8k/ (built
-    # them from the distributed CSVs); each record carries question / reasoning / answer.
-    data_dir=COT_GSM8K_DIR,          # data/download/zetagpt-grpo-cot_gsm8k
+    # WHICH TASK. "countdown" (the default) is the Countdown number game: reach a target from
+    # a few numbers using + - * / , each number at most once. "gsm8k" is grade-school word
+    # problems. The task decides two things and nothing else -- which directory is read and how
+    # an answer is checked -- so switching it is COT_TASK=gsm8k and no other change.
+    #
+    # COUNTDOWN IS THE DEFAULT because of what stage 9 is for. GRPO can only amplify a
+    # behaviour the policy already samples sometimes: if every rollout in a group scores zero
+    # the advantages are zero and nothing is learned, so the run looks like training and is
+    # not. Countdown has a short, searchable solution path and an answer a small model hits by
+    # chance often enough for the group to have spread; a word problem at this scale usually
+    # does not. It is also the task TinyZero used for the smallest published reproduction.
+    task="countdown",
+    # DATA. Every .json under the task's directory; each countdown record carries a prompt, an
+    # answer of {target, numbers}, and a reference trace the stage never trains on.
+    data_dir=COT_COUNTDOWN_DIR,      # data/download/zetagpt-cot-countdown-game-20k
+    data_dir_gsm8k=COT_GSM8K_DIR,    # used when task="gsm8k"
+    question_field="prompt",         # countdown's field names; gsm8k uses question/answer
+    answer_field="answer",
+    val_frac=0.02,                   # held out from the END when the files carry no split
     train_prefix="train", test_prefix="test",
     records_per_file=1000,      # what cot_to_json.py writes
     limit=0,                    # cap the problem bank (0 = all)

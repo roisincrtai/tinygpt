@@ -34,23 +34,54 @@ from . import grpo, verifier
 STAGE = "cot"
 
 
-def load_problems(log, split, cfg=None):
-    """Every {split}_<batch>.json under config.COT["data_dir"], as [{"question", "answer"}].
+def task_dir(cfg):
+    """The directory this run's task reads. One place decides it, so the loader, the log line
+    and the error message cannot name different directories."""
+    if cfg.get("task", "countdown") == "gsm8k":
+        return cfg.get("data_dir_gsm8k") or cfg["data_dir"]
+    return cfg["data_dir"]
 
-    The CoT stage reads ITS OWN directory and nothing else -- it never opens the instruction data/ or
-    the pretraining corpus. Each record carries question / reasoning / answer; only the
-    question and the answer are used, since the stage never trains on reference reasoning."""
+
+def load_problems(log, split, cfg=None):
+    """The problem bank for `split`, as [{"question", "answer"}].
+
+    TWO LAYOUTS, ONE LOADER. A dataset that ships its own split names its files
+    {train,test}_<batch>.json and those are read directly. One that does not -- the countdown
+    shards are just <name>_00-of-21.json -- is read whole and CUT AT THE END: the last
+    `val_frac` of the records become the test split and the rest the train split. Cutting at
+    the end rather than sampling keeps the split a pure function of the files, so two runs on
+    one machine, or the same run resumed, hold out exactly the same problems.
+
+    ONLY THE QUESTION AND THE ANSWER ARE READ. Every record here also carries a reference
+    reasoning trace, and the stage never looks at it: that is what makes this R1-Zero-style
+    rather than supervised. The answer is kept in whatever shape the task needs -- a number for
+    gsm8k, {target, numbers} for countdown -- because the verifier, not the loader, decides
+    what being right means.
+
+    The CoT stage reads ITS OWN directory and nothing else: never the instruction data, never
+    the pretraining corpus."""
     cfg = cfg or config.COT
-    d = cfg["data_dir"]
-    files = sorted(glob.glob(os.path.join(d, f"{split}_*.json")))
+    d = task_dir(cfg)
+    qf, af = cfg.get("question_field", "question"), cfg.get("answer_field", "answer")
+    split_files = sorted(glob.glob(os.path.join(d, f"{split}_*.json")))
+    files = split_files or sorted(glob.glob(os.path.join(d, "*.json")))
     if not files:
-        raise SystemExit(f"[cot] no {split}_*.json under {d}")
+        raise SystemExit(
+            f"[cot] no json under {d}\n"
+            f"      Fetch it first:  ./stage1_download_data.sh --only "
+            f"{os.path.basename(os.path.normpath(d))}")
     out = []
     for f in files:
         with open(f, encoding="utf-8") as fh:
-            for r in json.load(fh):
-                if r.get("question") and r.get("answer") is not None:
-                    out.append({"question": r["question"], "answer": str(r["answer"])})
+            payload = json.load(fh)
+        for r in (payload if isinstance(payload, list) else payload.get("data", [])):
+            q = r.get(qf) if r.get(qf) is not None else r.get("question")
+            a = r.get(af) if r.get(af) is not None else r.get("answer")
+            if q and a is not None:
+                out.append({"question": q, "answer": a if isinstance(a, dict) else str(a)})
+    if not split_files:                       # no split of its own: cut the tail off
+        n_val = max(1, int(len(out) * float(cfg.get("val_frac", 0.02))))
+        out = out[:-n_val] if split == cfg.get("train_prefix", "train") else out[-n_val:]
     limit = cfg.get("limit", 0)
     if limit:
         out = out[:limit]

@@ -40,7 +40,7 @@ PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
 SFT_STEPS SFT_LR SFT_FLAGS \
 REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
-COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
+COT_TASK COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
@@ -393,6 +393,17 @@ RLHF_PROMPTS_PER_FILE="${RLHF_PROMPTS_PER_FILE:-1000}"
 # =========================================================================== #
 # stage 9 -- chain of thought by GRPO (the aha moment)
 # =========================================================================== #
+# WHICH TASK STAGE 9 LEARNS. "countdown" (default) is the Countdown number game: reach a
+# target from a few numbers with + - * /, each number used at most once. "gsm8k" is the
+# grade-school word problems. The task decides the directory read and how an answer is checked,
+# and nothing else -- there is one GRPO loop and one reward shape.
+#
+# COUNTDOWN IS THE DEFAULT because GRPO can only amplify what the policy already samples
+# sometimes. If every completion in a group scores zero the advantages are zero and nothing is
+# learned, while the run still looks like training. Countdown has a short searchable solution
+# and an answer a small model reaches by chance often enough for a group to have spread; it is
+# also the task the smallest published R1-Zero reproductions used.
+COT_TASK="${COT_TASK:-countdown}"   # countdown | gsm8k
 COT_STEPS="${COT_STEPS:-1400}"
 COT_LR="${COT_LR:-1e-6}"
 COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which checkpoint it
@@ -581,6 +592,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$REWARD_LR" ]      && REWARD_FLAGS="$REWARD_FLAGS --reward_lr $REWARD_LR"
 [ -n "$RLHF_STEPS" ]     && RLHF_FLAGS="$RLHF_FLAGS --rlhf_steps $RLHF_STEPS"
 [ -n "$RLHF_LR" ]        && RLHF_FLAGS="$RLHF_FLAGS --rlhf_lr $RLHF_LR"
+[ -n "$COT_TASK" ]       && COT_FLAGS="$COT_FLAGS --set COT.task=$COT_TASK"
 [ -n "$COT_STEPS" ]      && COT_FLAGS="$COT_FLAGS --cot_steps $COT_STEPS"
 [ -n "$COT_LR" ]         && COT_FLAGS="$COT_FLAGS --cot_lr $COT_LR"
 [ -n "$COT_INIT" ]       && COT_FLAGS="$COT_FLAGS --cot_init $COT_INIT"

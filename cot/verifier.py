@@ -130,7 +130,7 @@ def score(text, gold, cfg):
     Returns the reward together with every quantity the dynamics figure tracks, so the caller
     never re-parses the text."""
     pred = extract_answer(text)
-    correct = bool(equal(pred, gold))
+    correct = is_correct(text, gold, cfg.get("task", "gsm8k"))
     formatted = is_formatted(text)
     think = think_text(text)
     n_words = len((text or "").split())
@@ -144,3 +144,64 @@ def score(text, gold, cfg):
             "resp_words": float(n_words),
             "aha": float(reflection_hits(think) > 0),
             "pred": pred}
+
+
+# --------------------------------------------------------------------------- #
+# COUNTDOWN: reach a target from a handful of numbers
+# --------------------------------------------------------------------------- #
+# A different task needs a different notion of "right", and only that. The prompt template,
+# the think/answer format, the reflection markers and the reward arithmetic are all shared:
+# what changes is how a completion's answer is checked, so that is the only thing added here.
+#
+# The gold is {"target": t, "numbers": [...]}, and an answer is an EQUATION. It is correct when
+#   1. it evaluates to the target, and
+#   2. it uses only the given numbers, each at most once.
+# Both conditions matter. Without the second, "38" scores full marks on a problem whose target
+# happens to be one of the numbers, and the policy learns to copy rather than to search.
+
+_ALLOWED = set("0123456789+-*/(). ")
+
+
+def _numbers_used(expr):
+    """Every integer literal in an expression, as a list -- so repeats can be counted."""
+    return [int(n) for n in re.findall(r"\d+", expr)]
+
+
+def countdown_correct(text, gold):
+    """Does this completion's answer reach the target from the given numbers?
+
+    The expression is evaluated with eval() over a string that has been checked to contain
+    NOTHING but digits, the four operators, brackets, a decimal point and spaces. That check is
+    the safety argument: a policy emits arbitrary text, and an expression it wrote is not
+    something to hand to a general-purpose evaluator on trust."""
+    if not isinstance(gold, dict):
+        return False
+    expr = (extract_answer(text) or "").strip()
+    if not expr or set(expr) - _ALLOWED:
+        return False
+    expr = expr.split("=")[-1].strip() if expr.count("=") == 1 else expr
+    if not expr or set(expr) - _ALLOWED:
+        return False
+    used, have = _numbers_used(expr), list(gold.get("numbers", []))
+    if not used:
+        return False
+    pool = list(have)
+    for n in used:                                   # each given number at most once
+        if n not in pool:
+            return False
+        pool.remove(n)
+    try:
+        value = eval(expr, {"__builtins__": {}}, {})   # noqa: S307 -- charset checked above
+    except (SyntaxError, ZeroDivisionError, TypeError, NameError, ValueError):
+        return False
+    try:
+        return abs(float(value) - float(gold["target"])) < 1e-6
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
+def is_correct(text, gold, task="gsm8k"):
+    """Right or not, for whichever task this run is scoring."""
+    if task == "countdown":
+        return countdown_correct(text, gold)
+    return bool(equal(extract_answer(text), gold))
