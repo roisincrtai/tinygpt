@@ -46,6 +46,16 @@ through — `zetagpt-m` is `[1024, 2048, 4096, 8192, 16384]` — and each window
 step budget, shortest first. The batch is sized at the longest window and scales up as the
 window shortens, so tokens per step stay constant across the whole run.
 
+### Parallelism
+
+With more than one GPU the model's **layers** are split across them automatically: 2 GPUs and
+16 blocks puts blocks 0–7 on `cuda:0` and 8–15 on `cuda:1`, the hidden states crossing at the
+boundary. The tied embedding and vocabulary projection share the last device. This buys
+**memory, not speed** — the devices take turns, so two cards give roughly the memory of two and
+the throughput of one. It is what makes a model or a context window run that does not fit one
+card at all. Turn it off with `TENSOR_PARALLEL=0` or `--no-tensor_parallel` whenever the run
+already fits one card, where a single device is faster.
+
 ### Customized configuration scheme
 
 A scheme is one entry in `default_config.SCHEMES`; `context_window` is the list of windows it

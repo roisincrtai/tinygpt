@@ -10,3 +10,5 @@ second exists only as the ablation control for measuring what the recurrence con
 from .zetagpt import ZetaGPT, Block, CausalSelfAttention
 from .ssm import CausalSSM, blocked_scan
 from .pe import RotaryPositionalEmbedding
+
+from . import parallel            # noqa: F401  layer sharding across GPUs

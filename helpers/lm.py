@@ -61,7 +61,12 @@ def lm_loss(model, ids, attn, rmask, chunk=0):
     all at once. The result is identical -- the same positions, the same targets, the same
     normalisation -- but the peak memory of the loss becomes 3 x chunk x vocab rather than
     3 x T x vocab, which at T = 32,768 is the difference between 0.6 GB and 18.4 GB."""
-    tgt, rm = ids[:, 1:], rmask[:, 1:]
+    # THE TARGETS FOLLOW THE LOGITS. When the model's layers are split across GPUs the output
+    # comes back on the LAST device while the batch was built on the first, and gather() cannot
+    # index a tensor on one device with a tensor on another. Unsharded the two already agree
+    # and both moves are no-ops. See model/parallel.py.
+    home = model.head.weight.device
+    tgt, rm = ids[:, 1:].to(home), rmask[:, 1:].to(home)
     denom = rm.sum(-1).clamp(min=1).float()
     if not chunk:
         logits = model(input_ids=ids, attention_mask=attn).logits
@@ -81,7 +86,7 @@ def lm_loss(model, ids, attn, rmask, chunk=0):
     B, L, D = h.shape
     hf, tf, rf = h.reshape(B * L, D), tgt.reshape(B * L), rm.reshape(B * L)
     parts = []
-    correct = torch.zeros((), device=ids.device, dtype=torch.float32)
+    correct = torch.zeros((), device=h.device, dtype=torch.float32)
     for a in range(0, B * L, chunk):
         b = min(a + chunk, B * L)
         lp, hit = checkpoint(_chunk_logprob, model.head, hf[a:b], tf[a:b],

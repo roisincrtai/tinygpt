@@ -297,6 +297,20 @@ class ZetaGPT(nn.Module):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
     def _trunk(self, input_ids, attention_mask, mask_positions, mask_gate, mask_vec, sub_ids=None):
+        # THE INPUT FOLLOWS THE EMBEDDING, not the other way round. A caller hands ids on
+        # whatever device it built them on; the lookup has to happen where the (tied) embedding
+        # matrix is. Unsharded that is a no-op, since the two already agree.
+        home = self.tok.weight.device
+        if input_ids is not None and input_ids.device != home:
+            input_ids = input_ids.to(home)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(home)
+            if mask_positions is not None:
+                mask_positions = mask_positions.to(home)
+            if mask_gate is not None:
+                mask_gate = mask_gate.to(home)
+            if sub_ids is not None:
+                sub_ids = sub_ids.to(home)
         emb = self.tok(input_ids)
         tgt = self.tok(sub_ids) if sub_ids is not None else (
             self.mask_embed if mask_vec is None else mask_vec)
@@ -306,9 +320,23 @@ class ZetaGPT(nn.Module):
             g = mask_gate.unsqueeze(-1).to(emb.dtype)        # (B,T,1) in [0,1]
             emb = emb + g * (tgt.to(emb.dtype) - emb)        # g=1 -> substitute/MASK
         x = self.drop(emb)                                   # no position added here: see Block
-        for blk in self.blocks:
-            x = blk(x, attention_mask)
-        return self.lnf(x)
+        # WHEN THE BLOCKS ARE SPREAD ACROSS DEVICES, the hidden states follow them. One
+        # (B, T, n_embd) copy per boundary and nothing else changes: the blocks do not know
+        # where they are, the arithmetic is identical, and an unsharded model takes the same
+        # path with `devs` empty and every comparison false. See model/parallel.py.
+        devs = getattr(self, "_shard_devices", None)
+        if not devs:
+            for blk in self.blocks:
+                x = blk(x, attention_mask)
+            return self.lnf(x)
+        at, mask = None, attention_mask
+        for blk, i in zip(self.blocks, self._shard_where):
+            if devs[i] != at:
+                at = devs[i]
+                x = x.to(at)
+                mask = attention_mask.to(at) if attention_mask is not None else None
+            x = blk(x, mask)
+        return self.lnf(x.to(devs[-1]))
 
     def hidden(self, input_ids=None, attention_mask=None, mask_positions=None, mask_gate=None,
                mask_vec=None, sub_ids=None, **kw):

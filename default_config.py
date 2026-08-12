@@ -388,6 +388,11 @@ TRAIN = dict(
     micro_batch=0,              # gradient-accumulation micro-batch; 0 = OFF, the
                                 # default. SCHEME_MICRO_BATCH says what each scheme
                                 # needs at its longest window, applied only on request
+    # LAYERS ACROSS EVERY VISIBLE GPU, on by default. It is a MEMORY measure, not a speed one:
+    # the devices take turns, so two cards give the memory of two and the speed of about one.
+    # Worth it when a model or a window does not fit one card at all; turn it off with
+    # --no-tensor_parallel, or TENSOR_PARALLEL=0, when the run already fits.
+    tensor_parallel=True,
     loss_chunk=8192,            # TOKENS per slice of the vocabulary projection. 3 x 8192 x
                                 # 50,259 x 4 = 4.6 GiB, which is worth spending: a slice small
                                 # enough to be free is also small enough that the step becomes
@@ -743,6 +748,7 @@ SHELL_DEFAULTS = {
     "SEED": TRAIN["seed"],
     "BATCH": TRAIN["batch"],
     "MICRO_BATCH": TRAIN["micro_batch"],
+    "TENSOR_PARALLEL": "1" if TRAIN["tensor_parallel"] else "0",
     "DATASET": TRAIN["dataset"],
     "DATA_LIMIT": TRAIN["limit"],
     "VAL_FRAC": TRAIN["val_frac"],

@@ -30,7 +30,7 @@ from . import dataset_helpers as dsets
 from . import utils as helpers
 from .utils import progress, tag
 from chat import generate, decode
-from model import ZetaGPT
+from model import ZetaGPT, parallel
 from . import visualization as viz
 
 from tokenizer import run as train_bpe    # stage 3's tokenizer builder (also draws bpe_dynamics)
@@ -102,6 +102,13 @@ def build_model(tok, device, model_cfg=None, args=None):
     print(f"[model {helpers.model_name(m.cfg)}] trainable params: {trainable/1e6:.2f}M / "
           f"{total/1e6:.2f}M total ({trainable:,} / {total:,})  positions: {pos}", flush=True)
     print(f"[model zetagpt] cfg={m.cfg}", flush=True)
+    # LAYERS ACROSS THE GPUs THAT ARE THERE. Only when there is more than one, only when the
+    # run did not say no, and only for CUDA -- there is no second MPS device and no second CPU.
+    # A single-GPU machine takes the same path and nothing moves.
+    if args is None or getattr(args, "tensor_parallel", True):
+        devs = parallel.devices()
+        if len(devs) > 1 and str(device).startswith("cuda"):
+            parallel.shard(m, devs, log=lambda s: print(s, flush=True))
     return m
 
 
@@ -136,6 +143,15 @@ def parse_args(argv=None):
                     help="project the whole sequence at once")
     ap.add_argument("--loss_chunk", type=int, default=t["loss_chunk"],
                     help="positions per slice of the vocabulary projection")
+    # LAYERS ACROSS THE GPUs, ON BY DEFAULT. With more than one CUDA device the blocks are
+    # divided into contiguous runs, one per device, so a model or a context window that does
+    # not fit one card fits several. It buys MEMORY, not speed -- one device is busy at a time
+    # -- so --no-tensor_parallel is the right choice whenever the run already fits one card.
+    ap.add_argument("--tensor_parallel", dest="tensor_parallel", action="store_true",
+                    default=t["tensor_parallel"],
+                    help="split the model's layers across every visible GPU (default)")
+    ap.add_argument("--no-tensor_parallel", "--no_tensor_parallel", dest="tensor_parallel",
+                    action="store_false", help="keep the whole model on one GPU")
     ap.add_argument("--max_len", type=int, default=t["max_len"],
                     help="truncation of an encoded example; 0 = the model's context window")
     ap.add_argument("--model_scheme", default=config.PRETRAIN["model_scheme"],

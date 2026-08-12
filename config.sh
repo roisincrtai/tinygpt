@@ -30,7 +30,7 @@
 ZETAGPT_VARS="PY GPU SEED \
 DATASET PRETRAIN_DIR INSTRUCT_DIR SFT_DIR DATA_LIMIT VAL_FRAC \
 MODEL_SCHEME CONTEXT_WINDOW PE MAX_LEN \
-BATCH MICRO_BATCH CHUNKED_LOSS LOSS_CHUNK LR_SCHEDULE LR_MIN_FACTOR BETA \
+BATCH MICRO_BATCH CHUNKED_LOSS LOSS_CHUNK TENSOR_PARALLEL LR_SCHEDULE LR_MIN_FACTOR BETA \
 PLOT_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
 EVAL_EVERY EVAL_PAIRS EB_EVERY EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID \
 EXTRA_SET COMMON_FLAGS \
@@ -241,6 +241,22 @@ MICRO_BATCH="${MICRO_BATCH:-0}"     # sequences per forward pass; 0 = OFF, the w
 # against a run made before this existed.
 CHUNKED_LOSS="${CHUNKED_LOSS:-1}"   # 1 = slice the projection (default), 0 = whole sequence
 LOSS_CHUNK="${LOSS_CHUNK:-8192}"    # TOKENS per slice (4.6 GiB at this size)
+
+# PARALLELISM: THE MODEL'S LAYERS ACROSS EVERY VISIBLE GPU, on by default.
+#
+# With 2 GPUs and 16 blocks, blocks 0-7 go on cuda:0 and blocks 8-15 on cuda:1; the hidden
+# states are copied across at the boundary, one (batch, tokens, d_model) tensor per crossing.
+# The embedding and the vocabulary projection are ONE TIED TENSOR and share the last device.
+#
+# THIS BUYS MEMORY, NOT SPEED. The devices take turns -- cuda:1 idles while cuda:0 runs its
+# half and then the reverse -- so two cards give roughly the memory of two and the throughput
+# of one. It is the right thing when a model or a context window does not fit ONE card at all
+# (for zetagpt-l that is every window past 4,096; see doc/vram_usage.md), and the wrong thing
+# when the run already fits, where one card is simply faster.
+#
+# Set 0, or pass --no-tensor_parallel, to keep the whole model on one GPU. On a single-GPU
+# machine the setting makes no difference: there is nothing to split.
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"   # 1 = split layers across GPUs (default), 0 = one GPU
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
 BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and evaluation
@@ -474,6 +490,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$BATCH" ]          && COMMON_FLAGS="$COMMON_FLAGS --batch $BATCH"
 [ -n "$MICRO_BATCH" ]    && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
 [ "$CHUNKED_LOSS" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no_chunked_loss"
+[ "$TENSOR_PARALLEL" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no-tensor_parallel"
 [ -n "$LOSS_CHUNK" ]     && COMMON_FLAGS="$COMMON_FLAGS --loss_chunk $LOSS_CHUNK"
 [ -n "$LR_SCHEDULE" ]    && COMMON_FLAGS="$COMMON_FLAGS --lr_schedule $LR_SCHEDULE"
 [ -n "$LR_MIN_FACTOR" ]  && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"
