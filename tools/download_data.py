@@ -9,7 +9,7 @@ repository that downloads.
     python -m tools.download_data --reshard           only split oversized directories
 
     data/download/zetagpt-tiny_pretrain-corpus_wikitext103/         Tiny's corpus
-    data/download/zetagpt-small_pretrain-corpus_fineweb-edu_10GB/   ~10 GB, ~2B tokens
+    data/download/zetagpt-pretrain_fineweb-edu-2BT/   ~10 GB, ~2B tokens
     data/download/zetagpt-rlhf-instruction_following/               instruction-tuning data
     data/download/zetagpt-grpo-cot_gsm8k/                           chain-of-thought problems
 

@@ -1415,7 +1415,7 @@ def corpus_signature(tok, root, files, max_words, text_column):
       PATHS, absolute or relative. A dataset under a scratch filesystem, the same dataset in
       a home directory and the same dataset on a workstation are one corpus. What identifies
       it is its NAME -- the dataset directory,
-      zetagpt-small_pretrain-corpus_fineweb-edu_10GB -- which is the name it was published
+      zetagpt-pretrain_fineweb-edu-2BT -- which is the name it was published
       under and travels with it. Where a given machine chose to put it is that machine's
       business and belongs nowhere near an identity.
 
@@ -1446,7 +1446,7 @@ def corpus_signature(tok, root, files, max_words, text_column):
 def corpus_name(root):
     """THE DATASET NAME, and nothing else: the last component of the corpus directory.
 
-    `zetagpt-small_pretrain-corpus_fineweb-edu_10GB`. That is what the dataset is called, it is
+    `zetagpt-pretrain_fineweb-edu-2BT`. That is what the dataset is called, it is
     the name it was published under, and it is the same on every machine that has a copy. No
     part of the path above it is used: a scratch filesystem, a home directory and a
     workstation may each hold the same corpus, and all three must reach the same cache."""

@@ -37,7 +37,7 @@
 # on. Fetch once, deliberately, then train.
 
 zetagpt-tiny_pretrain-corpus_wikitext103        | roisincrtai/zetagpt-tiny_pretrain-corpus_wikitext103        | 500 | pretraining corpus for ZetaGPT-Tiny: WikiText-103
-zetagpt-small_pretrain-corpus_fineweb-edu_10GB  | roisincrtai/zetagpt-small_pretrain-corpus_fineweb-edu_10GB  |   0 | pretraining corpus for ZetaGPT-S: a ~10 GB (~2B token) subset of FineWeb-Edu
+zetagpt-pretrain_fineweb-edu-2BT                | roisincrtai/zetagpt-pretrain_fineweb-edu-2BT                |   0 | pretraining corpus for ZetaGPT-S: the ~2B-token (~10 GB) FineWeb-Edu subset
 zetagpt-pretrain_fineweb-edu-10BT               | roisincrtai/zetagpt-pretrain_fineweb-edu-10BT               |   0 | pretraining corpus for ZetaGPT-M and ZetaGPT-L: the 10B-token FineWeb-Edu sample
 zetagpt-rlhf-instruction_following              | roisincrtai/zetagpt-rlhf-instruction_following              |   0 | instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout prompts, shared by stages 6, 7 and 10
 zetagpt-cot-countdown-game-20k                  | roisincrtai/zetagpt-cot-countdown-game-20k                  |   0 | stage 9 GRPO: 20k Countdown arithmetic problems, each with a target, its numbers and a reference trace
