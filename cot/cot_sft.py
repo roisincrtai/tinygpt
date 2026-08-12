@@ -95,7 +95,11 @@ def build_corpus(problems, cfg, log=print, task=None, tok=None, max_len=0):
     verify = bool(cfg.get("sft_verify", True))
     corpus, no_demo, wrong = [], 0, 0
     for p in problems:
-        target = verifier.demonstration(p.get("trace", ""))
+        # THE ANSWER IS OFFERED AS A FALLBACK. A countdown trace states its own answer in a
+        # \boxed{} and p["answer"] is a {target, numbers} dict that is not one; gsm8k's prose
+        # states no answer at all and p["answer"] is the number. demonstration() prefers what
+        # the trace says and falls back to this, so one call serves both.
+        target = verifier.demonstration(p.get("trace", ""), p.get("answer"))
         if not target:
             no_demo += 1
             continue

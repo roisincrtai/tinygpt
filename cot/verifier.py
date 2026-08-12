@@ -118,26 +118,36 @@ def prompt(question, cfg=None):
     return PROMPT_TEMPLATE.format(system=sys_text, question=q)
 
 
-def demonstration(trace):
-    r"""A dataset's reference trace as ONE demonstration in this pipeline's format, or None.
+def demonstration(trace, answer=None):
+    r"""A dataset's reference trace CONVERTED into this pipeline's format, or None.
 
         <think>
         ...the reasoning the dataset wrote...
         </think>
         <answer> 38*(48-47) </answer>
 
-    THE SUPERVISED TARGET AND THE REWARDED FORMAT MUST BE THE SAME STRING. The countdown traces
-    open with <think>, close it, then write a prose summary ending in \boxed{expr} -- a
-    convention this pipeline does not pay for. Fine-tuning on them verbatim would teach a
-    container the reward then ignores, which is the same class of mismatch that made every
-    reward zero before: the prompt asked for one thing, the reward paid for another, and the
-    model obeyed the prompt.
+    THE CONVERSION IS THE POINT. No dataset ships this format, and each ships a different one;
+    requiring the tags to be there already would mean only a corpus written for this pipeline
+    could ever train it. So the two halves are LOCATED wherever the dataset happens to keep
+    them and re-emitted in one shape.
 
-    WHAT IS KEPT AND WHAT IS DROPPED. The think span is kept as written. The \boxed{} content
-    becomes the answer span. The prose BETWEEN </think> and \boxed{} is dropped: it restates the
-    derivation for a reader, and keeping it would put unrewarded text where the format says the
-    answer goes. Returns None when either piece is missing -- a trace with no reasoning or no
-    extractable answer is not a demonstration of the format and is better refused than patched
+        countdown   <think>...</think>, then prose, then \boxed{expr}
+                    -> the think span; the boxed content
+        gsm8k       bare prose reasoning, with the answer in a SEPARATE FIELD
+                    -> the whole trace; the `answer` argument
+
+    THE REASONING is the <think> span when the trace has one, and otherwise the whole trace
+    with any trailing answer line (\boxed{...} or "#### x") cut off -- that line states the
+    answer, and the answer has its own tags, so leaving it in the reasoning would teach the
+    model to say it twice and would put an answer where the reward is not looking.
+
+    THE ANSWER is the last \boxed{}, else a "#### x" line, else the `answer` argument. The
+    argument comes LAST rather than first because a trace that states its own answer is stating
+    the one its reasoning actually arrives at; a separate field can disagree with the prose,
+    and where they differ the prose is what the model is being shown.
+
+    Returns None when either half is missing -- a record with no reasoning, or with no answer
+    from any source, is not a demonstration of the format and is better refused than patched
     into one.
 
     THE ANSWER IS WRITTEN IN PLAIN ARITHMETIC, not in the display maths the traces use. These
@@ -146,16 +156,30 @@ def demonstration(trace):
     the model is being taught to produce, and there is no reason to teach it a notation that
     has to be translated before it can be checked. The reasoning keeps whatever notation it
     was written in -- nothing parses that."""
-    spans = _THINK_RE.findall(trace or "")
-    if not spans:
+    text = (trace or "").strip()
+    spans = _THINK_RE.findall(text)
+    if spans:
+        think = spans[0].strip()
+    else:
+        # No tags: the whole trace is the reasoning, minus any line that only states the answer.
+        think = text
+        cut = think.rfind(_BOXED)
+        if cut >= 0:
+            think = think[:cut]
+        think = _HASH_RE.sub("", think).strip()
+        # a lone "$$" or "### Final Answer" left dangling by the cut reads as truncation
+        think = re.sub(r"(?:\s*(?:\$\$|#+\s*[Ff]inal\s+\w+:?)\s*)+$", "", think).strip()
+    found = _boxed(text)
+    if not found:
+        hashes = _HASH_RE.findall(text)
+        found = hashes[-1].strip() if hashes else None
+    if not found and answer is not None and not isinstance(answer, (dict, list)):
+        found = str(answer).strip()
+    if not think or not found:
         return None
-    think = spans[0].strip()
-    answer = _boxed(trace)
-    if not think or not answer:
-        return None
-    plain = delatex(answer)
+    plain = delatex(found)
     return (f"{THINK_OPEN}\n{think}\n{THINK_CLOSE}\n"
-            f"{ANSWER_OPEN} {(plain or answer).strip()} {ANSWER_CLOSE}")
+            f"{ANSWER_OPEN} {(plain or found).strip()} {ANSWER_CLOSE}")
 
 
 def _clean_number(s):

@@ -50,6 +50,16 @@ def task_dir(cfg):
     return cfg["data_dir"]
 
 
+def trace_field(cfg):
+    """Which record field holds the reference reasoning, for the task this run is on.
+
+    Beside task_dir() and for the same reason: one place decides, so the loader and the error
+    message cannot name different fields."""
+    if cfg.get("task", "countdown") == "gsm8k":
+        return cfg.get("trace_field_gsm8k") or cfg.get("trace_field", "response")
+    return cfg.get("trace_field", "response")
+
+
 def load_problems(log, split, cfg=None):
     """The problem bank for `split`, as [{"question", "answer"}].
 
@@ -73,7 +83,7 @@ def load_problems(log, split, cfg=None):
     cfg = cfg or config.COT
     d = task_dir(cfg)
     qf, af = cfg.get("question_field", "question"), cfg.get("answer_field", "answer")
-    tf = cfg.get("trace_field", "response")
+    tf = trace_field(cfg)
     split_files = sorted(glob.glob(os.path.join(d, f"{split}_*.json")))
     files = split_files or sorted(glob.glob(os.path.join(d, "*.json")))
     if not files:
@@ -158,7 +168,8 @@ def run(ctx):
             raise SystemExit(
                 "[cot] no usable demonstrations: every reference trace was dropped.\n"
                 "      The traces need a <think>...</think> span and an extractable answer;\n"
-                "      set COT.trace_field to the field that holds them, or --no-cot_sft to\n"
+                f"      set COT.trace_field to the field that holds them (this run read "
+                f"{trace_field(cfg)!r}),\n      or --no-cot_sft to\n"
                 "      run GRPO alone.")
         cot_sft.run(ctx, common.load_stage_model(ctx, init, train_mode=True), demos)
         init = cot_sft.STAGE

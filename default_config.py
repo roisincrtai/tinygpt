@@ -774,10 +774,13 @@ COT = dict(
     data_dir_gsm8k=COT_GSM8K_DIR,    # used when task="gsm8k"
     question_field="prompt",         # countdown's field names; gsm8k uses question/answer
     answer_field="answer",
-    # THE REFERENCE TRACE, read by the SFT only. Countdown's is a "response" holding a
-    # <think>...</think> span and a closing \boxed{}; gsm8k's worked solution is its "answer",
-    # so the field is named rather than assumed.
+    # THE REFERENCE TRACE, read by the SFT only, and named PER TASK because no two datasets
+    # agree. Countdown keeps a "response" holding a <think>...</think> span and a closing
+    # \boxed{}; gsm8k keeps bare prose in "reasoning" with the answer in a separate field.
+    # verifier.demonstration() converts either into <think>...</think> <answer>...</answer>,
+    # so the only thing that has to be configured is WHERE the trace is.
     trace_field="response",
+    trace_field_gsm8k="reasoning",
     val_frac=0.02,                   # held out from the END when the files carry no split
     train_prefix="train", test_prefix="test",
     records_per_file=1000,      # what cot_to_json.py writes
