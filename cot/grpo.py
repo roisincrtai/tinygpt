@@ -247,12 +247,22 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         best = int(torch.argmax(adv_seq).item())
         b = scored[best]
         n_kept = int(rmask[best].sum().item())
+        think = verifier.think_text(texts[best])
         log(f"\n----- {tag('cot')} step {step}: best of {len(scored)} completions "
             f"(advantage {adv_seq[best].item():+.3f}, reward {rewards[best].item():+.3f}, "
             f"correct {b['correct']:.0f}, {n_kept} generated tokens) -----")
         log(f"  PROMPT   {' '.join(prompts[best].split())[-400:]}")
-        log(f"  RESPONSE {' '.join(texts[best].split())[:1200]}")
-        log(f"  ANSWER   {b['pred']!r}   GOLD {golds[best]!r}")
+        # THE THINK BLOCK ON ITS OWN LINE, because it is the thing this stage is for: whether a
+        # policy learns to reason before answering is visible here and nowhere in the averages.
+        # When there is no think block the completion was malformed, and the raw text is shown
+        # instead -- a blank line would hide exactly the failure worth seeing.
+        if verifier.has_think_tags(texts[best]) and think.strip():
+            log(f"  THINK    {' '.join(think.split())[:1200]}")
+        else:
+            log(f"  THINK    (no {verifier.THINK_OPEN} block) "
+                f"RAW {' '.join(texts[best].split())[:1200]}")
+        log(f"  ANSWER   {b['pred']!r}")
+        log(f"  GOLD     {golds[best]!r}")
         log("-" * 78)
 
         def mean(k):

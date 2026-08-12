@@ -95,6 +95,14 @@ def equal(pred, gold, tol=1e-4):
     return pred.strip().lower() == gold.strip().lower()
 
 
+def has_think_tags(text):
+    """Were the think tags actually present? think_text() falls back to everything before the
+    answer, which is right for measuring how much was written and wrong for showing a reader
+    what the model produced -- a fallback printed under a THINK heading claims a structure that
+    was not there."""
+    return bool(_THINK_RE.findall(text or ""))
+
+
 def think_text(text):
     """What the model wrote as its reasoning: the think span if the tags are present, else
     everything before the answer (an unformatted response still reasons, and its length is
