@@ -198,6 +198,10 @@ def parse_args(argv=None):
                     help="cosine floor: the minimum lr is the stage lr divided by this")
     ap.add_argument("--checkpoint_every_steps", type=int, default=t["checkpoint_every_steps"])
     ap.add_argument("--plot_every_steps", type=int, default=t["plot_every_steps"])
+    ap.add_argument("--print_samples_every_steps", type=int,
+                    default=t["print_samples_every_steps"],
+                    help=f"print {N_PREVIEW} generation examples every N steps, in every stage "
+                         f"that generates (0 = off; default {t['print_samples_every_steps']})")
     ap.add_argument("--pe", default=config.MODEL["pe"], choices=["ssm", "rope"],
                     help="how position enters: 'ssm' (the state space module, no positional "
                          "encoding) or 'rope' (ablation control: no module, rotary attention)")

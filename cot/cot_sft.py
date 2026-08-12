@@ -35,7 +35,41 @@ from . import verifier
 STAGE = "cot_sft"
 
 
-def build_corpus(problems, cfg, log=print, task=None):
+def _length_rows(corpus, tok, max_len, sample=500, seed=0):
+    """Rows reporting how the demonstrations sit against the context window.
+
+    WHY THIS IS REPORTED AT ALL. An example longer than the window is LEFT-truncated by the
+    encoder (dataset_helpers.Encoder), which drops from the FRONT: the answer survives and the
+    beginning of the prompt does not. That is the right direction -- a demonstration cut at the
+    end would teach the model to open <answer> and never close it -- but a corpus where most
+    examples lose their prompt is training on something other than what it looks like, and that
+    should be a number on screen rather than a surprise.
+
+    The tokens-per-word ratio is MEASURED on a sample and the count extrapolated from it:
+    tokenising twenty thousand traces to print one row costs minutes, and this is a report."""
+    import random as _random
+    if not corpus or tok is None:
+        return []
+    words = [len(d["prompt"].split()) + len(d["chosen"].split()) for d in corpus]
+    smp = corpus if len(corpus) <= sample else _random.Random(seed).sample(corpus, sample)
+    t = w = 0
+    for d in smp:
+        text = d["prompt"] + " " + d["chosen"]
+        t += len(tok(text, add_special_tokens=False)["input_ids"])
+        w += max(1, len(text.split()))
+    per = t / max(1, w)
+    over = sum(1 for n in words if n * per > max_len)
+    words.sort()
+    return [("mean / p90 / max length (words)",
+             f"{sum(words)/len(words):.0f} / {words[int(0.9 * (len(words)-1))]:,} / "
+             f"{words[-1]:,}"),
+            ("tokens per word (measured on a sample)", f"{per:.2f}"),
+            (f"longer than the {max_len:,}-token window (estimated)",
+             f"{helpers.count(over)}  ({100 * over / len(words):.1f}%, left-truncated: the "
+             f"answer is kept, the start of the prompt is not)")]
+
+
+def build_corpus(problems, cfg, log=print, task=None, tok=None, max_len=0):
     """The problems' reference traces as {prompt, chosen, rejected} demonstrations.
 
     Each record becomes the SAME prompt GRPO will roll out on -- verifier.prompt(), system
@@ -79,6 +113,7 @@ def build_corpus(problems, cfg, log=print, task=None):
          helpers.count(wrong) if verify else "(not checked: sft_verify=False)"),
         ("demonstrations", helpers.count(len(corpus))),
         ("mean think length (words)", f"{n_think / max(1, len(corpus)):.1f}"),
+        *(_length_rows(corpus, tok, max_len) if max_len else []),
         ("trained on", "the rewritten trace, conditioned on the rollout prompt"),
     ], out=log)
     return corpus

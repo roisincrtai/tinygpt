@@ -282,8 +282,10 @@ def run(model, ref, enc, train_pairs, ev_pairs, tok, ckdir, args, log, monitor, 
             save_hist(ckdir, STAGE, hist)
         if args.plot_every_steps > 0 and (step + 1) % args.plot_every_steps == 0:
             monitor(STAGE, hist, step + 1)               # live dynamics (PDF)
-            if preview:
-                preview(model, STAGE, step + 1)          # 20 readable generation examples
+        # the generation examples keep their own cadence, --print_samples_every_steps
+        every = getattr(args, "print_samples_every_steps", args.plot_every_steps)
+        if preview and every > 0 and (step + 1) % every == 0:
+            preview(model, STAGE, step + 1)
 
     model.eval()
     evald = evaluate(model, ref, enc, ev_pairs, args.beta)

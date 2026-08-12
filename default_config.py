@@ -433,6 +433,11 @@ TRAIN = dict(
     lr_min_factor=10.0,         # minimum lr is 1/10 of the stage's lr
     checkpoint_every_steps=200,
     plot_every_steps=200,       # live redraw cadence of outputs/plots/<stage>/ (0 = off)
+    # GENERATION EXAMPLES: 20 of them, every this many steps, for every stage that generates.
+    # SEPARATE FROM THE FIGURE CADENCE, because the two are watched differently -- a figure is
+    # glanced at, twenty generations are READ, and wanting them at a different rhythm from the
+    # redraw is the normal case rather than the exception. 0 = off.
+    print_samples_every_steps=200,
     # State space diagnostics: memory horizon, selectivity, residual write ratio and the rest
     # (model/ssm.py explains each). Collected for ONE step every N, so the cost is a handful
     # of reductions per figure rather than per step. Read by the pretraining stage.

@@ -132,13 +132,28 @@ def run(ctx):
                              if args.cot_sft else "no (--no-cot_sft: the R1-Zero setting)"),
     ], out=log)
 
+    # THE PLAN, PRINTED BEFORE ANY OF IT RUNS. Stage 9 is two training runs, and which of them
+    # a log is showing has to be readable at a glance -- otherwise a run that skipped the first
+    # looks exactly like a run that did it, until the checkpoints are inspected.
+    log("")
+    log("=" * 78)
+    log(f"STAGE 9, SUB-STAGE 1 of 2: CoT SFT   -> {helpers.ckpt_path(ctx['ckdir'], 'cot_sft')}"
+        if args.cot_sft else
+        "STAGE 9, SUB-STAGE 1 of 2: CoT SFT   -> SKIPPED (--no-cot_sft, the R1-Zero setting)")
+    log(f"STAGE 9, SUB-STAGE 2 of 2: CoT GRPO  -> {helpers.ckpt_path(ctx['ckdir'], STAGE)}")
+    log("=" * 78)
+    log("")
+
     # --- 1. the supervised half: the format, from the dataset's own traces --------------- #
     # GRPO STARTS FROM WHATEVER THIS LEAVES BEHIND. When the SFT is on, that is its checkpoint
     # and not args.cot_init: a policy initialised from the base model would have none of the
     # format the SFT just paid for.
     init = args.cot_init
     if args.cot_sft:
-        demos = cot_sft.build_corpus(train, cfg, log, task=cfg.get("task", "countdown"))
+        log(f"--- sub-stage 1/2: CoT SFT ({args.cot_sft_steps:,} steps, lr "
+            f"{args.cot_sft_lr:g}, from {init}) ---")
+        demos = cot_sft.build_corpus(train, cfg, log, task=cfg.get("task", "countdown"),
+                                     tok=ctx["tok"], max_len=args.max_len)
         if not demos:
             raise SystemExit(
                 "[cot] no usable demonstrations: every reference trace was dropped.\n"
@@ -149,6 +164,8 @@ def run(ctx):
         init = cot_sft.STAGE
 
     # --- 2. the reinforcement half: the answer, against the verifier --------------------- #
+    log(f"--- sub-stage 2/2: CoT GRPO ({args.cot_steps:,} steps, lr {args.cot_lr:g}, "
+        f"from {init}) ---")
     log(f"=== CoT by GRPO (policy from {init}, reward = verified answer + format, "
         f"KL to frozen {init}) ===")
     base = common.load_stage_model(ctx, init)

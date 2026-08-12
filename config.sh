@@ -31,7 +31,7 @@ ZETAGPT_VARS="PY GPU SEED \
 DATASET PRETRAIN_DIR INSTRUCT_DIR SFT_DIR DATA_LIMIT VAL_FRAC \
 MODEL_SCHEME CONTEXT_WINDOW PE MAX_LEN \
 BATCH MICRO_BATCH CHUNKED_LOSS LOSS_CHUNK TENSOR_PARALLEL LR_SCHEDULE LR_MIN_FACTOR BETA \
-PLOT_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
+PLOT_EVERY PRINT_SAMPLES_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
 EVAL_EVERY EVAL_PAIRS EB_EVERY EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID \
 EXTRA_SET COMMON_FLAGS \
 BPE_MERGES BPE_MIN_FREQ BPE_FLAGS \
@@ -279,8 +279,12 @@ BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and ev
 # =========================================================================== #
 # 6. reporting -- figures, checkpoints, resume
 # =========================================================================== #
-PLOT_EVERY="${PLOT_EVERY:-200}"     # redraw the stage figure, and print 20 generation
-                                    # examples, every N steps; 0 = off
+PLOT_EVERY="${PLOT_EVERY:-200}"     # redraw the stage figure every N steps; 0 = off
+PRINT_SAMPLES_EVERY="${PRINT_SAMPLES_EVERY:-200}"   # print 20 generation examples every N
+                                    # steps, in every stage that generates -- pretrain, SFT,
+                                    # CoT SFT, RLHF, CoT GRPO, DPO, distillation. Separate from
+                                    # PLOT_EVERY because a figure is glanced at and twenty
+                                    # generations are read. 0 = off.
 CKPT_EVERY="${CKPT_EVERY:-200}"     # checkpoint every N steps
 SSM_STATS_EVERY="${SSM_STATS_EVERY:-200}"   # state space diagnostics -- memory horizon,
                                     # selectivity, residual write ratio -- recorded PER LAYER
@@ -552,6 +556,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$LR_MIN_FACTOR" ]  && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"
 [ -n "$BETA" ]           && COMMON_FLAGS="$COMMON_FLAGS --beta $BETA"
 [ -n "$PLOT_EVERY" ]     && COMMON_FLAGS="$COMMON_FLAGS --plot_every_steps $PLOT_EVERY"
+[ -n "$PRINT_SAMPLES_EVERY" ] && COMMON_FLAGS="$COMMON_FLAGS --print_samples_every_steps $PRINT_SAMPLES_EVERY"
 [ -n "$CKPT_EVERY" ]     && COMMON_FLAGS="$COMMON_FLAGS --checkpoint_every_steps $CKPT_EVERY"
 [ -n "$SSM_STATS_EVERY" ] && COMMON_FLAGS="$COMMON_FLAGS --ssm_stats_every $SSM_STATS_EVERY"
 [ "$NO_RESUME" = "1" ]   && COMMON_FLAGS="$COMMON_FLAGS --no-resume"

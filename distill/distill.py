@@ -194,8 +194,10 @@ def train(student, s_tok, teacher, t_tok, prompts, ckdir, args, log, monitor, pr
             save_hist(ckdir, STAGE, hist)
         if args.plot_every_steps > 0 and (step + 1) % args.plot_every_steps == 0:
             monitor(STAGE, hist, step + 1)
-            if preview:
-                preview(student, STAGE, step + 1)        # 20 readable generation examples
+        # the generation examples keep their own cadence, --print_samples_every_steps
+        every = getattr(args, "print_samples_every_steps", args.plot_every_steps)
+        if preview and every > 0 and (step + 1) % every == 0:
+            preview(student, STAGE, step + 1)
     student.eval()
     evald = {"teacher": cfg["teacher_stage"], "student": cfg["student"],
              "n_prompts": len(prompts)}

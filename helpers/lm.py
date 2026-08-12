@@ -276,11 +276,14 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
             save_hist(ckdir, stage, hist)
         # --plot_every_steps is a TRAINER flag, so it governs every stage that trains, this one
         # included: same flag, same cadence, same figure writer as the preference stages.
-        # The generation preview shares the cadence: 20 readable examples per redraw.
         if args.plot_every_steps > 0 and (step + 1) % args.plot_every_steps == 0:
             monitor(stage, hist, step + 1)
-            if preview:
-                preview(model, stage, step + 1)
+        # THE GENERATION EXAMPLES HAVE THEIR OWN CADENCE, --print_samples_every_steps. They used
+        # to share the figure's, which forced one number to serve two things that are consumed
+        # differently: a figure is glanced at, twenty generations are read line by line.
+        every = getattr(args, "print_samples_every_steps", args.plot_every_steps)
+        if preview and every > 0 and (step + 1) % every == 0:
+            preview(model, stage, step + 1)
     model.eval()
     save_ckpt(ckdir, stage, model, opt, steps, steps, [g])
     save_hist(ckdir, stage, hist)

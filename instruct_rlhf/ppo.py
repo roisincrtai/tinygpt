@@ -250,8 +250,10 @@ def run(policy, ref, rm, tok, train_pairs, ckdir, args, log, monitor, preview=No
             save_hist(ckdir, STAGE, hist)
         if args.plot_every_steps > 0 and (step + 1) % args.plot_every_steps == 0:
             monitor(STAGE, hist, step + 1)
-            if preview:
-                preview(policy, STAGE, step + 1)         # 20 readable generation examples
+        # the generation examples keep their own cadence, --print_samples_every_steps
+        every = getattr(args, "print_samples_every_steps", args.plot_every_steps)
+        if preview and every > 0 and (step + 1) % every == 0:
+            preview(policy, STAGE, step + 1)
 
     policy.eval()
     # end-of-stage evaluation: mean reward-model score of fresh rollouts on held-out prompts
