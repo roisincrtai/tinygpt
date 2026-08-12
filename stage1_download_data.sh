@@ -12,9 +12,10 @@
 #   ./stage1_download_data.sh            fetch what is missing
 #   ./stage1_download_data.sh --list     what would be fetched, and where; fetch nothing
 #   ./stage1_download_data.sh --force    re-fetch even what is present
+#
+# WHAT is fetched is download_config.txt, one line per dataset. Add a line to add a dataset.
 set -euo pipefail
 cd "$(dirname "$0")"
-source ./download_config.sh # the dataset list: add a line there to add a dataset
 source ./config.sh          # which reads config_user.yaml over its defaults
 echo "=== [1/10] download datasets ==========================================="
 exec $PY -m tools.download_data "$@"

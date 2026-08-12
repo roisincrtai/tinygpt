@@ -76,27 +76,42 @@ DOWNLOAD_DIR = os.path.join(DATA_DIR, "download")          # data/download/<data
 #     ./stage1_download_data.sh                     every dataset below
 #     ./stage1_download_data.sh --list              what would be fetched, and where
 #
-# `files_per_subdir` is optional. When set, tools/download_data.py moves the fetched files
-# into part_0000/, part_0001/, ... of at most that many each. A corpus of tens of thousands of
-# files in ONE directory is slow to list on most filesystems and unpleasant to look at; the
-# corpus scanner walks recursively, so the split is invisible to every stage.
-def _datasets_from_shell():
-    """download_config.sh's list, when the environment carries it.
+# THE LIST ITSELF IS download_config.txt, beside this file. `files_per_subdir` there is
+# optional: when set, tools/download_data.py moves the fetched files into part_0000/,
+# part_0001/, ... of at most that many each, because tens of thousands of files in ONE
+# directory are slow to list on most filesystems. The corpus scanner walks recursively, so
+# the split is invisible to every stage.
+DOWNLOAD_CONFIG = os.path.join(ROOT, "download_config.txt")
 
-    ONE PLACE NAMES THE REMOTES. download_config.sh is that place, so a dataset is added by
-    adding a line there and nothing in Python has to change. The dictionary below is the
-    fallback for a run that did not go through the shell -- `python -m tools.download_data`
-    straight from a checkout -- and the two are kept in step because the shell wins whenever
-    it is present."""
-    raw = os.environ.get("ZETAGPT_DATASETS", "")
+
+def _read_datasets(path=None):
+    """download_config.txt, parsed. THE list -- not a copy of one kept in Python.
+
+    A second copy here is the mistake this project keeps paying for: two places holding one
+    fact, one of them updated. So there is no dictionary literal below, and a dataset is added
+    by adding a line to the text file and by doing nothing else.
+
+    Four `|`-separated fields: local name, hugging face repo, files-per-subdir (0 for none),
+    and a description for --list. Blank lines and `#` comments are skipped, so a dataset can be
+    commented out rather than deleted."""
+    path = path or DOWNLOAD_CONFIG
     out = {}
-    for line in raw.splitlines():
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError as e:
+        raise SystemExit(f"[config] cannot read the dataset list at {path} ({e}).\n"
+                         f"         It ships with the repository; restore it from git.") from e
+    for i, line in enumerate(lines, 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         parts = [p.strip() for p in line.split("|")]
         if len(parts) < 2 or not parts[0] or not parts[1]:
-            continue
+            raise SystemExit(
+                f"[config] {path}:{i}: expected "
+                f"<name> | <repo> | <files per subdir> | <description>\n"
+                f"         got: {line}")
         name, repo = parts[0], parts[1]
         per = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         out[name] = {"repo": repo, "what": parts[3] if len(parts) > 3 else name}
@@ -105,32 +120,7 @@ def _datasets_from_shell():
     return out
 
 
-DATASETS = {
-    "zetagpt-tiny_pretrain-corpus_wikitext103": {
-        "repo": "roisincrtai/zetagpt-tiny_pretrain-corpus_wikitext103",
-        "what": "pretraining corpus for ZetaGPT-Tiny: WikiText-103",
-        "files_per_subdir": 500,
-    },
-    "zetagpt-small_pretrain-corpus_fineweb-edu_10GB": {
-        "repo": "roisincrtai/zetagpt-small_pretrain-corpus_fineweb-edu_10GB",
-        "what": "pretraining corpus for ZetaGPT-S: a ~10 GB (~2B token) subset of FineWeb-Edu",
-    },
-    "zetagpt-rlhf-instruction_following": {
-        "repo": "roisincrtai/zetagpt-rlhf-instruction_following",
-        "what": "instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout "
-                "prompts, shared by stages 6, 7 and 10",
-    },
-    "zetagpt-cot-countdown-game-20k": {
-        "repo": "roisincrtai/zetagpt-cot-countdown-game-20k",
-        "what": "stage 9 GRPO: 20k Countdown arithmetic problems, each with a target, its "
-                "numbers and a reference trace",
-    },
-    "zetagpt-grpo-cot_gsm8k": {
-        "repo": "roisincrtai/zetagpt-grpo-cot_gsm8k",
-        "what": "grade-school word problems, the alternative stage 9 task (set COT_TASK=gsm8k)",
-    },
-}
-DATASETS.update(_datasets_from_shell())            # download_config.sh wins when it is loaded
+DATASETS = _read_datasets()
 
 
 def dataset_dir(name):
