@@ -622,7 +622,12 @@ COT = dict(
                                 #   "rlhf" / "dpo" -- continue an aligned policy
                                 # Overridable per run: COT_INIT=sft ./stage9_cot_aha_moment.sh
     group_size=8,               # completions sampled per prompt; the group IS the baseline
-    max_new_tokens=200,         # room to think: a short cap forbids the behaviour we look for
+    # RESPONSE LENGTH: 0 = WHATEVER THE CONTEXT WINDOW HAS LEFT once the prompt is in it,
+    # computed per batch from the longest prompt actually in it. A fixed number cannot be right
+    # across the schemes -- their windows run from 1,024 to 32,768 -- and this stage exists to
+    # see whether a policy learns to think for longer, which a cap decides in advance. Set a
+    # number to pin it, for a controlled comparison or to bound the cost of a rollout.
+    max_new_tokens=0,
     gen_temperature=1.0,        # rollouts must be SAMPLED for the group to have spread
     kl_coef=0.001,              # KL to the frozen reference, added to the loss (k3 estimator)
     clip_eps=0.2,               # GRPO ratio clip

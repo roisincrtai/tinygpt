@@ -412,7 +412,12 @@ COT_GROUP="${COT_GROUP:-8}"         # completions sampled per problem (GRPO's ba
                                     # their mean, so this is the group it averages over)
 COT_KL_COEF="${COT_KL_COEF:-0.001}" # much smaller than RLHF's: reasoning needs room to
                                     # explore before the verifier rewards it
-COT_MAX_NEW_TOKENS="${COT_MAX_NEW_TOKENS:-200}"  # room for a chain of thought, not a reply
+# RESPONSE LENGTH FOR A ROLLOUT. Blank or 0 = whatever the context window has left once the
+# prompt is in it, worked out per batch from the longest prompt in it. The windows of the four
+# schemes run from 1,024 to 32,768, so one number cannot suit them all; and the behaviour this
+# stage looks for is a policy that thinks for LONGER, which a fixed cap settles in advance.
+# Put a number here to pin it, for a controlled comparison or to bound the cost of a rollout.
+COT_MAX_NEW_TOKENS="${COT_MAX_NEW_TOKENS:-0}"   # 0 = fill the window
 COT_FLAGS="${COT_FLAGS:-}"
 
 COT_GEN_TEMP="${COT_GEN_TEMP:-1.0}"         # sampling temperature of each completion

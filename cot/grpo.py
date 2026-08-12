@@ -39,6 +39,11 @@ from . import verifier
 NAME = "CoT (GRPO)"
 STAGE = "cot"
 
+# The floor under a derived response length. A window so full of prompt that nothing is left
+# to answer with would make every completion empty and every reward zero, which looks like a
+# model that cannot reason rather than a budget that left it no room.
+MIN_NEW_TOKENS = 64
+
 
 # --------------------------------------------------------------------------- #
 # rollout
@@ -55,11 +60,16 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len):
     Returns (ids, attn, resp_mask, texts): the batch, the mask of GENERATED tokens, and the
     decoded completions the verifier scores."""
     pad, eos = tok.pad_token_id, getattr(tok, "eos_token_id", None)
+    # NO HARD RESPONSE LENGTH BY DEFAULT. `max_new = 0` means "whatever the context window has
+    # left once the prompt is in it", computed from the LONGEST PROMPT ACTUALLY IN THIS BATCH.
+    # A fixed cap cannot be right across the schemes: their windows run from 1,024 to 32,768,
+    # so 200 tokens is generous for one and a straitjacket for another -- and this stage exists
+    # to see whether a policy learns to think for longer, which a cap decides in advance.
+    pids = [tok(p, add_special_tokens=False)["input_ids"] for p in prompts]
+    if not max_new or max_new <= 0:
+        max_new = max(MIN_NEW_TOKENS, max_len - max(len(p) for p in pids) - 1)
     keep = max(max_len - max_new, 8)
-    pids = []
-    for p in prompts:
-        pid = tok(p, add_special_tokens=False)["input_ids"]
-        pids.append(pid[-keep:] if len(pid) > keep else pid)
+    pids = [pid[-keep:] if len(pid) > keep else pid for pid in pids]
     B = len(pids)
     L0 = max(1, max(len(p) for p in pids))
     T = L0 + max_new
@@ -156,7 +166,8 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
     sched = CosineLR(opt, lr, total, args.lr_min_factor, args.lr_schedule)
     log(f"cot: lr={sched.describe()} steps={total} group={G} "
         f"prompts/step={args.batch} rollouts/step={args.batch * G} "
-        f"max_new={cfg['max_new_tokens']} clip={cfg['clip_eps']} kl_coef={cfg['kl_coef']} "
+        f"max_new={cfg['max_new_tokens'] or 'fills the window'} "
+        f"clip={cfg['clip_eps']} kl_coef={cfg['kl_coef']} "
         f"-> {ckpt_path(ckdir, STAGE)}")
     g = torch.Generator().manual_seed(args.seed * 1000003 + 77)       # rollout sampling
     dg = torch.Generator().manual_seed(args.seed * 1000003 + 78)      # problem order
@@ -225,6 +236,24 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
                 clipped = _masked_mean(((ratio - 1.0).abs() > cfg["clip_eps"]).float(),
                                        rmask).item()
             pg_l, kl_l, ent_l = pg_loss.item(), kl.item(), ent_mean.item()
+
+        # THE BEST COMPLETION OF THIS STEP, printed. Averages say whether the run is moving;
+        # they never say what the model actually wrote. The highest-ADVANTAGE completion is the
+        # one this step pushed hardest toward, so it is the single sample that explains what the
+        # update is teaching -- and if it is right for the wrong reason, this is where that
+        # shows. Advantage rather than reward because the advantage is what multiplies the
+        # gradient: a completion can be the best in a group of poor ones and still be what the
+        # policy is being moved towards.
+        best = int(torch.argmax(adv_seq).item())
+        b = scored[best]
+        n_kept = int(rmask[best].sum().item())
+        log(f"\n----- {tag('cot')} step {step}: best of {len(scored)} completions "
+            f"(advantage {adv_seq[best].item():+.3f}, reward {rewards[best].item():+.3f}, "
+            f"correct {b['correct']:.0f}, {n_kept} generated tokens) -----")
+        log(f"  PROMPT   {' '.join(prompts[best].split())[-400:]}")
+        log(f"  RESPONSE {' '.join(texts[best].split())[:1200]}")
+        log(f"  ANSWER   {b['pred']!r}   GOLD {golds[best]!r}")
+        log("-" * 78)
 
         def mean(k):
             return sum(s[k] for s in scored) / len(scored)
