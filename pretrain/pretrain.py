@@ -36,10 +36,9 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0):
     if not corpus_dir:
         raise SystemExit(
             "[pretrain] no pretraining corpus configured for this scheme.\n"
-            "           zetagpt-tiny and zetagpt-s use the downloaded FineWeb-Edu subset; run\n"
-            "               python -m tools.download_data\n"
-            "           zetagpt-m and zetagpt-l ship with none: set PRETRAIN_DIR in config.sh\n"
-            "           (or --pretrain_dir) to your own corpus.")
+            "           Every scheme has one in default_config.PRETRAIN_CORPUS; fetch it with\n"
+            "               ./stage1_download_data.sh\n"
+            "           or set PRETRAIN_DIR in config.sh (--pretrain_dir) to your own.")
     if not os.path.isdir(corpus_dir):
         raise SystemExit(
             f"[pretrain] corpus directory does not exist: {corpus_dir}\n"

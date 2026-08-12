@@ -128,20 +128,24 @@ def dataset_dir(name):
     return os.path.join(DOWNLOAD_DIR, name)
 
 
-# PRETRAINING CORPUS PER SCHEME. Tiny trains on WikiText-103 and S on the FineWeb-Edu subset:
-# a 61.5M model does not need 2B tokens, and a corpus small enough to tokenise quickly is what
-# makes Tiny useful as the scheme you try a change on first. M and L are left EMPTY on purpose,
-# since neither corpus is the right diet for a 169M or 623M model and defaulting them to one
-# would be worse than refusing. Point them at your own with PRETRAIN_DIR, or --pretrain_dir.
+# PRETRAINING CORPUS PER SCHEME, sized to the model rather than shared. Tiny trains on
+# WikiText-103 (~105M tokens), S on the ~10 GB / ~2B-token FineWeb-Edu subset, and M and L on
+# the 10B-token FineWeb-Edu sample: a 61.5M model does not need 2B tokens, and a 623M model is
+# not fed by them. A corpus small enough to tokenise quickly is also what makes Tiny the scheme
+# to try a change on first.
 #
-# NOTE that Tiny and S therefore differ in corpus as well as depth, so the pair is no longer a
-# controlled depth comparison. Point both at the same corpus if that is what you want to
-# measure.
+# ROUGHLY CHINCHILLA-SHAPED, which is why the ladder is not one corpus. ~20 tokens per
+# parameter puts S at ~2.7B and L at ~12B; the 2B subset and the 10B sample are the two
+# available sizes nearest those, so each scheme trains on the one it can actually consume.
+#
+# NOTE that the schemes therefore differ in CORPUS as well as in depth and width, so no pair of
+# them is a controlled comparison of architecture alone. Point two schemes at one corpus with
+# PRETRAIN_DIR (or --pretrain_dir) when that is what you mean to measure.
 PRETRAIN_CORPUS = {
     "zetagpt-tiny": dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
     "zetagpt-s": dataset_dir("zetagpt-small_pretrain-corpus_fineweb-edu_10GB"),
-    "zetagpt-m": "",
-    "zetagpt-l": "",
+    "zetagpt-m": dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
+    "zetagpt-l": dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
 }
 
 # The instruction dataset's own layout, which is FLAT: alpaca_gpt4/ and rlhf_hh/ sit directly

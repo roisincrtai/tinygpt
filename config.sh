@@ -89,12 +89,23 @@ SEED="${SEED:-0}"                   # random seed; also seeds the data order, so
 DATASET="${DATASET:-hh}"
 
 # PRETRAINING CORPUS -- and, because stage 3 trains the vocabulary on it, THE TOKENIZER'S
-# TRAINING CORPUS as well. The ~10 GB (~2B token) FineWeb-Edu subset, which is what
-# zetagpt-s is sized for. zetagpt-tiny uses the smaller WikiText-103 corpus
-# (data/download/zetagpt-tiny_pretrain-corpus_wikitext103), and zetagpt-m and zetagpt-l ship
-# with NO corpus and must be pointed at one here -- neither shipped corpus is the right diet
-# for a 199M or 480M model. Change this WITH MODEL_SCHEME below; the two go together.
-PRETRAIN_DIR="${PRETRAIN_DIR:-data/download/zetagpt-small_pretrain-corpus_fineweb-edu_10GB}"
+# TRAINING CORPUS as well. Set here it applies to whatever scheme is selected; BLANK it to let
+# each scheme use its own from default_config.PRETRAIN_CORPUS:
+#
+#   zetagpt-tiny   zetagpt-tiny_pretrain-corpus_wikitext103        ~105M tokens
+#   zetagpt-s      zetagpt-small_pretrain-corpus_fineweb-edu_10GB  ~2B tokens (~10 GB)
+#   zetagpt-m      zetagpt-pretrain_fineweb-edu-10BT               ~10B tokens
+#   zetagpt-l      zetagpt-pretrain_fineweb-edu-10BT               ~10B tokens
+#
+# The ladder is not one corpus because ~20 tokens per parameter puts S at ~2.7B and L at ~12B,
+# and a 61.5M model does not need 2B tokens while a 623M model is not fed by them.
+#
+# BLANK BY DEFAULT, AND THAT MATTERS. This shipped holding S's corpus, which is forwarded as
+# --pretrain_dir and therefore WINS over the scheme's own -- so MODEL_SCHEME=zetagpt-m trained
+# the 169M model on S's 2B-token subset, silently, whatever PRETRAIN_CORPUS said. One value
+# pinned across every scheme is the same fault MAX_LEN had. Set a path here only to override
+# the ladder deliberately, for your own corpus.
+PRETRAIN_DIR="${PRETRAIN_DIR:-}"
 
 # INSTRUCTION-TUNING TREE, shared by stages 6, 7, 8 and 10 and by distillation. Its layout is
 # flat: alpaca_gpt4/ and rlhf_hh/ at its root. Moving this root moves everything derived from

@@ -177,7 +177,7 @@ def parse_args(argv=None):
                          "window it is pretrained at, from default_config.SCHEMES")
     ap.add_argument("--pretrain_dir", default="",
                     help="pretraining corpus directory; empty = the scheme's own from "
-                         "default_config.PRETRAIN_CORPUS (set for tiny and -s, unset for -m/-l). "
+                         "default_config.PRETRAIN_CORPUS, which is set for every scheme. "
                          "Read locally: no stage downloads, see tools/download_data.py")
     ap.add_argument("--sft_dir", default="",
                     help="fine-tuning data directory; empty = default_config.SFT_DIR, "

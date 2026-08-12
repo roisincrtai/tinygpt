@@ -55,7 +55,7 @@ def corpora(args):
             if args.only and args.only not in scheme:
                 continue
             if not path:
-                continue                   # -M and -L ship with none; that is not an error
+                continue                   # a scheme with no corpus configured at all
             key = os.path.abspath(path)
             if key in seen:                # two schemes may share a corpus; tokenise it once
                 continue
