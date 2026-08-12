@@ -193,10 +193,19 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
                                            config.PRETRAIN["text_column"])
         new_tag = _sig_tag(new_sig)
 
-        target_dir = os.path.join(os.path.dirname(dirpath), new)
+        # INTO THE CURRENT LAYOUT, cache/tokens/<tokenizer>/<name>/, not back into whichever
+        # one the stream was found in. A stream at the stem the pipeline computes is an EXACT
+        # hit; one in the older mirrored layout is only reachable through the adopt-anyway
+        # fallback, which logs a paragraph of explanation and rests on weaker evidence. Since
+        # the files are being renamed anyway, they may as well land where they are looked for.
+        target_dir = os.path.join(tok_dir, new)
+        moved_layout = (os.path.abspath(os.path.dirname(dirpath)) != os.path.abspath(tok_dir))
         log(f"[rename] stream under {tok_tag}")
         log(f"           {dirpath}")
         log(f"        -> {target_dir}")
+        if moved_layout:
+            log(f"           (also moved out of the older mirrored layout, so the stem is now "
+                f"the one the pipeline computes -- an exact hit rather than an adopted one)")
         log(f"           sig {old_sig}")
         log(f"        ->     {new_sig}")
         log(f"           tag {old_tag} -> {new_tag}, {len(idx.get('shards', []))} shard(s)")
@@ -208,6 +217,7 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
         if os.path.isdir(target_dir) and os.path.abspath(target_dir) != os.path.abspath(dirpath):
             raise SystemExit(f"[rename] {target_dir} already exists; refusing to merge")
         if os.path.abspath(target_dir) != os.path.abspath(dirpath):
+            os.makedirs(os.path.dirname(target_dir), exist_ok=True)
             os.rename(dirpath, target_dir)
 
         for shard in idx.get("shards", []):

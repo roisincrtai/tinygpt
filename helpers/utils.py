@@ -1495,13 +1495,22 @@ def _streams_here(path, extra_dirs=()):
     name separates them. `extra_dirs` carries the places earlier versions used, so shards that
     took hours to write are found rather than orphaned by a change to the naming rule."""
     out = []
-    want = os.path.basename(path) + "_index.json"
+    tried = os.path.abspath(path + "_index.json")     # the exact file open_if_current opened
     for d in (os.path.dirname(path),) + tuple(extra_dirs):
-        out.extend(_streams_in(d, want))
+        out.extend(_streams_in(d, tried))
     return out
 
 
-def _streams_in(d, want):
+def _streams_in(d, tried):
+    """Every stream manifest in `d`, except the ONE FILE at `tried` that was already opened.
+
+    THE EXCLUSION IS BY PATH, NOT BY NAME, and the difference is not academic. It compared
+    basenames, and applied that to every directory searched -- so a stream sitting in an OLDER
+    layout directory under exactly the name this run expects was skipped as "already tried"
+    when it had never been tried there at all. Renaming a corpus is what makes those two names
+    coincide: the stream is re-signed to the name the run now computes, and the moment it
+    matches, the lookup stops seeing it. A cache that took hours became invisible by being
+    correct, and the only symptom is a run that starts tokenising from zero."""
     out = []
     try:
         names = sorted(os.listdir(d))
@@ -1510,7 +1519,9 @@ def _streams_in(d, want):
     for fn in names:
         # `._name` is an AppleDouble stub, written whenever this tree is copied from or through
         # a Mac. It ends in _index.json, is not JSON, and names a stream that does not exist.
-        if not fn.endswith("_index.json") or fn == want or fn.startswith("._"):
+        if not fn.endswith("_index.json") or fn.startswith("._"):
+            continue
+        if tried and os.path.abspath(os.path.join(d, fn)) == tried:
             continue
         try:
             with open(os.path.join(d, fn), encoding="utf-8") as f:
