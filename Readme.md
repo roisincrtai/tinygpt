@@ -65,6 +65,18 @@ recurrence would otherwise be re-run over the prefix anyway. `--kv_cache_size` b
 default): a rollout larger than that is split into groups that fit and decoded a group at a
 time, which changes only the peak. `--no-kv_cache` recomputes instead.
 
+### Chain-of-Thought (CoT) from Zero
+
+Stage 9 is two sub-stages. First a supervised fine-tune teaches the model to follow the
+instructed output format — the dataset's reference traces, rewritten into
+`<think>...</think> <answer>...</answer>` — writing
+`checkpoints/cot/checkpoint_<run>_cot-sft.pt`. GRPO then starts from that checkpoint and
+optimises against an arithmetically verified answer. The supervised step exists to avoid a
+dead reward signal: GRPO's advantage is a reward minus its group's mean, so a format the
+policy never samples is a reward every completion earns alike, every advantage is zero, and
+the run trains on nothing while its curves look healthy. `--no-cot_sft` skips it, for the
+R1-Zero setting.
+
 ### Customized configuration scheme
 
 A scheme is one entry in `default_config.SCHEMES`; `context_window` is the list of windows it

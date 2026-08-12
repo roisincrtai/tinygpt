@@ -43,8 +43,12 @@ N_SAMPLES = config.N_SAMPLES
 
 
 def plot_dir(stage):
-    """Figures are organised outputs/plots/<stage>/*.pdf -- one directory per stage."""
-    return os.path.join(PLOTDIR, stage)
+    """Figures are organised outputs/plots/<stage>/*.pdf -- one directory per stage.
+
+    A stage whose artefacts live elsewhere (cot_sft writes into cot/) takes its figures there
+    too, through the SAME mapping the checkpoints use, so a stage's two kinds of output cannot
+    end up in differently-named directories."""
+    return os.path.join(PLOTDIR, helpers.stage_dirname(stage))
 
 
 # Architecture keys ZetaGPT no longer takes by name. Checkpoints written before `pe` existed
@@ -224,10 +228,23 @@ def parse_args(argv=None):
     ap.add_argument("--rlhf_lr", type=float, default=config.RLHF["lr"])
     ap.add_argument("--cot_steps", type=int, default=config.COT["steps"])
     ap.add_argument("--cot_lr", type=float, default=config.COT["lr"])
+    # THE REASONING SFT THAT PRECEDES GRPO. Same problems, but supervised: the dataset's own
+    # reference trace, rewritten into this pipeline's <think>/<answer> form. It teaches the
+    # FORMAT, which GRPO cannot teach a base model that never samples it -- a reward for
+    # something no completion in the group produces is a reward with no gradient.
+    ap.add_argument("--cot_sft_steps", type=int, default=config.COT["sft_steps"])
+    ap.add_argument("--cot_sft_lr", type=float, default=config.COT["sft_lr"])
+    ap.add_argument("--cot_sft", dest="cot_sft", action="store_true",
+                    default=config.COT["sft"],
+                    help="fine-tune on the reference traces before GRPO (default)")
+    ap.add_argument("--no-cot_sft", "--no_cot_sft", dest="cot_sft", action="store_false",
+                    help="skip the reasoning SFT: GRPO straight from --cot_init "
+                         "(the R1-Zero setting)")
     ap.add_argument("--cot_init", default=config.COT["init_stage"],
                     choices=["pretrain", "sft", "rlhf", "dpo"],
-                    help="checkpoint the GRPO policy starts from; 'pretrain' is the "
-                         "R1-Zero setting (RL on the base model, no supervised reasoning)")
+                    help="checkpoint the reasoning SFT starts from -- and, with --no-cot_sft, "
+                         "the checkpoint GRPO itself starts from; 'pretrain' is the R1-Zero "
+                         "setting (no supervised reasoning anywhere before the RL)")
     ap.add_argument("--cot_group", type=int, default=config.COT["group_size"],
                     help="completions sampled per problem; the group is GRPO's baseline "
                          "and must be >= 2")

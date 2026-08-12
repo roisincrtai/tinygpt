@@ -40,12 +40,12 @@ PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
 SFT_STEPS SFT_LR SFT_FLAGS \
 REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
-KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
+KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_SFT COT_SFT_STEPS COT_SFT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
 SCALING_FLAGS \
-MODEL_FFN_FACTOR MODEL_DROPOUT MODEL_GATED_ATTN MODEL_D_CONV MODEL_SSM_CHUNK CORPUS_EXCLUDE TOKENS_SHARD_MB SFT_SUBSETS SFT_LIMIT REWARD_SUBSETS REWARD_VAL_SUBSETS REWARD_LIMIT RLHF_GEN_TEMP RLHF_PPO_EPOCHS RLHF_CLIP_EPS RLHF_GAMMA RLHF_LAM RLHF_VF_COEF RLHF_ENT_COEF RLHF_WHITEN_ADV RLHF_PROMPT_LIMIT RLHF_PROMPTS_PER_FILE COT_GEN_TEMP COT_CLIP_EPS COT_GRPO_EPOCHS COT_ENT_COEF COT_CORRECT_REWARD COT_THINK_FORMAT_REWARD COT_ANSWER_FORMAT_REWARD COT_THINK_REWARD COT_LENGTH_PENALTY COT_LIMIT COT_EVAL_PROBLEMS COT_TRAIN_PREFIX COT_TEST_PREFIX COT_RECORDS_PER_FILE DISTILL_STUDENT_MAX_LEN DISTILL_MAX_NEW_TOKENS DISTILL_GEN_TEMP DISTILL_KL_COEF DISTILL_PROMPTS_PER_FILE SCALING_LR_REF_WIDTH SCALING_EVAL_EVERY SCALING_VAL_WINDOWS"
+MODEL_FFN_FACTOR MODEL_DROPOUT MODEL_GATED_ATTN MODEL_D_CONV MODEL_SSM_CHUNK CORPUS_EXCLUDE TOKENS_SHARD_MB SFT_SUBSETS SFT_LIMIT REWARD_SUBSETS REWARD_VAL_SUBSETS REWARD_LIMIT RLHF_GEN_TEMP RLHF_PPO_EPOCHS RLHF_CLIP_EPS RLHF_GAMMA RLHF_LAM RLHF_VF_COEF RLHF_ENT_COEF RLHF_WHITEN_ADV RLHF_PROMPT_LIMIT RLHF_PROMPTS_PER_FILE COT_GEN_TEMP COT_CLIP_EPS COT_GRPO_EPOCHS COT_ENT_COEF COT_CORRECT_REWARD COT_THINK_FORMAT_REWARD COT_ANSWER_FORMAT_REWARD COT_THINK_REWARD COT_LENGTH_PENALTY COT_LIMIT COT_EVAL_PROBLEMS COT_TRAIN_PREFIX COT_TEST_PREFIX COT_RECORDS_PER_FILE COT_TRACE_FIELD COT_SFT_VERIFY DISTILL_STUDENT_MAX_LEN DISTILL_MAX_NEW_TOKENS DISTILL_GEN_TEMP DISTILL_KL_COEF DISTILL_PROMPTS_PER_FILE SCALING_LR_REF_WIDTH SCALING_EVAL_EVERY SCALING_VAL_WINDOWS"
 
 # Which variables came from the ENVIRONMENT, recorded before a single default is applied:
 # export_yaml.sh must not overwrite these, or `GPU=cpu ./stage5_pretrain.sh` would lose to the
@@ -419,10 +419,20 @@ RLHF_PROMPTS_PER_FILE="${RLHF_PROMPTS_PER_FILE:-1000}"
 # and an answer a small model reaches by chance often enough for a group to have spread; it is
 # also the task the smallest published R1-Zero reproductions used.
 COT_TASK="${COT_TASK:-countdown}"   # countdown | gsm8k
-COT_STEPS="${COT_STEPS:-1400}"
-COT_LR="${COT_LR:-1e-6}"
-COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which checkpoint it
-                                    # starts from; "pretrain" is the R1-Zero setting
+COT_STEPS="${COT_STEPS:-10000}"
+COT_LR="${COT_LR:-1e-5}"
+# THE SUPERVISED SUB-STAGE, run before GRPO. It trains on the dataset's own reference traces,
+# rewritten into this pipeline's <think>/<answer> form, and teaches only the FORMAT. Without it
+# a base model never samples the format the reward pays for, so every completion in a group
+# scores alike, every advantage is zero, and GRPO trains on nothing while its curves look fine.
+# COT_SFT=0 turns it off, which is the R1-Zero setting.
+COT_SFT="${COT_SFT:-1}"
+COT_SFT_STEPS="${COT_SFT_STEPS:-10000}"
+COT_SFT_LR="${COT_SFT_LR:-1e-5}"
+COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which checkpoint the
+                                    # SUPERVISED sub-stage starts from (and, with COT_SFT=0,
+                                    # which one GRPO starts from). GRPO otherwise starts from
+                                    # the cot-sft checkpoint.
 COT_GROUP="${COT_GROUP:-8}"         # completions sampled per problem (GRPO's baseline is
                                     # their mean, so this is the group it averages over)
 COT_KL_COEF="${COT_KL_COEF:-0.001}" # much smaller than RLHF's: reasoning needs room to
@@ -457,6 +467,10 @@ COT_EVAL_PROBLEMS="${COT_EVAL_PROBLEMS:-200}"     # held-out problems per evalua
 COT_TRAIN_PREFIX="${COT_TRAIN_PREFIX:-train}"     # filename prefixes of the two splits
 COT_TEST_PREFIX="${COT_TEST_PREFIX:-test}"
 COT_RECORDS_PER_FILE="${COT_RECORDS_PER_FILE:-1000}"
+COT_TRACE_FIELD="${COT_TRACE_FIELD:-response}"    # the record field holding the reference
+                                                  # reasoning trace, read by the SFT only
+COT_SFT_VERIFY="${COT_SFT_VERIFY:-True}"          # drop demonstrations whose own answer the
+                                                  # verifier rejects (True | False)
 
 # =========================================================================== #
 # stage 10 -- direct preference optimisation
@@ -597,6 +611,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$COT_TRAIN_PREFIX" ]        && COMMON_FLAGS="$COMMON_FLAGS --set COT.train_prefix=$COT_TRAIN_PREFIX"
 [ -n "$COT_TEST_PREFIX" ]         && COMMON_FLAGS="$COMMON_FLAGS --set COT.test_prefix=$COT_TEST_PREFIX"
 [ -n "$COT_RECORDS_PER_FILE" ]    && COMMON_FLAGS="$COMMON_FLAGS --set COT.records_per_file=$COT_RECORDS_PER_FILE"
+[ -n "$COT_TRACE_FIELD" ]         && COMMON_FLAGS="$COMMON_FLAGS --set COT.trace_field=$COT_TRACE_FIELD"
+[ -n "$COT_SFT_VERIFY" ]          && COMMON_FLAGS="$COMMON_FLAGS --set COT.sft_verify=$COT_SFT_VERIFY"
 [ -n "$DISTILL_STUDENT_MAX_LEN" ] && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.student_max_len=$DISTILL_STUDENT_MAX_LEN"
 [ -n "$DISTILL_MAX_NEW_TOKENS" ]  && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.max_new_tokens=$DISTILL_MAX_NEW_TOKENS"
 [ -n "$DISTILL_GEN_TEMP" ]        && COMMON_FLAGS="$COMMON_FLAGS --set DISTILL.gen_temperature=$DISTILL_GEN_TEMP"
@@ -628,6 +644,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$COT_TASK" ]       && COT_FLAGS="$COT_FLAGS --set COT.task=$COT_TASK"
 [ -n "$COT_STEPS" ]      && COT_FLAGS="$COT_FLAGS --cot_steps $COT_STEPS"
 [ -n "$COT_LR" ]         && COT_FLAGS="$COT_FLAGS --cot_lr $COT_LR"
+[ -n "$COT_SFT_STEPS" ]  && COT_FLAGS="$COT_FLAGS --cot_sft_steps $COT_SFT_STEPS"
+[ -n "$COT_SFT_LR" ]     && COT_FLAGS="$COT_FLAGS --cot_sft_lr $COT_SFT_LR"
+[ "$COT_SFT" = "0" ]     && COT_FLAGS="$COT_FLAGS --no-cot_sft"
 [ -n "$COT_INIT" ]       && COT_FLAGS="$COT_FLAGS --cot_init $COT_INIT"
 [ -n "$COT_GROUP" ]      && COT_FLAGS="$COT_FLAGS --cot_group $COT_GROUP"
 [ -n "$DPO_STEPS" ]      && DPO_FLAGS="$DPO_FLAGS --dpo_steps $DPO_STEPS"

@@ -8,6 +8,7 @@ be COMPUTED. That is the whole reason this stage can produce something the prefe
 cannot -- a policy optimising a reward it cannot game by sounding plausible.
 
     prompt(question)            the R1-Zero style instruction: think, then answer
+    demonstration(trace)        a dataset's reference trace in THIS format, for the SFT
     extract_answer(text)        the model's final answer, or None
     equal(pred, gold)           numeric-tolerant comparison
     think_text(text)            what the model wrote between the think tags
@@ -117,6 +118,46 @@ def prompt(question, cfg=None):
     return PROMPT_TEMPLATE.format(system=sys_text, question=q)
 
 
+def demonstration(trace):
+    r"""A dataset's reference trace as ONE demonstration in this pipeline's format, or None.
+
+        <think>
+        ...the reasoning the dataset wrote...
+        </think>
+        <answer> 38*(48-47) </answer>
+
+    THE SUPERVISED TARGET AND THE REWARDED FORMAT MUST BE THE SAME STRING. The countdown traces
+    open with <think>, close it, then write a prose summary ending in \boxed{expr} -- a
+    convention this pipeline does not pay for. Fine-tuning on them verbatim would teach a
+    container the reward then ignores, which is the same class of mismatch that made every
+    reward zero before: the prompt asked for one thing, the reward paid for another, and the
+    model obeyed the prompt.
+
+    WHAT IS KEPT AND WHAT IS DROPPED. The think span is kept as written. The \boxed{} content
+    becomes the answer span. The prose BETWEEN </think> and \boxed{} is dropped: it restates the
+    derivation for a reader, and keeping it would put unrewarded text where the format says the
+    answer goes. Returns None when either piece is missing -- a trace with no reasoning or no
+    extractable answer is not a demonstration of the format and is better refused than patched
+    into one.
+
+    THE ANSWER IS WRITTEN IN PLAIN ARITHMETIC, not in the display maths the traces use. These
+    are written for a reader, so their answers say 38 \times (48 - 47) and \frac{85}{34}; the
+    verifier now understands both (delatex), but what goes INSIDE the answer tags is the thing
+    the model is being taught to produce, and there is no reason to teach it a notation that
+    has to be translated before it can be checked. The reasoning keeps whatever notation it
+    was written in -- nothing parses that."""
+    spans = _THINK_RE.findall(trace or "")
+    if not spans:
+        return None
+    think = spans[0].strip()
+    answer = _boxed(trace)
+    if not think or not answer:
+        return None
+    plain = delatex(answer)
+    return (f"{THINK_OPEN}\n{think}\n{THINK_CLOSE}\n"
+            f"{ANSWER_OPEN} {(plain or answer).strip()} {ANSWER_CLOSE}")
+
+
 def _clean_number(s):
     """'$1,234.50 dollars' -> 1234.50, or None. Currency, commas and trailing prose are
     stripped because a policy that is RIGHT should not be punished for how it writes."""
@@ -146,22 +187,35 @@ def _boxed(text):
     return "".join(out).strip() or None
 
 
-def extract_answer(text):
+def extract_answer(text, fallback=True):
     """The model's final answer as raw text, by decreasing preference:
-        0. the last \\boxed{...}                 -- what the countdown prompts ask for
-        1. the last <answer>...</answer> span    -- the requested format
+        0. the last <answer>...</answer> span    -- THIS pipeline's convention
+        1. the last \\boxed{...}                 -- what the raw datasets ask for
         2. the last '#### x' line                -- GSM8K's own convention, often imitated
         3. the last number anywhere in the text  -- a bare answer with no structure
-    Returns None when the response contains no number at all."""
-    boxed = _boxed(text)
-    if boxed:
-        return boxed
+    Returns None when the response contains no number at all.
+
+    THE ANSWER SPAN WINS, and the order matters. \\boxed{} was tried first, on the reasoning
+    that the countdown questions asked for it -- but normalise_question() now rewrites those
+    questions into <answer> tags, so the only \\boxed{} left in a completion is one the model
+    wrote inside its REASONING ("so the answer should be \\boxed{91 - 61 - 1}"), which the
+    reference traces do constantly. Preferring it meant reading a number out of the middle of
+    the thinking and ignoring the answer the model actually committed to. Both are usually the
+    same; when they are not, the committed one is the answer.
+
+    `fallback=False` DROPS STEP 3, so only an answer the model put somewhere it declared to be
+    an answer counts. Countdown needs that; see countdown_correct."""
     spans = _ANSWER_RE.findall(text or "")
     if spans:
         return spans[-1].strip()
+    boxed = _boxed(text)
+    if boxed:
+        return boxed
     hashes = _HASH_RE.findall(text or "")
     if hashes:
         return hashes[-1].strip()
+    if not fallback:
+        return None
     nums = _NUM_RE.findall(text or "")
     return nums[-1] if nums else None
 
@@ -236,9 +290,15 @@ def reflection_hits(text):
 def score(text, gold, cfg):
     """Reward one completion.
 
-        reward = correct_reward * [answer is right]
-               + format_reward  * [think/answer structure present]
-               - length_penalty * response words
+        reward = correct_reward       * [answer is right]
+               + think_format_reward  * [a closed <think>...</think>]
+               + answer_format_reward * [a closed <answer>...</answer>]
+               + think_reward         * [the reasoning is long enough AND mentions the givens]
+               - length_penalty       * response words
+
+    Each tag is paid for INDEPENDENTLY -- see is_formatted() for why a single both-or-nothing
+    format term left a policy that had learned half the structure with nothing pulling it the
+    rest of the way.
 
     Returns the reward together with every quantity the dynamics figure tracks, so the caller
     never re-parses the text."""
@@ -287,11 +347,87 @@ def score(text, gold, cfg):
 #
 # The gold is {"target": t, "numbers": [...]}, and an answer is an EQUATION. It is correct when
 #   1. it evaluates to the target, and
-#   2. it uses only the given numbers, each at most once.
-# Both conditions matter. Without the second, "38" scores full marks on a problem whose target
+#   2. it uses only the given numbers, each at most once, and
+#   3. the model PUT IT WHERE AN ANSWER GOES -- inside <answer> tags or \boxed{}.
+#
+# All three matter. Without the second, "38" scores full marks on a problem whose target
 # happens to be one of the numbers, and the policy learns to copy rather than to search.
+#
+# The third closes what the second leaves open, and it is not hypothetical. extract_answer's
+# last resort is "the final number anywhere in the text", which is right for gsm8k -- a bare
+# number IS the answer to a word problem -- and wrong here: on a target of 38 drawn from
+# [48, 38, 47], the completion "the answer is probably 38" passed both other conditions and
+# collected the full correctness reward for naming a number. A policy under no length pressure
+# finds that. So countdown reads the answer with fallback=False: an unstructured completion
+# scores zero for correctness, which is also exactly the state the supervised sub-stage exists
+# to move the model out of.
 
 _ALLOWED = set("0123456789+-*/(). ")
+
+# LaTeX spellings of the four operations, and the wrappers that carry no arithmetic at all.
+# Ordered longest-first where one is a prefix of another, so \times is not left as \time + "s".
+_LATEX_OPS = (("\\times", "*"), ("\\cdot", "*"), ("\\div", "/"),
+              ("\\left", ""), ("\\right", ""), ("\\!", ""), ("\\,", ""), ("\\;", ""),
+              ("$", ""))
+_FRAC = "\\frac"
+_DFRAC = "\\dfrac"
+
+
+def _brace_group(text, i):
+    """The {...} beginning at `i`, with its braces counted. Returns (body, index after it),
+    or (None, i) if there is no group there."""
+    if i >= len(text) or text[i] != "{":
+        return None, i
+    j, depth, out = i + 1, 1, []
+    while j < len(text) and depth:
+        c = text[j]
+        depth += (c == "{") - (c == "}")
+        if depth:
+            out.append(c)
+        j += 1
+    return "".join(out), j
+
+
+def delatex(expr):
+    r"""An arithmetic expression written in LaTeX, rewritten as plain arithmetic.
+
+        38 \times (48 - 47)                     ->  38 * (48 - 47)
+        (93 - 8) + (55 \div 11)                 ->  (93 - 8) + (55 / 11)
+        85 - \left(\frac{39}{\frac{60}{20}}\right)  ->  85 - ((39)/((60)/(20)))
+
+    THIS IS A REWRITE OF NOTATION, NOT A RELAXATION OF THE CHECK. `\frac{a}{b}` and `a/b` are
+    the same number; a reward that accepts one and refuses the other is not measuring whether
+    the policy solved the problem, it is measuring which notation the policy happened to pick.
+    The charset check in countdown_correct still runs, AFTER this, on the rewritten string --
+    so whatever reaches eval() is still nothing but digits, the four operators, brackets, a
+    decimal point and spaces.
+
+    IT IS NOT COSMETIC. The reference traces are written in display maths, so a model fine-tuned
+    on them writes \times and \frac -- and every one of those answers scored zero. On this
+    dataset that is 8,968 of the 9,002 traces the verifier rejected: 34 were actually wrong."""
+    s = expr or ""
+    for a, b in _LATEX_OPS:
+        s = s.replace(a, b)
+    # \frac{a}{b} -> (a)/(b), innermost first by recursion through _brace_group
+    out, i = [], 0
+    while i < len(s):
+        for name in (_DFRAC, _FRAC):
+            if s.startswith(name, i):
+                j = i + len(name)
+                while j < len(s) and s[j] == " ":
+                    j += 1
+                num, j = _brace_group(s, j)
+                while j < len(s) and s[j] == " ":
+                    j += 1
+                den, j = _brace_group(s, j)
+                if num is not None and den is not None:
+                    out.append(f"({delatex(num)})/({delatex(den)})")
+                    i = j
+                    break
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out).strip()
 
 
 def _numbers_used(expr):
@@ -302,13 +438,17 @@ def _numbers_used(expr):
 def countdown_correct(text, gold):
     """Does this completion's answer reach the target from the given numbers?
 
-    The expression is evaluated with eval() over a string that has been checked to contain
+    LaTeX notation is rewritten to plain arithmetic FIRST (delatex), because \\times and * are
+    the same operation and a reward that only accepts one is grading handwriting.
+
+    The expression is then evaluated with eval() over a string that has been checked to contain
     NOTHING but digits, the four operators, brackets, a decimal point and spaces. That check is
-    the safety argument: a policy emits arbitrary text, and an expression it wrote is not
-    something to hand to a general-purpose evaluator on trust."""
+    the safety argument, and it runs AFTER the rewrite, on exactly the string eval() receives:
+    a policy emits arbitrary text, and an expression it wrote is not something to hand to a
+    general-purpose evaluator on trust."""
     if not isinstance(gold, dict):
         return False
-    expr = (extract_answer(text) or "").strip()
+    expr = delatex((extract_answer(text, fallback=False) or "").strip())
     if not expr or set(expr) - _ALLOWED:
         return False
     expr = expr.split("=")[-1].strip() if expr.count("=") == 1 else expr

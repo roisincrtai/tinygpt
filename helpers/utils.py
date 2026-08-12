@@ -370,14 +370,31 @@ STAGE_LABELS = {
     "reward": "reward",
     "rlhf": "instruct-rlhf",
     "dpo": "instruct-dpo",
+    "cot_sft": "cot-sft",
     "cot": "cot-grpo",
     "distill": "distill",
+}
+
+# WHERE A STAGE'S ARTEFACTS LIVE, when that is not its own key. Chain of thought is TWO
+# training runs -- supervised fine-tuning on demonstrations, then GRPO on the result -- and
+# they are one stage of the pipeline, so they share a directory and are told apart by their
+# labels: checkpoints/cot/checkpoint_<run>_cot-sft.pt beside checkpoint_<run>_cot-grpo.pt.
+# Splitting them into checkpoints/cot/ and checkpoints/cot_sft/ would hide the fact that the
+# second reads the first, and would leave a stage of the pipeline occupying two directories.
+STAGE_DIRS = {
+    "cot_sft": "cot",
 }
 
 
 def stage_label(stage):
     """The filename label of a stage key ("rlhf" -> "instruct-rlhf")."""
     return STAGE_LABELS.get(stage, stage)
+
+
+def stage_dirname(stage):
+    """The directory a stage's artefacts live in -- its own key unless STAGE_DIRS says
+    otherwise. Used for both checkpoints and figures, so the two cannot disagree."""
+    return STAGE_DIRS.get(stage, stage)
 
 # The named sizes, keyed by (n_layer, n_head, n_embd). A configuration that is not one of
 # these gets a descriptive name rather than being forced into the nearest label -- so a model
@@ -461,7 +478,7 @@ def tag(stage, ctx=None):
 
 
 def stage_dir(ckdir, stage):
-    return os.path.join(ckdir, stage)
+    return os.path.join(ckdir, stage_dirname(stage))
 
 
 def artefact_tag(stage):

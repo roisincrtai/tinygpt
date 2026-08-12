@@ -595,14 +595,30 @@ RLHF = dict(
 
 DPO = dict(steps=590, lr=1e-6)       # 1 epoch; starts from SFT, ref = frozen SFT
 
-# CHAIN OF THOUGHT BY GROUP RELATIVE POLICY OPTIMISATION (GRPO) -- the "aha moment" stage.
+# CHAIN OF THOUGHT: SUPERVISED FINE-TUNING, THEN GROUP RELATIVE POLICY OPTIMISATION (GRPO).
 #
-# This is the DeepSeek-R1-Zero setting: reinforcement learning on a base model with NO
-# supervised reasoning data at all. The policy is asked to think inside <think> tags and to
-# answer inside <answer> tags; the reward is not a learned model but an ARITHMETIC CHECK --
-# the final answer is extracted and compared with the gold answer of the GSM8K problem -- plus
-# a small term for obeying the format. Nothing tells the model HOW to reason, so whatever
-# reasoning appears is a property of the optimisation, which is the point of the stage.
+# TWO TRAINING RUNS, ONE STAGE, and they read the same problems:
+#
+#   1. SFT     the dataset's own reference trace, rewritten into this pipeline's
+#              <think>...</think> <answer>...</answer> form, trained by maximum likelihood.
+#              -> checkpoints/cot/checkpoint_<run>_cot-sft.pt
+#   2. GRPO    reinforcement learning from that checkpoint against a VERIFIED answer.
+#              -> checkpoints/cot/checkpoint_<run>_cot-grpo.pt
+#
+# WHY THE SFT COMES FIRST. GRPO can only amplify behaviour the policy ALREADY SAMPLES. A
+# reward for a format no completion in the group produces is a reward with no gradient: every
+# completion scores the same, every advantage is zero, and the run trains on nothing while
+# every curve looks healthy. A base model has never seen <think> tags, so the format reward
+# has nothing to grip until something demonstrates the container. The SFT demonstrates it, and
+# only it -- the reasoning CONTENT is still whatever the optimisation makes of it.
+#
+# THIS IS R1, NOT R1-ZERO, and the difference is worth naming. DeepSeek-R1-Zero is RL directly
+# on the base model with no supervised reasoning anywhere, which is a claim about what RL alone
+# can produce; R1 itself uses a small supervised cold start first, for exactly the reason above.
+# Set sft=False (--no-cot_sft, COT_SFT=0) for the zero setting.
+#
+# The reward is not a learned model but an ARITHMETIC CHECK -- the final answer is extracted and
+# verified against the gold -- plus terms for obeying the format.
 #
 # GRPO replaces PPO's value head with a GROUP BASELINE: the policy samples `group_size`
 # completions for the same prompt and each completion's advantage is its reward standardised
@@ -615,10 +631,23 @@ DPO = dict(steps=590, lr=1e-6)       # 1 epoch; starts from SFT, ref = frozen SF
 # ("wait", "let me re-check") start to appear. Both are tracked every step and drawn in
 # outputs/plots/cot/cot_dynamics.pdf, alongside accuracy against the verifier.
 COT = dict(
-    steps=1400, lr=1e-6,        # ~1 epoch over 7,473 problems at batch 16 / group 8
-    init_stage="pretrain",      # WHICH CHECKPOINT THE POLICY STARTS FROM.
-                                #   "pretrain" -- R1-Zero: RL on the base model, no SFT
-                                #   "sft"      -- a sibling of RLHF and DPO
+    steps=10000, lr=1e-5,       # GRPO: the second of the stage's two runs
+    # THE REASONING SFT, run first. `sft_steps` and `sft_lr` are its own budget: the GRPO
+    # numbers above do not apply to it, because a likelihood objective over demonstrations and
+    # a policy-gradient objective over rollouts are not the same optimisation and never want
+    # the same schedule.
+    sft=True,                   # False (--no-cot_sft) = the R1-Zero setting, GRPO alone
+    sft_steps=10000,
+    sft_lr=1e-5,
+    # The demonstrations are FILTERED before they are trained on: a reference trace whose own
+    # final answer the verifier rejects would teach the model to be confidently wrong in the
+    # right format, and a stage that checks answers arithmetically has no excuse for training
+    # on unchecked ones.
+    sft_verify=True,
+    init_stage="pretrain",      # WHICH CHECKPOINT THE REASONING SFT STARTS FROM -- and, with
+                                # sft=False, which one GRPO itself starts from.
+                                #   "pretrain" -- the base model (R1's cold start)
+                                #   "sft"      -- after the general instruction tuning
                                 #   "rlhf" / "dpo" -- continue an aligned policy
                                 # Overridable per run: COT_INIT=sft ./stage9_cot_aha_moment.sh
     group_size=8,               # completions sampled per prompt; the group IS the baseline
@@ -699,11 +728,16 @@ COT = dict(
     # readable where 2147483648 is a thing to be trusted. A float is accepted, so 0.5 works.
     kv_cache_size=2.0,          # GiB
     # DATA. Every .json under the task's directory; each countdown record carries a prompt, an
-    # answer of {target, numbers}, and a reference trace the stage never trains on.
+    # answer of {target, numbers}, and a reference trace. The SFT reads the trace; GRPO does
+    # not -- it sees only the question and, through the verifier, the answer.
     data_dir=COT_COUNTDOWN_DIR,      # data/download/zetagpt-cot-countdown-game-20k
     data_dir_gsm8k=COT_GSM8K_DIR,    # used when task="gsm8k"
     question_field="prompt",         # countdown's field names; gsm8k uses question/answer
     answer_field="answer",
+    # THE REFERENCE TRACE, read by the SFT only. Countdown's is a "response" holding a
+    # <think>...</think> span and a closing \boxed{}; gsm8k's worked solution is its "answer",
+    # so the field is named rather than assumed.
+    trace_field="response",
     val_frac=0.02,                   # held out from the END when the files carry no split
     train_prefix="train", test_prefix="test",
     records_per_file=1000,      # what cot_to_json.py writes

@@ -1,25 +1,33 @@
 """
-cot/run.py -- stage 9 entry point: chain-of-thought reasoning by GRPO, the "aha moment" run.
+cot/run.py -- stage 9 entry point: chain of thought, supervised first and then by GRPO.
 
-    python -m cot.run [--cot_steps N --cot_lr LR --cot_init pretrain --cot_group 8]
+    python -m cot.run [--cot_sft_steps N --cot_steps N --cot_lr LR --cot_group 8]
     ./stage9_cot_aha_moment.sh
-    COT_INIT=sft ./stage9_cot_aha_moment.sh        # start from a different checkpoint
+    ./stage9_cot_aha_moment.sh --no-cot_sft        # GRPO alone: the R1-Zero setting
 
-This module owns the STAGE: which checkpoint the policy starts from, which problems it is
-rolled out on, and what the stage is called on disk. The algorithm is in grpo.py and the
-reward is in verifier.py; neither knows about the other's concerns, and no other stage package
-is imported.
+THE STAGE IS TWO RUNS OVER ONE PROBLEM BANK, and this module owns the order between them:
 
-WHY IT STARTS FROM THE PRETRAINED MODEL BY DEFAULT. This is the DeepSeek-R1-Zero setting:
-reinforcement learning applied directly to a base model with no supervised reasoning examples
-anywhere in the pipeline. Nothing demonstrates how to reason, so any reasoning that emerges is
-produced by the optimisation itself -- which is the claim the stage exists to reproduce.
-Starting from the SFT or RLHF checkpoint (--cot_init sft, COT_INIT=rlhf) is supported and is
-the practical choice, but it weakens the claim, because the demonstrations have then already
-shown the model what an answer looks like.
+    1. SFT   the dataset's reference traces, rewritten into <think>/<answer> form and trained
+             by maximum likelihood            -> checkpoint_<run>_cot-sft.pt
+    2. GRPO  reinforcement learning FROM THAT CHECKPOINT against the verifier
+             -> checkpoint_<run>_cot-grpo.pt
 
-Checkpoint: checkpoints/cot/checkpoint_<model>_<pe>_cot-grpo.pt
-Figure:     outputs/plots/cot/dynamics_<model>_<pe>_cot-grpo.pdf
+WHY THE SUPERVISED RUN COMES FIRST. GRPO's advantage is a reward minus its group's mean, so a
+reward every completion earns equally teaches nothing. A base model has never produced a
+<think> tag, so before anything demonstrates the format the format terms are constant across
+the group, the correctness term is constant at zero, and the run trains on nothing while every
+curve looks healthy. The SFT is what makes the reward have something to grip.
+
+THIS IS R1, NOT R1-ZERO. DeepSeek-R1-Zero is RL directly on a base model with no supervised
+reasoning anywhere, which is a claim about what RL alone can do; R1 itself uses a small
+supervised cold start for exactly the reason above. `--no-cot_sft` restores the zero setting,
+and then --cot_init decides what GRPO starts from.
+
+THE TRACE IS THE SFT'S AND NOBODY ELSE'S. grpo.py is handed the question and the answer; it
+never receives the reference reasoning, which is what keeps the reinforcement half honest.
+
+The algorithm is in grpo.py, the supervised half in cot_sft.py and the reward in verifier.py;
+no other stage package is imported.
 """
 import glob
 import json
@@ -29,7 +37,7 @@ from helpers import common
 import default_config as config
 import helpers
 
-from . import grpo, verifier
+from . import cot_sft, grpo, verifier
 
 STAGE = "cot"
 
@@ -52,9 +60,11 @@ def load_problems(log, split, cfg=None):
     the end rather than sampling keeps the split a pure function of the files, so two runs on
     one machine, or the same run resumed, hold out exactly the same problems.
 
-    ONLY THE QUESTION AND THE ANSWER ARE READ. Every record here also carries a reference
-    reasoning trace, and the stage never looks at it: that is what makes this R1-Zero-style
-    rather than supervised. The answer is kept in whatever shape the task needs -- a number for
+    THE TRACE IS READ BUT KEPT SEPARATE. Every record carries a reference reasoning trace, and
+    the two halves of this stage want different things from it: the SFT trains on it, GRPO must
+    never see it. So it is loaded once, under its own key, and WHICH CALLER USES IT is what
+    separates supervised reasoning from reinforcement -- grpo.py is handed the question and the
+    answer, never the trace. The answer is kept in whatever shape the task needs -- a number for
     gsm8k, {target, numbers} for countdown -- because the verifier, not the loader, decides
     what being right means.
 
@@ -63,6 +73,7 @@ def load_problems(log, split, cfg=None):
     cfg = cfg or config.COT
     d = task_dir(cfg)
     qf, af = cfg.get("question_field", "question"), cfg.get("answer_field", "answer")
+    tf = cfg.get("trace_field", "response")
     split_files = sorted(glob.glob(os.path.join(d, f"{split}_*.json")))
     files = split_files or sorted(glob.glob(os.path.join(d, "*.json")))
     if not files:
@@ -78,7 +89,9 @@ def load_problems(log, split, cfg=None):
             q = r.get(qf) if r.get(qf) is not None else r.get("question")
             a = r.get(af) if r.get(af) is not None else r.get("answer")
             if q and a is not None:
-                out.append({"question": q, "answer": a if isinstance(a, dict) else str(a)})
+                out.append({"question": q,
+                            "answer": a if isinstance(a, dict) else str(a),
+                            "trace": r.get(tf) or ""})
     if not split_files:                       # no split of its own: cut the tail off
         n_val = max(1, int(len(out) * float(cfg.get("val_frac", 0.02))))
         out = out[:-n_val] if split == cfg.get("train_prefix", "train") else out[-n_val:]
@@ -89,12 +102,9 @@ def load_problems(log, split, cfg=None):
 
 
 def run(ctx):
-    """GRPO-train a copy of the initial checkpoint against the verifier, preview, return."""
+    """The whole of stage 9: the reasoning SFT, then GRPO from its checkpoint."""
     args, log = ctx["args"], ctx["log"]
     cfg = config.COT
-    init = args.cot_init
-    log(f"=== CoT by GRPO (policy from {init}, reward = verified answer + format, "
-        f"KL to frozen {init}) ===")
 
     train, n_train_files = load_problems(log, cfg["train_prefix"])
     try:
@@ -112,9 +122,35 @@ def run(ctx):
         ("prompts per step", f"{args.batch:,}"),
         ("completions per prompt", f"{args.cot_group:,}"),
         ("rollouts per step", f"{args.batch * args.cot_group:,}"),
-        ("reward", f"correct {cfg['correct_reward']} + format {cfg['format_reward']}"),
+        # every term of the reward, by name -- the figure plots them separately, so a table
+        # that collapsed them into one number could not be checked against it
+        ("reward", f"correct {cfg['correct_reward']} "
+                   f"+ <think> {cfg['think_format_reward']} "
+                   f"+ <answer> {cfg['answer_format_reward']} "
+                   f"+ grounded {cfg['think_reward']}"),
+        ("supervised first", f"yes, {args.cot_sft_steps:,} steps at lr {args.cot_sft_lr:g}"
+                             if args.cot_sft else "no (--no-cot_sft: the R1-Zero setting)"),
     ], out=log)
 
+    # --- 1. the supervised half: the format, from the dataset's own traces --------------- #
+    # GRPO STARTS FROM WHATEVER THIS LEAVES BEHIND. When the SFT is on, that is its checkpoint
+    # and not args.cot_init: a policy initialised from the base model would have none of the
+    # format the SFT just paid for.
+    init = args.cot_init
+    if args.cot_sft:
+        demos = cot_sft.build_corpus(train, cfg, log, task=cfg.get("task", "countdown"))
+        if not demos:
+            raise SystemExit(
+                "[cot] no usable demonstrations: every reference trace was dropped.\n"
+                "      The traces need a <think>...</think> span and an extractable answer;\n"
+                "      set COT.trace_field to the field that holds them, or --no-cot_sft to\n"
+                "      run GRPO alone.")
+        cot_sft.run(ctx, common.load_stage_model(ctx, init, train_mode=True), demos)
+        init = cot_sft.STAGE
+
+    # --- 2. the reinforcement half: the answer, against the verifier --------------------- #
+    log(f"=== CoT by GRPO (policy from {init}, reward = verified answer + format, "
+        f"KL to frozen {init}) ===")
     base = common.load_stage_model(ctx, init)
     ref = common.frozen(base)                       # the KL anchor: the policy's own origin
     policy = common.frozen(base)

@@ -112,9 +112,11 @@ def _stage_figure(mode, records, plotdir, plt, tag):
         return _cot_figure(mode, records, plotdir, plt, tag)
     if mode == "distill":
         return _distill_figure(mode, records, plotdir, plt, tag)
-    if mode in ("pretrain", "sft"):
+    if mode in ("pretrain", "sft", "cot_sft"):
         # LM stages: a plain likelihood objective, no chosen/rejected pair, so the preference
         # 1x5 layout does not apply -- they get the LM figure (loss / ppl / accuracy / grad norm).
+        # cot_sft belongs here and NOT with cot: it is stage 9's supervised half, and what it
+        # optimises is a likelihood, so the GRPO figure has no series to draw for it.
         return _lm_figure(mode, records, plotdir, plt, tag)
     return _method_figure(mode, records, plotdir, plt, tag)
 
