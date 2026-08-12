@@ -9,7 +9,7 @@
 #
 #   ./stage5_pretrain.sh                        # this file's settings
 #   PRETRAIN_STEPS=20000 ./stage5_pretrain.sh   # override one knob for one run
-#   GPU=cpu ./stage6_sft.sh                     # override a shared knob for one run
+#   GPU=cpu ./stage6_instruct_sft.sh            # override a shared knob for one run
 #   COT_INIT=sft ./stage9_cot_aha_moment.sh     # start the CoT stage from the SFT model
 #
 # YOUR OWN SETTINGS GO IN config_user.yaml, not here. `python -m tools.config_wizard` writes it; this
@@ -42,6 +42,7 @@ REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
 KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_SFT COT_SFT_STEPS COT_SFT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
+LANG_SFT_DATASET LANG_SFT_DATASET_SHORTNAME LANG_SFT_MERGES LANG_SFT_STEPS LANG_SFT_LR LANG_SFT_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
 SCALING_FLAGS \
@@ -487,6 +488,30 @@ DPO_FLAGS="${DPO_FLAGS:-}"
 # distillation into gpt2-small -- OPTIONAL, not a numbered stage:
 #     python -m distill.run
 # =========================================================================== #
+# =========================================================================== #
+# stage 11 -- LANGUAGE ADAPTATION: a new vocabulary, then a new language
+# =========================================================================== #
+# The pretrained (English) model is adapted to another language in two steps: the BPE is
+# EXTENDED with merges learned on the new corpus -- every existing id keeps its meaning, the
+# new merges are appended -- and the model then continues pretraining on that corpus with its
+# embedding grown to match.
+#
+# WHY EXTEND RATHER THAN RETRAIN THE VOCABULARY. A byte-level BPE never fails on an unseen
+# language; it falls back to raw bytes. So the English vocabulary WOULD train on Irish, and
+# would spend four or five tokens on words an adapted vocabulary spells in one -- a constant
+# tax on the context window and the step budget alike. A fresh vocabulary would fix the
+# tokenisation and throw the pretrained model away with it, since new ids mean the embedding
+# rows learned in stage 5 sit against different tokens.
+LANG_SFT_DATASET="${LANG_SFT_DATASET:-zetagpt-pretrain-gaelic-uccix_irish_textual_corpus}"
+LANG_SFT_DATASET_SHORTNAME="${LANG_SFT_DATASET_SHORTNAME:-gaelic}"   # goes in every filename:
+                                    # checkpoint_zetagpt-s_ssm_lang-sft-gaelic.pt
+LANG_SFT_MERGES="${LANG_SFT_MERGES:-8000}"   # merges ADDED to the base vocabulary. 8,000 on
+                                    # top of 50,000 grows the vocabulary by 16% and the
+                                    # parameter count by ~4M at d_model 512.
+LANG_SFT_STEPS="${LANG_SFT_STEPS:-20000}"
+LANG_SFT_LR="${LANG_SFT_LR:-1e-5}"
+LANG_SFT_FLAGS="${LANG_SFT_FLAGS:-}"
+
 DISTILL_STEPS="${DISTILL_STEPS:-3251}"
 DISTILL_LR="${DISTILL_LR:-1e-6}"
 DISTILL_TEACHER="${DISTILL_TEACHER:-rlhf}"   # which aligned checkpoint teaches: rlhf | dpo
@@ -654,6 +679,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ "$COT_SFT" = "0" ]     && COT_FLAGS="$COT_FLAGS --no-cot_sft"
 [ -n "$COT_INIT" ]       && COT_FLAGS="$COT_FLAGS --cot_init $COT_INIT"
 [ -n "$COT_GROUP" ]      && COT_FLAGS="$COT_FLAGS --cot_group $COT_GROUP"
+[ -n "$LANG_SFT_DATASET" ]  && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_dataset $LANG_SFT_DATASET"
+[ -n "$LANG_SFT_DATASET_SHORTNAME" ] && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_short $LANG_SFT_DATASET_SHORTNAME"
+[ -n "$LANG_SFT_MERGES" ]  && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_merges $LANG_SFT_MERGES"
+[ -n "$LANG_SFT_STEPS" ]   && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_steps $LANG_SFT_STEPS"
+[ -n "$LANG_SFT_LR" ]      && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_lr $LANG_SFT_LR"
 [ -n "$DPO_STEPS" ]      && DPO_FLAGS="$DPO_FLAGS --dpo_steps $DPO_STEPS"
 [ -n "$DPO_LR" ]         && DPO_FLAGS="$DPO_FLAGS --dpo_lr $DPO_LR"
 [ -n "$DISTILL_STEPS" ]  && DISTILL_FLAGS="$DISTILL_FLAGS --distill_steps $DISTILL_STEPS"

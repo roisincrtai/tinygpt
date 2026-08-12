@@ -41,3 +41,4 @@ zetagpt-small_pretrain-corpus_fineweb-edu_10GB  | roisincrtai/zetagpt-small_pret
 zetagpt-rlhf-instruction_following              | roisincrtai/zetagpt-rlhf-instruction_following              |   0 | instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout prompts, shared by stages 6, 7 and 10
 zetagpt-cot-countdown-game-20k                  | roisincrtai/zetagpt-cot-countdown-game-20k                  |   0 | stage 9 GRPO: 20k Countdown arithmetic problems, each with a target, its numbers and a reference trace
 zetagpt-grpo-cot_gsm8k                          | roisincrtai/zetagpt-grpo-cot_gsm8k                          |   0 | grade-school word problems, the alternative stage 9 task (set COT_TASK=gsm8k)
+zetagpt-pretrain-gaelic-uccix_irish_textual_corpus | roisincrtai/zetagpt-pretrain-gaelic-uccix_irish_textual_corpus | 500 | stage 11 language adaptation: the UCCIX Irish textual corpus (Gaelic)

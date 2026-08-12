@@ -126,11 +126,12 @@ pip install -r requirements.txt
 ./stage3_train_bpe_tokenizer.sh    # byte-level BPE
 ./stage4_tokenize_data.sh          # corpora -> memory-mapped token streams
 ./stage5_pretrain.sh               # pretraining
-./stage6_sft.sh                    # supervised fine-tuning (needs the pretrain checkpoint)
+./stage6_instruct_sft.sh           # supervised fine-tuning (needs the pretrain checkpoint)
 ./stage7_train_rlhf_reward.sh      # reward model
 ./stage8_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
 ./stage9_cot_aha_moment.sh         # chain of thought by GRPO
 ./stage10_instruct_dpo.sh          # direct preference optimisation
+./stage11_lang_sft.sh              # language adaptation: extend the vocabulary, then adapt
 python -m distill.run              # sequence-level distillation into gpt2-small
 ```
 
@@ -138,7 +139,7 @@ Equivalently, bypassing the shell layer:
 
 ```bash
 python -m pretrain.run
-python -m sft.run
+python -m instruct_sft.run
 python -m instruct_rlhf.run
 ```
 
@@ -148,8 +149,8 @@ Every knob is a shell variable in `config.sh`, and every default lives in
 ```bash
 PRETRAIN_STEPS=20000 ./stage5_pretrain.sh
 MODEL_SCHEME=zetagpt-m ./stage5_pretrain.sh
-GPU=cpu ./stage6_sft.sh
-python -m sft.run --sft_steps 5000
+GPU=cpu ./stage6_instruct_sft.sh
+python -m instruct_sft.run --sft_steps 5000
 ```
 
 `python -m tools.config_wizard` writes `config_user.yaml` holding only the settings you choose;
@@ -164,7 +165,7 @@ Point a stage at a directory and it works out the layout by looking at it:
 
 ```bash
 DATASET=/path/to/my_preferences ./stage7_train_rlhf_reward.sh
-SFT_DIR=/path/to/my_demos       ./stage6_sft.sh
+SFT_DIR=/path/to/my_demos       ./stage6_instruct_sft.sh
 PRETRAIN_DIR=/path/to/my_corpus ./stage5_pretrain.sh
 ```
 

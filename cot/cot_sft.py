@@ -129,9 +129,12 @@ def run(ctx, init_model, corpus):
     args, log = ctx["args"], ctx["log"]
     log(f"=== CoT SFT (reasoning format from {len(corpus):,} demonstrations, "
         f"from {args.cot_init}) ===")
+    # fill_window: the samples run to the end of the context window and are printed whole.
+    # What this sub-stage teaches is a LONG structured completion, and a preview cut at a few
+    # hundred tokens would stop before the </think><answer> it exists to demonstrate.
     preview = common.make_preview(
         ctx["tok"], ctx["device"], args.max_len, log,
-        [d["prompt"] for d in corpus[:common.N_PREVIEW]])
+        [d["prompt"] for d in corpus[:common.N_PREVIEW]], fill_window=True)
     model = lm.train(init_model, ctx["enc"], corpus, ctx["ckdir"], args, log,
                      ctx["monitor"], stage=STAGE, steps=args.cot_sft_steps,
                      lr=args.cot_sft_lr, preview=preview)

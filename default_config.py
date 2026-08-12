@@ -12,7 +12,7 @@ filename says what the values actually are.
 Every stage trainer (stage3..stage10, and distill/) reads its defaults from here via
 common.parse_args();
 any value can still be overridden on the command line (a flag present in argv wins), so
-`python -m sft.run --sft_steps 5000` works without touching this file.
+`python -m instruct_sft.run --sft_steps 5000` works without touching this file.
 
 Layout (all paths relative to the project root, i.e. the directory of this file). The
 framework is DATA-AGNOSTIC: a corpus is whatever files with a CORPUS_EXTENSIONS extension
@@ -599,6 +599,35 @@ RLHF = dict(
 )
 
 DPO = dict(steps=590, lr=1e-6)       # 1 epoch; starts from SFT, ref = frozen SFT
+
+
+# LANGUAGE ADAPTATION (stage 11): extend the vocabulary for a new language, then continue
+# pretraining the English model on that language's corpus.
+#
+# TWO STEPS, AND THE FIRST IS THE VOCABULARY. A byte-level BPE never fails on an unseen
+# language -- it falls back to raw bytes -- so training Irish on the English vocabulary would
+# run, and would quietly spend four or five tokens on words an adapted vocabulary spells in
+# one. That tax falls on the context window and on the step budget together. Extending first
+# is what makes the same budget cover several times as much Irish.
+#
+# THE EXTENSION KEEPS EVERY EXISTING ID. The English merges stay, in order, and the new ones
+# are appended, so the pretrained embedding still means what it learned and the model needs
+# only more rows. A FRESH vocabulary would tokenise Irish better and throw the pretrained model
+# away with it. See bpe_sft/run.py, including the one thing extension is not free of: the id
+# layout puts the specials LAST, so appending merges moves them, and a checkpoint has to be
+# rearranged for it.
+LANG_SFT = dict(
+    # WHICH CORPUS. A name under data/download/, or a path to one anywhere.
+    dataset="zetagpt-pretrain-gaelic-uccix_irish_textual_corpus",
+    # THE LABEL IN EVERY FILENAME -- `gaelic`, not the whole dataset name, which would make
+    # checkpoint_zetagpt-s_ssm_lang-sft-zetagpt-pretrain-gaelic-uccix_irish_textual_corpus.pt.
+    short="gaelic",
+    # HOW MANY MERGES TO ADD. Enough to cover the new language's morphology without doubling
+    # the embedding: 8,000 on top of 50,000 grows the vocabulary by 16% and the parameter count
+    # by ~4M at d_model 512.
+    extra_merges=8000,
+    steps=20000, lr=1e-5,
+)
 
 # CHAIN OF THOUGHT: SUPERVISED FINE-TUNING, THEN GROUP RELATIVE POLICY OPTIMISATION (GRPO).
 #

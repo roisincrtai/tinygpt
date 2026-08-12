@@ -3,7 +3,7 @@ common.py -- the setup every stage shares, and nothing stage-specific.
 
 This module knows about arguments, devices, the tokenizer, the encoder, the model factory,
 figures and generation previews. It does NOT know which stages exist, what they optimise or
-in what order they run: each stage package (pretrain/, sft/, instruct_rlhf/, instruct_dpo/,
+in what order they run: each stage package (pretrain/, instruct_sft/, instruct_rlhf/, instruct_dpo/,
 distill/) owns its own algorithm, corpus and reporting, and asks setup() only for what it
 consumes. Adding or removing a stage therefore does not touch this file.
 
@@ -48,7 +48,11 @@ def plot_dir(stage):
     A stage whose artefacts live elsewhere (cot_sft writes into cot/) takes its figures there
     too, through the SAME mapping the checkpoints use, so a stage's two kinds of output cannot
     end up in differently-named directories."""
-    return os.path.join(PLOTDIR, helpers.stage_dirname(stage))
+    # An empty mapping means the stage supplies its own directory (lang_sft, whose figures go
+    # under outputs/plots/lang-sft/<dataset>/); fall back to the stage LABEL rather than to
+    # nothing, or every such stage would write into outputs/plots/ itself.
+    sub = helpers.stage_dirname(stage) or helpers.stage_label(stage)
+    return os.path.join(PLOTDIR, sub)
 
 
 # Architecture keys ZetaGPT no longer takes by name. Checkpoints written before `pe` existed
@@ -252,6 +256,16 @@ def parse_args(argv=None):
     ap.add_argument("--cot_group", type=int, default=config.COT["group_size"],
                     help="completions sampled per problem; the group is GRPO's baseline "
                          "and must be >= 2")
+    # stage 11: language adaptation
+    ap.add_argument("--lang_sft_dataset", default=config.LANG_SFT["dataset"],
+                    help="corpus to adapt to: a name under data/download/, or a path")
+    ap.add_argument("--lang_sft_short", default=config.LANG_SFT["short"],
+                    metavar="NAME",
+                    help="the label in every stage-11 filename, e.g. `gaelic`")
+    ap.add_argument("--lang_sft_merges", type=int, default=config.LANG_SFT["extra_merges"],
+                    help="merges to ADD to the base vocabulary for the new language")
+    ap.add_argument("--lang_sft_steps", type=int, default=config.LANG_SFT["steps"])
+    ap.add_argument("--lang_sft_lr", type=float, default=config.LANG_SFT["lr"])
     ap.add_argument("--dpo_steps", type=int, default=config.DPO["steps"])
     ap.add_argument("--dpo_lr", type=float, default=config.DPO["lr"])
     ap.add_argument("--distill_steps", type=int, default=config.DISTILL["steps"])
@@ -343,7 +357,7 @@ def corpus_prompts(corpus, n=N_PREVIEW, n_words=12, seed=0, tok=None):
     return [p for p in (" ".join(t.split()[:n_words]) for t in texts) if p]
 
 
-def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW):
+def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW, fill_window=False):
     """A `preview(model, stage, step)` closure that prints `n` generations from a FIXED set
     of prompts in a human-friendly format (plain print, NO timestamp prefix -- these blocks
     are meant to be read, not parsed):
@@ -353,7 +367,16 @@ def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW):
 
     The prompts are fixed so consecutive previews are directly comparable: the reader
     watches the SAME prompts get better (or collapse) over training. Called by every
-    generative stage (pretrain/sft/rlhf/dpo/distill) at each --plot_every_steps."""
+    generative stage (pretrain/instruct_sft/rlhf/dpo/distill) at each
+    --print_samples_every_steps.
+
+    `fill_window` GENERATES UNTIL THE CONTEXT WINDOW IS FULL instead of stopping at
+    SAMPLING["max_new"], and prints the result whole. The chain-of-thought stages use it,
+    because there the LENGTH IS THE RESULT: the behaviour those runs exist to show is a policy
+    that reasons for longer, and a preview capped at a few hundred tokens would cut off the
+    thing being looked for -- and cut it off at the same place every time, so the reader could
+    not even tell it was growing. The budget is computed per prompt, from what the window has
+    left once that prompt is in it."""
     s = config.SAMPLING
     eos = getattr(tok, "eos_token_id", None)
     sel = [p for p in prompts if p.strip()][:n]
@@ -362,17 +385,24 @@ def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW):
         was_training = model.training
         model.eval()
         out = print          # plain, untimestamped: the log()'s "[  123s]" prefix ruins it
+        cap = "fills the context window" if fill_window else f"max_new={s['max_new']}"
         out(f"\n===== {tag(stage)} @ step {step}: {len(sel)} generation examples "
-            f"(temp={s['temperature']} top_k={s['top_k']} top_p={s['top_p']}) =====\n",
+            f"(temp={s['temperature']} top_k={s['top_k']} top_p={s['top_p']}, {cap}) =====\n",
             flush=True)
         # NO progress bar here: the block is meant to be READ, and a bar redrawing itself
         # between the printed lines destroys it. The numbered [i/n] header is the progress.
         for i, pr in enumerate(sel, 1):
             ids = tok(pr, add_special_tokens=False)["input_ids"]
-            gen = generate(model, ids, device, s["max_new"], s["temperature"],
+            budget = max(1, int(max_len) - len(ids)) if fill_window else s["max_new"]
+            gen = generate(model, ids, device, budget, s["temperature"],
                            s["top_k"], s["top_p"], eos, max_len)
+            text = decode(tok, gen)
+            # UNTRUNCATED, and with its line breaks intact when the window is being filled: a
+            # chain of thought collapsed onto one line is not readable, and reading it is the
+            # entire purpose of printing it.
+            body = text if fill_window else " ".join(text.split())
             out(f"[{i}/{len(sel)}] PROMPT:   {' '.join(pr.split())}", flush=True)
-            out(f"        RESPONSE: {' '.join(decode(tok, gen).split())}\n", flush=True)
+            out(f"        RESPONSE: {body}\n", flush=True)
         out(f"===== end of {tag(stage)} examples @ step {step} =====\n", flush=True)
         if was_training:
             model.train()
@@ -460,6 +490,11 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
                           plot_every=args.plot_every_steps,
                           checkpoint_every=args.checkpoint_every_steps,
                           min_freq=config.BPE.get("min_freq", 1))
+    # EVERY CHECKPOINT WRITTEN FROM HERE CARRIES THIS TOKENIZER. A stage that swaps it --
+    # lang_sft, whose vocabulary is extended for another language -- calls set_bpe_source again
+    # with its own file, so the checkpoint and the vocabulary its embedding was built for can
+    # never come apart.
+    helpers.set_bpe_source(BPE_PATH)
     if need_pairs and train_pairs:
         helpers.table("dataset", dsets.stats_rows(args.dataset, train_pairs, ev_pairs, tok,
                                                   source=config.INSTRUCT_DIR),

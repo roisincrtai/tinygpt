@@ -1,5 +1,5 @@
 """
-sft.py -- stage 6's logic: domain-adaptive supervised fine-tuning on the fine-tuning data.
+instruct_sft.py -- stage 6's logic: domain-adaptive supervised fine-tuning on the fine-tuning data.
 
 The objective is the SAME length-normalized LM likelihood as pretraining (lm.train); what
 changes is the corpus. Stage 5 buys general language from a large heterogeneous corpus,

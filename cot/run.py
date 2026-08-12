@@ -174,9 +174,13 @@ def run(ctx):
     policy.requires_grad_(True)
     policy.train()
 
+    # fill_window: untruncated, to the end of the context. This stage is looking for a policy
+    # that thinks for LONGER, and a fixed cap would cut every sample at the same place -- which
+    # hides the very quantity the run is watching.
     preview = common.make_preview(
         ctx["tok"], ctx["device"], args.max_len, log,
-        [verifier.prompt(p["question"], cfg) for p in train[:common.N_PREVIEW]])
+        [verifier.prompt(p["question"], cfg) for p in train[:common.N_PREVIEW]],
+        fill_window=True)
     model = grpo.run(policy, ref, ctx["tok"], train, ctx["ckdir"], args, log,
                      ctx["monitor"], preview=preview, eval_set=test or None)
     preview(model, STAGE, "final")

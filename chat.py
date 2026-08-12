@@ -131,7 +131,7 @@ def read_checkpoint(ckpt):
     if not ckpt:
         print("[chat] no checkpoint given -> UNTRAINED model; output will be random text",
               flush=True)
-        return None, None
+        return None, None, None
     if not os.path.isfile(ckpt):
         have = _available()
         print("\n" + "!" * 78, flush=True)
@@ -145,14 +145,17 @@ def read_checkpoint(ckpt):
               "        ./stage5_pretrain.sh",
               flush=True)
         print("!" * 78 + "\n", flush=True)
-        return None, None
+        return None, None, None
     obj = torch.load(ckpt, map_location="cpu")
     if isinstance(obj, dict) and "model" in obj:
-        return obj["model"], obj.get("model_cfg")
-    return obj, None
+        # The whole record is returned, not just the weights: a checkpoint carries the
+        # TOKENIZER it was trained with, and reading the weights while leaving the vocabulary
+        # behind is how a model comes to talk fluent nonsense with nothing in the log to say so.
+        return obj["model"], obj.get("model_cfg"), obj
+    return obj, None, None
 
 
-def build_from_checkpoint(sd, cfg, args, device):
+def build_from_checkpoint(sd, cfg, args, device, ck=None):
     """(model, tok, max_len) matching the checkpoint's architecture.
 
     'transformer.*' keys mean the distilled gpt2-small student. Otherwise it is a ZetaGPT, and
@@ -170,8 +173,18 @@ def build_from_checkpoint(sd, cfg, args, device):
         model = AutoModelForCausalLM.from_pretrained(config.DISTILL["student"],
                                                      cache_dir=config.MODEL_DIR).to(device)
         return model, tok, args.max_len or config.DISTILL["student_max_len"]
-    # ZetaGPT + the pipeline's trained BPE (built from the preference texts if missing)
-    if os.path.isfile(config.BPE_PATH):
+    # ZetaGPT + THE TOKENIZER THE CHECKPOINT WAS TRAINED WITH, which travels inside it. A
+    # checkpoint written before that, or one that could not embed its tokenizer, falls back to
+    # checkpoints/bpe/bpe.json -- announced as a fallback, because it is the only candidate
+    # rather than a verified match. This is what lets a lang_sft checkpoint, whose vocabulary
+    # was EXTENDED for another language, decode correctly without any of it being configured.
+    # imported HERE, not at the top: helpers.common imports this module, so a module-level
+    # `import helpers` would close the cycle (see helpers/__init__.py).
+    from helpers.utils import bpe_from_ckpt
+    tok = bpe_from_ckpt(ck, fallback=config.BPE_PATH) if ck is not None else None
+    if tok is not None:
+        pass
+    elif os.path.isfile(config.BPE_PATH):
         tok = BPETokenizer.load(config.BPE_PATH)
     else:
         tr, ev = dsets.load_pairs(args.dataset, args.data_dir, 0.05, args.seed, 0)
@@ -232,8 +245,8 @@ def main():
     device = resolve_device(args.gpu)
     torch.manual_seed(args.seed)
 
-    sd, cfg = read_checkpoint(args.checkpoint)
-    model, tok, max_len = build_from_checkpoint(sd, cfg, args, device)
+    sd, cfg, ck = read_checkpoint(args.checkpoint)
+    model, tok, max_len = build_from_checkpoint(sd, cfg, args, device, ck)
     if sd is not None:
         miss, unexp = model.load_state_dict(sd, strict=False)
         print(f"[chat] loaded {args.checkpoint} "

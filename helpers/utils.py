@@ -373,6 +373,10 @@ STAGE_LABELS = {
     "cot_sft": "cot-sft",
     "cot": "cot-grpo",
     "distill": "distill",
+    # Stage 11's label carries the LANGUAGE, so two adaptations of one model are told apart by
+    # their filenames and not only by their directories. lang_sft/run.py rewrites this entry
+    # from --lang_sft_short before any artefact is named.
+    "lang_sft": "lang-sft",
 }
 
 # WHERE A STAGE'S ARTEFACTS LIVE, when that is not its own key. Chain of thought is TWO
@@ -383,6 +387,11 @@ STAGE_LABELS = {
 # second reads the first, and would leave a stage of the pipeline occupying two directories.
 STAGE_DIRS = {
     "cot_sft": "cot",
+    # Stage 11 is given a directory that ALREADY names it -- checkpoints/lang-sft/<dataset>/,
+    # because a language adaptation's artefacts belong with the corpus they adapted to. An
+    # empty mapping means "write into the directory you were handed", so the path stays flat
+    # instead of becoming checkpoints/lang-sft/<dataset>/lang_sft/.
+    "lang_sft": "",
 }
 
 
@@ -393,7 +402,10 @@ def stage_label(stage):
 
 def stage_dirname(stage):
     """The directory a stage's artefacts live in -- its own key unless STAGE_DIRS says
-    otherwise. Used for both checkpoints and figures, so the two cannot disagree."""
+    otherwise. Used for both checkpoints and figures, so the two cannot disagree.
+
+    An empty string means the caller already supplied the directory and nothing should be
+    appended to it."""
     return STAGE_DIRS.get(stage, stage)
 
 # The named sizes, keyed by (n_layer, n_head, n_embd). A configuration that is not one of
@@ -449,6 +461,82 @@ def get_run_tag():
     return _RUN_TAG
 
 
+# --------------------------------------------------------------------------- #
+# THE TOKENIZER TRAVELS WITH THE WEIGHTS
+# --------------------------------------------------------------------------- #
+# A checkpoint's ids are meaningless without the vocabulary that assigned them. Storing the
+# architecture alongside the weights (model_cfg, below) already saved this project from loading
+# a differently-shaped model in silence; the tokenizer is the same class of dependency and a
+# worse failure when it is wrong -- a model loaded against a different vocabulary does not
+# crash, it TALKS NONSENSE, fluently, and nothing in the log says why.
+#
+# So every checkpoint carries the whole of bpe.json, verbatim. It is ~20 MB against a 2.1 GB
+# checkpoint -- under one percent -- and it makes a checkpoint self-describing: copy the single
+# .pt file to a machine with no checkpoints/bpe/ at all and it still decodes.
+#
+# WHICH tokenizer is set once per run, beside the run tag, because a stage may not be using the
+# default one: lang_sft trains on a vocabulary EXTENDED for another language, and a checkpoint
+# that carried the English bpe.json while its embedding had the Irish rows would be exactly the
+# silent mismatch this exists to prevent.
+_BPE_SOURCE = ""
+
+
+def set_bpe_source(path):
+    """The tokenizer file every checkpoint written from here on will carry. Called by
+    helpers.common.setup(), and again by any stage that swaps the tokenizer mid-run."""
+    global _BPE_SOURCE
+    _BPE_SOURCE = path or ""
+    return _BPE_SOURCE
+
+
+def get_bpe_source():
+    return _BPE_SOURCE
+
+
+def _bpe_blob():
+    """The tokenizer file's bytes, as text, or None. Never raises: a checkpoint that could not
+    embed its tokenizer is still a checkpoint, and the fallback below covers it."""
+    p = _BPE_SOURCE
+    if not p or not os.path.isfile(p):
+        return None
+    try:
+        return open(p, encoding="utf-8").read()
+    except OSError:
+        return None
+
+
+def bpe_from_ckpt(ck, fallback=None, log=print):
+    """The tokenizer a checkpoint was trained with.
+
+    Prefers the copy INSIDE the checkpoint; falls back to `fallback` (checkpoints/bpe/bpe.json)
+    when the checkpoint predates this or could not embed one. Returns None when neither is
+    available, so a caller can still decide what to do.
+
+    The fallback is a convenience and is announced as one. A checkpoint written before its
+    tokenizer travelled with it is not KNOWN to match checkpoints/bpe/bpe.json -- it is merely
+    the only candidate there is -- and a line saying so is the difference between a reader who
+    checks and a reader who assumes."""
+    from tokenizer.bpe import BPETokenizer          # here: helpers is imported by the tokenizer
+    blob = (ck or {}).get("bpe")
+    if blob:
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(blob)
+            return BPETokenizer.load(tmp)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    if fallback and os.path.isfile(fallback):
+        log(f"[bpe] this checkpoint carries no tokenizer; falling back to {fallback}. "
+            f"It is the only candidate, not a verified match.")
+        return BPETokenizer.load(fallback)
+    return None
+
+
 def scheme_tag():
     """The model scheme this run is training -- `zetagpt-s`. Empty before setup() has run.
 
@@ -478,7 +566,8 @@ def tag(stage, ctx=None):
 
 
 def stage_dir(ckdir, stage):
-    return os.path.join(ckdir, stage_dirname(stage))
+    sub = stage_dirname(stage)
+    return os.path.join(ckdir, sub) if sub else ckdir
 
 
 def artefact_tag(stage):
@@ -552,6 +641,10 @@ def save_ckpt(ckdir, stage, model, opt, step, total, gens, evald=None, extra=Non
                 # default_config.py, which may have moved on since the run (a different width, a
                 # different depth), and a mismatch there is a silent wrong-model bug.
                 "model_cfg": model_cfg_of(model),
+                # AND SO DOES THE TOKENIZER, for the same reason and against a worse failure:
+                # a wrong architecture refuses to load, a wrong vocabulary loads and talks
+                # nonsense. See set_bpe_source / bpe_from_ckpt above.
+                "bpe": _bpe_blob(),
                 "opt": opt.state_dict() if opt is not None else None,
                 "step": step, "total": total, "done": step >= total,
                 "gens": [g.get_state() for g in gens], "eval": evald,
