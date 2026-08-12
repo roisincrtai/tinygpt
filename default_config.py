@@ -97,7 +97,7 @@ def _read_datasets(path=None):
     path = path or DOWNLOAD_CONFIG
     out = {}
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             lines = fh.readlines()
     except OSError as e:
         raise SystemExit(f"[config] cannot read the dataset list at {path} ({e}).\n"

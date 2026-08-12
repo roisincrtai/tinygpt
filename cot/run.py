@@ -93,7 +93,7 @@ def load_problems(log, split, cfg=None):
             f"{os.path.basename(os.path.normpath(d))}")
     out = []
     for f in files:
-        with open(f, encoding="utf-8") as fh:
+        with open(f, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
         for r in (payload if isinstance(payload, list) else payload.get("data", [])):
             q = r.get(qf) if r.get(qf) is not None else r.get("question")

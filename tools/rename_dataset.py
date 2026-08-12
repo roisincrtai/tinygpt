@@ -148,7 +148,7 @@ def streams_for(name, log=print):
                         skipped.append((os.path.join(dirpath, fn), "AppleDouble stub"))
                     continue
                 try:
-                    with open(os.path.join(dirpath, fn), encoding="utf-8") as fh:
+                    with open(os.path.join(dirpath, fn), "r", encoding="utf-8") as fh:
                         idx = json.load(fh)
                 except (OSError, ValueError, UnicodeDecodeError) as e:
                     skipped.append((os.path.join(dirpath, fn), type(e).__name__))

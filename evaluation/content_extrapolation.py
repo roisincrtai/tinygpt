@@ -289,7 +289,7 @@ def token_stream(files, spec, need, log):
     for fp in progress(files, desc=f"[extrapolation] tokenizing ({spec['key']})",
                        total=len(files)):
         try:
-            text = open(fp, encoding="utf-8", errors="replace").read()
+            text = open(fp, "r", encoding="utf-8", errors="replace").read()
         except OSError:
             continue
         if not text.strip():
@@ -649,7 +649,7 @@ def main():
     if args.plot_only:
         if not os.path.isfile(json_path):
             raise SystemExit(f"--plot_only: no results at {json_path}")
-        res = json.load(open(json_path, encoding="utf-8"))
+        res = json.load(open(json_path, "r", encoding="utf-8"))
         summarise(res, log)
         log(f"[extrapolation] [figure] {figure(res, args.out)}")
         return

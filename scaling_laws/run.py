@@ -79,7 +79,7 @@ def load_results(path):
     if not os.path.isfile(path):
         return {}
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             saved = json.load(fh)
         return {r["id"]: r for r in saved.get("points", [])}
     except Exception:                                              # noqa: BLE001

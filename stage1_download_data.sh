@@ -12,13 +12,11 @@
 #   ./stage1_download_data.sh            fetch what is missing
 #   ./stage1_download_data.sh --list     what would be fetched, and where; fetch nothing
 #   ./stage1_download_data.sh --force    re-fetch even what is complete
-#   ./stage1_download_data.sh --verify   report complete / PARTIAL / missing, fetch nothing
-#   ./stage1_download_data.sh --adopt    record an already-downloaded dataset as complete
 #
-# RESUMING IS THE NORMAL CASE. A dataset counts as complete only when a fetch FINISHED and said
-# so -- .zetagpt_download.json inside it records the file count and byte total at that moment.
-# Re-running resumes anything short of that; snapshot_download skips whatever already matches,
-# so nothing is transferred twice.
+# RE-RUNNING IS HOW YOU RESUME. A dataset counts as complete only when a fetch FINISHED and
+# said so -- .zetagpt_download.json inside it records the file count and byte total at that
+# moment. Anything short of that is fetched again, and snapshot_download skips whatever
+# already matches, so nothing is transferred twice.
 #
 # WHAT is fetched is download_config.txt, one line per dataset. Add a line to add a dataset.
 set -euo pipefail

@@ -76,7 +76,7 @@ def read_marker(name):
     """The completion record written after a successful fetch, or None."""
     p = os.path.join(target(name), MARKER)
     try:
-        with open(p, encoding="utf-8") as fh:
+        with open(p, "r", encoding="utf-8") as fh:
             m = json.load(fh)
     except (OSError, ValueError):
         return None
@@ -235,40 +235,41 @@ def free_space(path):
     return shutil.disk_usage(d or ".").free
 
 
-def fetch(name, force, log, adopt=False):
+def fetch(name, force, log):
     spec = config.DATASETS[name]
     dest = target(name)
     rel = os.path.relpath(dest, config.ROOT)
     done, why = is_complete(name)
-
-    if adopt and not done and is_present(name):
-        # THE TREE IS VOUCHED FOR BY A PERSON, not by this tool. --adopt exists for corpora
-        # fetched before completion was recorded -- including sharded ones, which cannot be
-        # re-verified against the hub without duplicating them.
-        n, total = write_marker(name, sharded=looks_sharded(name))
-        log(f"[download] {name}: adopted as complete -- {n:,} files, {_size(total)}")
-        return dest
 
     if done and not force:
         log(f"[download] {name}: complete at {rel} "
             f"({size_on_disk(name) / 2**30:.1f} GiB); --force to re-fetch")
         return dest
 
+    if is_present(name) and not force and looks_sharded(name):
+        # A SHARDED TREE CANNOT BE RE-FETCHED, so it is recorded rather than re-downloaded.
+        # Sharding MOVES files out of the layout the hub published, so snapshot_download would
+        # fetch every one of them again into the flat layout and leave two copies -- a corpus
+        # that scans at twice its size. There is no way to verify it against the hub, and the
+        # tree in front of us is the only evidence there is, so it is taken as the answer and
+        # written down. A dataset from before completion was recorded lands here exactly once.
+        if read_marker(name) is None:
+            n, total = write_marker(name, sharded=True)
+            log(f"[download] {name}: already split into part_NNNN/ and predates the completion "
+                f"record -- taking it as complete ({n:,} files, {_size(total)})")
+            return dest
+        # It HAD a marker and no longer matches it: something was removed or truncated after
+        # the fetch. Re-fetching is still unsafe for the reason above, so say so plainly.
+        raise SystemExit(
+            f"[download] {name}: {why}\n"
+            f"           This dataset is split into part_NNNN/ directories, so it cannot be\n"
+            f"           re-fetched in place -- the hub's flat layout would land beside the\n"
+            f"           split one and leave two copies of everything.\n"
+            f"           Delete {rel} and run this again.")
+
     if is_present(name) and not force:
-        log(f"[download] {name}: INCOMPLETE at {rel} -- {why}")
-        if looks_sharded(name):
-            # Re-fetching would put the hub's flat layout back beside part_0000/, leaving two
-            # copies of everything and a corpus that scans at twice its size. Refuse and say
-            # what the two safe moves are.
-            raise SystemExit(
-                f"[download] {name} is split into part_NNNN/ directories and has no "
-                f"completion marker.\n"
-                f"           Re-fetching would download the hub's flat layout beside the "
-                f"split one and leave TWO copies.\n"
-                f"           If the data is good:   ./stage1_download_data.sh --adopt --only "
-                f"{name}\n"
-                f"           If it is not:          delete {rel} and run this again")
-        log(f"[download] {name}: resuming -- snapshot_download skips whatever already matches")
+        log(f"[download] {name}: incomplete -- {why}")
+        log(f"[download] {name}: resuming; snapshot_download skips whatever already matches")
     try:
         from huggingface_hub import snapshot_download
     except Exception as e:                                         # noqa: BLE001
@@ -318,12 +319,6 @@ def main(argv=None):
                     help="fetch just this dataset; repeatable")
     ap.add_argument("--list", action="store_true", help="show what would be fetched, then stop")
     ap.add_argument("--force", action="store_true", help="re-fetch even if already complete")
-    ap.add_argument("--verify", action="store_true",
-                    help="report what is complete, partial or missing, and stop")
-    ap.add_argument("--adopt", action="store_true",
-                    help="record an ALREADY-DOWNLOADED dataset as complete, without fetching. "
-                         "For corpora that arrived before completion was recorded -- you are "
-                         "vouching that the tree is whole")
     ap.add_argument("--reshard", action="store_true",
                     help="only split oversized directories of what is already downloaded; "
                          "fetches nothing")
@@ -331,11 +326,7 @@ def main(argv=None):
     def log(m): print(m, flush=True)
 
     describe(log)
-    if a.list or a.verify:
-        if a.verify:
-            bad = [n for n in (a.only or list(config.DATASETS)) if not is_complete(n)[0]]
-            log(f"[download] {len(bad)} of {len(a.only or config.DATASETS)} not complete"
-                + (": " + ", ".join(bad) if bad else ""))
+    if a.list:
         return
     if a.reshard:
         for name in (a.only or list(config.DATASETS)):
@@ -345,7 +336,7 @@ def main(argv=None):
                 log(f"[download] {name}: {'moved ' + format(n, ',') + ' files' if n else 'already split'}")
         return
     for name in (a.only or list(config.DATASETS)):
-        fetch(name, a.force, log, adopt=a.adopt)
+        fetch(name, a.force, log)
     log("")
     describe(log)
     log("[download] the trainers read these directories; nothing else fetches.")

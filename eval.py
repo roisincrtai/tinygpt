@@ -106,7 +106,7 @@ def main():
         for mode in methods:
             jp = os.path.join(args.result_dir, f"eval_{args.dataset}_{mode}.json")
             if os.path.isfile(jp):
-                RES["results"][mode] = json.load(open(jp))
+                RES["results"][mode] = json.load(open(jp, "r"))
             else:
                 print(f"[eval] plot-only: {jp} not found; skipping {mode}")
         for o in viz.eval_figure(RES, methods, p_grid, plotdir, tag):

@@ -149,7 +149,7 @@ def _read_records(path):
     under one of RECORD_KEYS, or a single record. A malformed line is skipped rather than
     fatal -- one bad line in a batch of thousands should not cost a load."""
     try:
-        text = open(path, encoding="utf-8").read()
+        text = open(path, "r", encoding="utf-8").read()
     except OSError:
         return []
     if path.endswith(".jsonl"):
@@ -456,7 +456,7 @@ def load_instruction_prompts(prompt_dir, limit=0):
     for fp in progress(files, desc=f"[instructions] reading {kind}", total=len(files)):
         if kind == "prompt lists":
             try:
-                for line in open(fp, encoding="utf-8", errors="replace"):
+                for line in open(fp, "r", encoding="utf-8", errors="replace"):
                     take(line)
             except OSError:
                 continue

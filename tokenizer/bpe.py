@@ -451,7 +451,7 @@ class BPETokenizer:
         if not path or not os.path.isfile(p):
             return None
         try:
-            d = json.load(open(p, encoding="utf-8"))
+            d = json.load(open(p, "r", encoding="utf-8"))
         except Exception:                                          # noqa: BLE001
             return None
         if d.get("sig") != sig or not d.get("merges"):
@@ -582,7 +582,7 @@ class BPETokenizer:
     def load(cls, path):
         # `merges` is the source of truth for encoding; `vocab` in the file is informational and
         # is rebuilt deterministically from the merges here.
-        d = json.load(open(path, encoding="utf-8"))
+        d = json.load(open(path, "r", encoding="utf-8"))
         # A FILE WITHOUT `layout` PREDATES specials-last, and its ids mean something else: the
         # specials were 0..2 and every byte and merge sat three higher. Loading it under the
         # current layout would not fail -- it would silently return a tokenizer that decodes

@@ -506,7 +506,7 @@ def _bpe_blob():
     if not p or not os.path.isfile(p):
         return None
     try:
-        return open(p, encoding="utf-8").read()
+        return open(p, "r", encoding="utf-8").read()
     except OSError:
         return None
 
@@ -736,7 +736,7 @@ def load_hist(ckdir, stage, upto=None):
     p = hist_path(ckdir, stage)
     if not os.path.isfile(p):
         return []
-    h = json.load(open(p))
+    h = json.load(open(p, "r"))
     if upto is None:
         return h
     keep = [r for r in h if r.get("step", 0) < upto]
@@ -1155,7 +1155,7 @@ def tokenizer_fingerprint(path=None, tok=None, n=8):
     The value is reproducible from the shell, which is why git's construction is used rather
     than a bare digest:
 
-        python -c "import json,hashlib,sys; m=json.load(open('checkpoints/bpe/bpe.json'))['merges']; \
+        python -c "import json,hashlib,sys; m=json.load(open('checkpoints/bpe/bpe.json', "r"))['merges']; \
                    b=json.dumps(m,separators=(',',':')).encode(); \
                    print(hashlib.sha1(b'blob %d\\0'%len(b)+b).hexdigest()[:8])"
 
@@ -1192,7 +1192,7 @@ def tokenizer_fingerprint(path=None, tok=None, n=8):
         key = (path, int(st.st_mtime), st.st_size)     # a MEMO key only; never part of the hash
         if key not in _FINGERPRINTS:
             from tokenizer.bpe import PRETOK_VERSION
-            with open(path, encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 merges = json.load(f)["merges"]
             _FINGERPRINTS[key] = blob_hash(json.dumps(
                 {"pretok": PRETOK_VERSION, "merges": merges},
@@ -1299,7 +1299,7 @@ def _source_documents(path, text_column):
     if os.path.splitext(path)[1].lower() == ".parquet":
         return _parquet_docs(path, text_column)
     try:
-        return [open(path, encoding="utf-8", errors="replace").read().splitlines()]
+        return [open(path, "r", encoding="utf-8", errors="replace").read().splitlines()]
     except Exception:                                          # noqa: BLE001
         return []
 
@@ -1435,7 +1435,7 @@ def _streams_in(d, tried):
         if tried and os.path.abspath(os.path.join(d, fn)) == tried:
             continue
         try:
-            with open(os.path.join(d, fn), encoding="utf-8") as f:
+            with open(os.path.join(d, fn), "r", encoding="utf-8") as f:
                 idx = json.load(f)
         except (OSError, ValueError):
             continue
@@ -1631,7 +1631,7 @@ def _pair_read(stem, want_pairs):
     those pairs with nothing to say so."""
     import array
     try:
-        with open(f"{stem}_index.json", encoding="utf-8") as f:
+        with open(f"{stem}_index.json", "r", encoding="utf-8") as f:
             head = json.load(f)
         n_rec, valid = int(head["n_records"]), int(head["n_bytes"])
     except (OSError, ValueError, KeyError):
@@ -1691,7 +1691,7 @@ def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print, resu
     have, valid = [], 0
     if resume:
         try:
-            with open(f"{stem}_index.json", encoding="utf-8") as f:
+            with open(f"{stem}_index.json", "r", encoding="utf-8") as f:
                 head = json.load(f)
             if head.get("sig") == sig and head.get("src_size") == st.st_size:
                 have, valid = _pair_read(stem, len(pairs))

@@ -102,7 +102,7 @@ def convert_split(files, out_dir, split, max_bytes, rows_per_group=200,
     from helpers import progress
     for i, fp in enumerate(progress(files, desc=f"[parquet] {split}", total=len(files))):
         try:
-            text = open(fp, encoding="utf-8", errors="replace").read()
+            text = open(fp, "r", encoding="utf-8", errors="replace").read()
         except OSError:
             continue
         if not text.strip():

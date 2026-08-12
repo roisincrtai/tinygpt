@@ -79,7 +79,7 @@ def _raw_text(split, log):
     local = os.path.join(DIR, RAW[split])
     if os.path.isfile(local):
         log(f"[scaling] {split}: reading {os.path.relpath(local, config.ROOT)}")
-        return open(local, encoding="utf-8", errors="replace").read()
+        return open(local, "r", encoding="utf-8", errors="replace").read()
     # NOTHING HERE DOWNLOADS. Fetching is tools/download_data.py's job alone, so a study that
     # runs for hours cannot begin by silently pulling half a gigabyte of someone else's corpus.
     raise SystemExit(

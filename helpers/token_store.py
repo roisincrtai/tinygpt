@@ -100,7 +100,7 @@ def shard_path(stem, i):
 
 def _read_index(stem):
     try:
-        with open(index_path(stem), encoding="utf-8") as f:
+        with open(index_path(stem), "r", encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
