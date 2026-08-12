@@ -56,6 +56,15 @@ the throughput of one. It is what makes a model or a context window run that doe
 card at all. Turn it off with `TENSOR_PARALLEL=0` or `--no-tensor_parallel` whenever the run
 already fits one card, where a single device is faster.
 
+### Key-value rollout cache
+
+Generating *n* tokens without a cache recomputes the whole prefix *n* times. `helpers/kv_cache.py`
+keeps four tensors per layer rather than two — attention's keys and values, and the state-space
+module's convolution window and recurrence state, since a block is SSM → attention → FFN and the
+recurrence would otherwise be re-run over the prefix anyway. `KV_CACHE_MB` (2 GiB) bounds it: a
+rollout is split into groups that fit and decoded a group at a time, which changes only the peak.
+`--no-kv_cache` recomputes instead.
+
 ### Customized configuration scheme
 
 A scheme is one entry in `default_config.SCHEMES`; `context_window` is the list of windows it
