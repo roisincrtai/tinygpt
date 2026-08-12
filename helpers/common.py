@@ -160,6 +160,19 @@ def parse_args(argv=None):
                     help="split the model's layers across every visible GPU (default)")
     ap.add_argument("--no-tensor_parallel", "--no_tensor_parallel", dest="tensor_parallel",
                     action="store_false", help="keep the whole model on one GPU")
+    # MIXED PRECISION, ON BY DEFAULT WHEREVER THE HARDWARE HAS IT. fp32 weights and fp32
+    # optimiser state, bfloat16 activations and matmuls: the standard recipe every modern
+    # pretrain uses, and the reason full-fp32 training is obsolete at scale -- twice the memory
+    # and slower, for no quality gain. It is resolved against the DEVICE in setup(), so this
+    # flag asks for it and the hardware decides; on CPU and MPS it silently stays off, because
+    # bf16 without the hardware paths is emulated and slower than the fp32 it replaced.
+    ap.add_argument("--mixed_precision", dest="mixed_precision", action="store_true",
+                    default=True,
+                    help="bfloat16 activations with fp32 weights and optimiser state, on CUDA "
+                         "(default)")
+    ap.add_argument("--no-mixed_precision", "--no_mixed_precision", dest="mixed_precision",
+                    action="store_false",
+                    help="train in full fp32 everywhere")
     # INCREMENTAL DECODING for the stages that generate. On by default: without it, producing
     # n tokens costs O(n^2) forward work, which the context schedule made intolerable.
     ap.add_argument("--kv_cache", dest="kv_cache", action="store_true", default=True,
@@ -479,8 +492,18 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
     for d in (args.model_dir, args.data_dir, CKDIR, PLOTDIR):
         os.makedirs(d, exist_ok=True)
     device = helpers.resolve_device(args.gpu)
+    # ASKED FOR AND AVAILABLE ARE DIFFERENT THINGS, and the difference is settled HERE, once,
+    # before any stage reads the flag. A run that asked for mixed precision on a CPU gets fp32
+    # and is TOLD so; the alternative is a flag that reads as on in the argument dump while
+    # every forward quietly ignores it.
+    if args.mixed_precision and not helpers.mixed_precision_ok(device):
+        log(f"[precision] mixed precision requested but {device} has no bfloat16 path: "
+            f"training in fp32")
+        args.mixed_precision = False
     log(f"device={device}  run={tag}  dataset={args.dataset}  "
         f"checkpoints={CKDIR}  plots={PLOTDIR}")
+    log("precision: " + ("bf16 activations, fp32 weights and optimiser state (mixed)"
+                         if args.mixed_precision else "fp32 everywhere"))
     log("arguments:")
     for _k, _v in sorted(vars(args).items()):
         log(f"    {_k} = {_v}")

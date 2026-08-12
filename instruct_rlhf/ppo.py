@@ -28,7 +28,7 @@ import torch.nn.functional as F
 
 import default_config as config
 from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
-                     restore_rng, CosineLR, ckpt_path)  # progress: every loop reports through tqdm
+                     restore_rng, CosineLR, ckpt_path, amp)  # progress: every loop reports through tqdm
 
 NAME = "RLHF"
 STAGE = "rlhf"
@@ -201,8 +201,12 @@ def run(policy, ref, rm, tok, train_pairs, ckdir, args, log, monitor, preview=No
             # ---- 3: reward-model score of each rollout ---- #
             score = rm(ids, attn)                                           # (B,)
             # ---- old policy / reference per-token log-probs and values ---- #
-            old_lp, values, _ = forward_scores(policy, ids, attn, vhead=vhead)
-            ref_lp, _, _ = forward_scores(ref, ids, attn)
+            # bf16 through both trunks. forward_scores ends in a log_softmax, which autocast
+            # keeps in fp32, so the log-probabilities these ratios are built from are fp32
+            # whatever the matmuls ran in.
+            with amp(args):
+                old_lp, values, _ = forward_scores(policy, ids, attn, vhead=vhead)
+                ref_lp, _, _ = forward_scores(ref, ids, attn)
             klt = (old_lp - ref_lp) * rmask                                 # per-token KL sample
             # ---- 4: per-token rewards (KL penalty; score at the last token) ---- #
             rewards = -cfg["kl_coef"] * klt
@@ -222,8 +226,9 @@ def run(policy, ref, rm, tok, train_pairs, ckdir, args, log, monitor, preview=No
         pg_l = v_l = ent_l = 0.0
         for _ in progress(range(cfg["ppo_epochs"]), desc=tag("rlhf") + " ppo epochs",
                           total=cfg["ppo_epochs"]):
-            new_lp, v_pred, ent = forward_scores(policy, ids, attn, vhead=vhead,
-                                                 need_entropy=True)
+            with amp(args):
+                new_lp, v_pred, ent = forward_scores(policy, ids, attn, vhead=vhead,
+                                                     need_entropy=True)
             ratio = torch.exp((new_lp - old_lp).clamp(-20, 20))
             s1 = ratio * adv
             s2 = torch.clamp(ratio, 1 - cfg["clip_eps"], 1 + cfg["clip_eps"]) * adv

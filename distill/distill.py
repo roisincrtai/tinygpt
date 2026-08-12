@@ -157,7 +157,9 @@ def train(student, s_tok, teacher, t_tok, prompts, ckdir, args, log, monitor, pr
         if not pairs:
             continue
         ids, attn, rmask = _encode_student(s_tok, pairs, device, cfg["student_max_len"])
-        logits = student(input_ids=ids, attention_mask=attn).logits[:, :-1].float()
+        with helpers.amp(args):
+            logits = student(input_ids=ids, attention_mask=attn).logits[:, :-1]
+        logits = logits.float()          # the KL below is over the FULL vocabulary: fp32
         rm = rmask[:, 1:].float()
         logp = F.log_softmax(logits, -1)
         lp = logp.gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)

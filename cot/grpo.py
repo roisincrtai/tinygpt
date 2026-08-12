@@ -33,7 +33,7 @@ from torch.utils.checkpoint import checkpoint
 import default_config as config
 from chat import decode
 from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
-                     restore_rng, CosineLR, ckpt_path)
+                     restore_rng, CosineLR, ckpt_path, amp)
 
 from . import verifier
 
@@ -348,14 +348,18 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         adv_seq = group_advantages(rewards, G)
         adv = adv_seq.unsqueeze(1) * rmask
         with torch.no_grad():
-            old_lp, _ = forward_logprobs(policy, ids, attn)
-            ref_lp, _ = forward_logprobs(ref, ids, attn)
+            # bf16 through both trunks; the chunked log_softmax inside is on autocast's fp32
+            # list, so the ratio and the k3 KL below are computed from fp32 log-probabilities.
+            with amp(args):
+                old_lp, _ = forward_logprobs(policy, ids, attn)
+                ref_lp, _ = forward_logprobs(ref, ids, attn)
         # ---- 5. GRPO epochs ---- #
         policy.train()
         pg_l = kl_l = ent_l = clipped = 0.0
         for _ in progress(range(cfg["grpo_epochs"]), desc=tag("cot") + " grpo epochs",
                           total=cfg["grpo_epochs"]):
-            new_lp, ent = forward_logprobs(policy, ids, attn, need_entropy=True)
+            with amp(args):
+                new_lp, ent = forward_logprobs(policy, ids, attn, need_entropy=True)
             ratio = torch.exp((new_lp - old_lp).clamp(-20, 20))
             s1 = ratio * adv
             s2 = torch.clamp(ratio, 1 - cfg["clip_eps"], 1 + cfg["clip_eps"]) * adv

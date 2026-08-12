@@ -30,7 +30,7 @@
 ZETAGPT_VARS="PY GPU SEED \
 DATASET PRETRAIN_DIR INSTRUCT_DIR SFT_DIR DATA_LIMIT VAL_FRAC \
 MODEL_SCHEME CONTEXT_WINDOW PE \
-BATCH MICRO_BATCH CHUNKED_LOSS LOSS_CHUNK TENSOR_PARALLEL LR_SCHEDULE LR_MIN_FACTOR BETA \
+BATCH MICRO_BATCH MIXED_PRECISION CHUNKED_LOSS LOSS_CHUNK TENSOR_PARALLEL LR_SCHEDULE LR_MIN_FACTOR BETA \
 PLOT_EVERY PRINT_SAMPLES_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
 EVAL_EVERY EVAL_PAIRS EB_EVERY EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID \
 EXTRA_SET COMMON_FLAGS \
@@ -233,6 +233,23 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 # MEASURE with `python -m tools.vram --sweep` on the card you will train on before raising
 # this. MICRO_BATCH splits the step instead and cuts the loss tensors proportionally, at no
 # cost to the result. RECOMPUTE PRETRAIN_STEPS whenever this changes.
+# MIXED PRECISION -- ON BY DEFAULT, AND THE HARDWARE DECIDES. bfloat16 for the activations, the
+# matmuls and the backward pass; fp32 for the weights, the optimiser state, the gradient
+# accumulation and every reduction -- layer norm statistics, softmax, log-softmax, logsumexp,
+# the loss. That split is the standard recipe: full-fp32 pretraining is obsolete at scale,
+# costing roughly twice the memory and much of the speed for no quality gain.
+#
+# bf16 AND NOT fp16, because bf16 keeps fp32's eight exponent bits and spends mantissa instead:
+# gradients neither overflow nor underflow and NO LOSS SCALING IS NEEDED. And fp32 masters and
+# not pure bf16, because once the weights are large next to the updates an update below bf16's
+# ~3 significant digits rounds away entirely and training stalls with a curve that looks merely
+# flat -- which is what the fp32 master copy exists to prevent.
+#
+# APPLIED ONLY ON CUDA. bfloat16 exists as a dtype on CPU and MPS but without the hardware paths
+# it is emulated, slower than the fp32 it replaced; the run says which it got rather than
+# leaving the flag reading "on" while every forward ignores it. 0 trains in fp32 everywhere.
+MIXED_PRECISION="${MIXED_PRECISION:-1}"
+
 BATCH="${BATCH:-}"                  # blank = the scheme's own (SCHEME_BATCH); a number here wins
 MICRO_BATCH="${MICRO_BATCH:-0}"     # sequences per forward pass; 0 = OFF, the whole batch at
                                     # once. Splits one step into several passes whose gradients
@@ -638,6 +655,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$MICRO_BATCH" ]    && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
 [ "$CHUNKED_LOSS" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no_chunked_loss"
 [ "$TENSOR_PARALLEL" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no-tensor_parallel"
+# Only the OFF switch is passed: the default is on in default_config, and a flag that
+# restates a default is a second place for it to drift from.
+[ "$MIXED_PRECISION" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no-mixed_precision"
 [ "$KV_CACHE" = "0" ]    && COMMON_FLAGS="$COMMON_FLAGS --no-kv_cache"
 [ -n "$KV_CACHE_SIZE" ]  && COMMON_FLAGS="$COMMON_FLAGS --kv_cache_size $KV_CACHE_SIZE"
 [ -n "$LOSS_CHUNK" ]     && COMMON_FLAGS="$COMMON_FLAGS --loss_chunk $LOSS_CHUNK"

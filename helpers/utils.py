@@ -5,6 +5,7 @@ mixed-precision optimizer, the checkpoint/history IO that resume and the figures
 on, and the on-disk token cache.
 """
 import array
+import contextlib
 import glob
 import json
 import math
@@ -282,6 +283,49 @@ def rollout_curve(policy, ref, tok, pairs, beta, p_grid, roll_tokens, max_len, s
 # --------------------------------------------------------------------------- #
 # mixed-precision optimizer: bf16 live weights, fp32 master weights + AdamW moments
 # --------------------------------------------------------------------------- #
+def mixed_precision_ok(device):
+    """Can this device carry bf16 activations? (available, supported, and CUDA).
+
+    CUDA ONLY, and deliberately. bfloat16 exists on CPU and on MPS as a dtype, but without the
+    hardware paths it is emulated -- slower than fp32 and with none of the bandwidth saving the
+    whole exercise is for. A card older than Ampere reports no bf16 support, and there the
+    answer is fp32 rather than fp16: fp16 needs loss scaling, and a scaler is a second thing to
+    get wrong for a saving this pipeline does not need."""
+    dev = device if isinstance(device, str) else getattr(device, "type", str(device))
+    if not str(dev).startswith("cuda") or not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_bf16_supported())
+    except Exception:                                             # noqa: BLE001
+        return False
+
+
+def amp(args):
+    """The autocast context every training forward runs inside; a no-op when it is off.
+
+    MIXED PRECISION, AS THE STANDARD RECIPE HAS IT: bfloat16 for the activations, the matmuls
+    and the backward pass -- which is where the memory and the bandwidth go -- and fp32 for
+    everything that ACCUMULATES. autocast draws that line itself and draws it correctly: matmul
+    and the convolutions run in bf16, while softmax, log_softmax, layer normalisation and the
+    reductions are on its fp32 list and stay there. The weights are never cast, so the master
+    copy the optimiser updates is fp32 by construction, and AdamW's moments with it.
+
+    WHY bf16 AND NOT fp16. bf16 keeps fp32's eight exponent bits and spends mantissa instead, so
+    gradients neither overflow nor underflow and NO LOSS SCALING IS NEEDED. fp16 needs a
+    GradScaler, which is a second mechanism to misconfigure; this pipeline has none and needs
+    none. Pure bf16 -- bf16 optimiser state as well -- is the thing to avoid: once the weights
+    are large next to the updates, an update below bf16's ~3 significant digits rounds to
+    nothing and training stalls with a loss curve that looks merely flat. fp32 masters are
+    exactly what stops that.
+
+    WRAP THE FORWARD, NOT THE BACKWARD. autocast records the dtype each operation ran in, and
+    the backward pass follows that record; wrapping backward as well is at best redundant. The
+    optimiser step belongs OUTSIDE, where it operates on fp32 parameters and fp32 gradients."""
+    if not getattr(args, "mixed_precision", False):
+        return contextlib.nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+
 class MasterAdamW:
     """AdamW with fp32 master weights.
 

@@ -53,6 +53,24 @@ through — `zetagpt-m` is `[1024, 2048, 4096, 8192, 16384]` — and each window
 step budget, shortest first. The batch is sized at the longest window and scales up as the
 window shortens, so tokens per step stay constant across the whole run.
 
+### Mixed precision
+
+On by default wherever the hardware has it: **bfloat16 for the activations, the matmuls and the
+backward pass; fp32 for everything that accumulates** — the weights, the optimiser state, the
+gradient accumulation, and every reduction, meaning layer-norm statistics, softmax, log-softmax,
+logsumexp and the loss. `torch.autocast` draws that line and keeps the reductions on its fp32
+list, so no stage has to remember to.
+
+bf16 rather than fp16 because it keeps fp32's eight exponent bits and spends mantissa instead:
+gradients neither overflow nor underflow, and no loss scaling is needed — there is no
+`GradScaler` anywhere in this repository and none is wanted. fp32 masters rather than pure bf16
+because once the weights are large next to the updates, an update below bf16's three significant
+digits rounds away entirely and training stalls with a curve that merely looks flat.
+
+Resolved against the device, not asserted: CUDA with bf16 support gets it, and CPU, MPS and
+pre-Ampere cards are told they are training in fp32 rather than left with a flag that reads as
+on. `MIXED_PRECISION=0`, or `--no-mixed_precision`, forces fp32 everywhere.
+
 ### Parallelism
 
 With more than one GPU the model's **layers** are split across them automatically: 2 GPUs and

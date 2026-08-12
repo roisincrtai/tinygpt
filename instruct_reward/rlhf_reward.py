@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from helpers import (tag, progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
-                     restore_rng, CosineLR, ckpt_path)
+                     restore_rng, CosineLR, ckpt_path, amp)
 
 NAME = "Reward"
 STAGE = "reward"
@@ -124,10 +124,13 @@ def run(model, enc, train_pairs, ev_pairs, ckdir, args, log, monitor):
         idx = torch.randint(0, Ntr, (args.batch,), generator=g).tolist()
         chunk = [train_pairs[i] for i in idx]
         W = enc.encode(chunk, "chosen"); L = enc.encode(chunk, "rejected")
-        sw = model(W[0], W[1]); sl = model(L[0], L[1])
-        logits = torch.cat([sw, sl])
-        labels = torch.cat([torch.ones_like(sw), torch.zeros_like(sl)])
-        loss = F.binary_cross_entropy_with_logits(logits, labels)
+        # bf16 through the trunk and the scalar head; the loss is on autocast's fp32 list, so
+        # the margin between the two scores is never computed at bf16's resolution.
+        with amp(args):
+            sw = model(W[0], W[1]); sl = model(L[0], L[1])
+            logits = torch.cat([sw, sl])
+            labels = torch.cat([torch.ones_like(sw), torch.zeros_like(sl)])
+            loss = F.binary_cross_entropy_with_logits(logits.float(), labels.float())
         opt.zero_grad(); loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
         with torch.no_grad():

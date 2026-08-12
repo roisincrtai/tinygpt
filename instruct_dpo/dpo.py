@@ -27,6 +27,8 @@ import hashlib
 import torch
 import torch.nn.functional as F
 
+import helpers
+
 NAME = "DPO"
 STAGE = "dpo"
 
@@ -237,7 +239,12 @@ def run(model, ref, enc, train_pairs, ev_pairs, tok, ckdir, args, log, monitor, 
         for mc in _micro_split(chunk, args.micro_batch):   # each micro-batch frees its graph
             w = len(mc) / len(chunk)
             Wi = enc.encode(mc, "chosen"); Li = enc.encode(mc, "rejected")
-            L_i, cr_i, rr_i, M_i = loss(model, ref, Wi, Li, args.beta, gen=cg)
+            # bf16 through both policies. dpo.loss already forces its logsumexp to fp32
+            # (_LogSumExp32), which is precisely the guard bf16 logits need: the implicit
+            # reward is a DIFFERENCE of sequence log-likelihoods, and a margin computed at
+            # bf16's three significant digits is noise.
+            with helpers.amp(args):
+                L_i, cr_i, rr_i, M_i = loss(model, ref, Wi, Li, args.beta, gen=cg)
             (L_i * w).backward()
             lval += L_i.item() * w
             crs.append(cr_i.detach()); rrs.append(rr_i.detach()); Ms.append(M_i.detach())

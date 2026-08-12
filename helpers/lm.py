@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from model.ssm import collect_stats, layer_stats
 
 from .utils import (progress, save_ckpt, load_ckpt, save_hist, load_hist, MasterAdamW,
-                     CosineLR, ckpt_path, tag, restore_rng)
+                     CosineLR, ckpt_path, tag, restore_rng, amp)
 
 NAME = "LM"
 STAGE = "sft"          # default stage name; the pretrain package passes its own
@@ -268,7 +268,12 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         for off in range(0, cur_batch, mb):
             nb = min(mb, cur_batch - off)
             ids, attn, rmask = sample(nb, g, max(cur_ctx - 1, 1))
-            loss, correct, ntok = lm_loss(model, ids, attn, rmask, chunk)
+            # THE FORWARD IS INSIDE, THE BACKWARD AND THE STEP ARE NOT. autocast records the
+            # dtype each operation ran in and the backward follows that record, so wrapping it
+            # too would add nothing; the optimiser must see fp32 parameters and fp32 gradients,
+            # which is exactly what it sees out here.
+            with amp(args):
+                loss, correct, ntok = lm_loss(model, ids, attn, rmask, chunk)
             (loss * (nb / cur_batch)).backward()
             sum_loss += float(loss.item()) * nb
             sum_correct += float(correct.item()); sum_tokens += float(ntok.item())
