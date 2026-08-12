@@ -761,6 +761,12 @@ COT = dict(
     # GiB, not bytes: this is a number a person sets against a card they can see, and 2 is
     # readable where 2147483648 is a thing to be trusted. A float is accepted, so 0.5 works.
     kv_cache_size=2.0,          # GiB
+    # HOW OFTEN THE ROLLOUT SAMPLES ARE PRINTED, for the GRPO half only. Tighter than the
+    # pipeline's --print_samples_every_steps (200) because a GRPO step is not comparable to an
+    # LM step: it costs a whole group of rollouts, there are far fewer of them, and what this
+    # stage is watching -- the format appearing, the reasoning lengthening -- shows up in the
+    # TEXT rather than in the loss. 0 = follow --print_samples_every_steps.
+    samples_every=50,
     # DATA. Every .json under the task's directory; each countdown record carries a prompt, an
     # answer of {target, numbers}, and a reference trace. The SFT reads the trace; GRPO does
     # not -- it sees only the question and, through the verifier, the answer.

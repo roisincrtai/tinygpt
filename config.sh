@@ -40,7 +40,7 @@ PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
 SFT_STEPS SFT_LR SFT_FLAGS \
 REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
-KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_SFT COT_SFT_STEPS COT_SFT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
+KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_SFT COT_SFT_STEPS COT_SFT_LR COT_INIT COT_GROUP COT_SAMPLES_EVERY COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
 LANG_SFT_DATASET LANG_SFT_DATASET_SHORTNAME LANG_SFT_MERGES LANG_SFT_STEPS LANG_SFT_LR LANG_SFT_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
@@ -438,6 +438,13 @@ COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which check
                                     # SUPERVISED sub-stage starts from (and, with COT_SFT=0,
                                     # which one GRPO starts from). GRPO otherwise starts from
                                     # the cot-sft checkpoint.
+COT_SAMPLES_EVERY="${COT_SAMPLES_EVERY:-50}"   # print the 5 rollout samples every N GRPO
+                                    # steps. Tighter than PRINT_SAMPLES_EVERY (200): a GRPO
+                                    # step costs a whole group of rollouts, there are far fewer
+                                    # of them, and what this stage watches -- the format
+                                    # appearing, the reasoning lengthening -- shows up in the
+                                    # text before it shows up in a curve. 0 = follow
+                                    # PRINT_SAMPLES_EVERY.
 COT_GROUP="${COT_GROUP:-8}"         # completions sampled per problem (GRPO's baseline is
                                     # their mean, so this is the group it averages over)
 COT_KL_COEF="${COT_KL_COEF:-0.001}" # much smaller than RLHF's: reasoning needs room to
@@ -679,6 +686,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ "$COT_SFT" = "0" ]     && COT_FLAGS="$COT_FLAGS --no-cot_sft"
 [ -n "$COT_INIT" ]       && COT_FLAGS="$COT_FLAGS --cot_init $COT_INIT"
 [ -n "$COT_GROUP" ]      && COT_FLAGS="$COT_FLAGS --cot_group $COT_GROUP"
+[ -n "$COT_SAMPLES_EVERY" ] && COT_FLAGS="$COT_FLAGS --cot_samples_every $COT_SAMPLES_EVERY"
 [ -n "$LANG_SFT_DATASET" ]  && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_dataset $LANG_SFT_DATASET"
 [ -n "$LANG_SFT_DATASET_SHORTNAME" ] && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_short $LANG_SFT_DATASET_SHORTNAME"
 [ -n "$LANG_SFT_MERGES" ]  && LANG_SFT_FLAGS="$LANG_SFT_FLAGS --lang_sft_merges $LANG_SFT_MERGES"

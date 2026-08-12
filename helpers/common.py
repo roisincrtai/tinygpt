@@ -253,6 +253,10 @@ def parse_args(argv=None):
                     help="checkpoint the reasoning SFT starts from -- and, with --no-cot_sft, "
                          "the checkpoint GRPO itself starts from; 'pretrain' is the R1-Zero "
                          "setting (no supervised reasoning anywhere before the RL)")
+    ap.add_argument("--cot_samples_every", type=int, default=config.COT["samples_every"],
+                    help="print the GRPO rollout samples every N steps; 0 = follow "
+                         "--print_samples_every_steps. Separate because a GRPO step costs a "
+                         "whole group of rollouts and there are far fewer of them")
     ap.add_argument("--cot_group", type=int, default=config.COT["group_size"],
                     help="completions sampled per problem; the group is GRPO's baseline "
                          "and must be >= 2")

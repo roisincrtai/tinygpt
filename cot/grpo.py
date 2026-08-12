@@ -341,9 +341,13 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
             save_hist(ckdir, STAGE, hist)
         if args.plot_every_steps > 0 and (step + 1) % args.plot_every_steps == 0:
             monitor(STAGE, hist, step + 1)
-        # the generation examples keep their own cadence, --print_samples_every_steps, the same
-        # flag and the same 20 examples the LM stages use
-        every = getattr(args, "print_samples_every_steps", args.plot_every_steps)
+        # THIS STAGE HAS ITS OWN SAMPLE CADENCE, --cot_samples_every, falling back to the
+        # pipeline-wide one. A GRPO step is not comparable to an LM step: it costs a whole
+        # group of rollouts, there are far fewer of them, and what the run is watching -- the
+        # format appearing, the reasoning lengthening -- is visible in the text long before it
+        # is visible in a curve.
+        every = (getattr(args, "cot_samples_every", 0)
+                 or getattr(args, "print_samples_every_steps", args.plot_every_steps))
         if preview and every > 0 and (step + 1) % every == 0:
             preview(policy, STAGE, step + 1)
 
