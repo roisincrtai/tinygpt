@@ -33,9 +33,10 @@ ANSWER_OPEN, ANSWER_CLOSE = "<answer>", "</answer>"
 # the model how to reason -- that is the whole point of a zero run -- it only says where the
 # reasoning goes, so a format reward has something to pay for.
 SYSTEM_PROMPT = (
-    "A conversation between a user and an assistant. The assistant first thinks about the "
-    "reasoning process step by step, then gives the final answer. The reasoning is enclosed "
-    f"in {THINK_OPEN} {THINK_CLOSE}, and the final answer in {ANSWER_OPEN} {ANSWER_CLOSE}."
+    "The assistant is required to answer the user's question given after \"User:\", and first "
+    "thinks about the reasoning process step by step, then gives the final answer. The "
+    f"reasoning is enclosed in {THINK_OPEN} {THINK_CLOSE}, and the final answer in "
+    f"{ANSWER_OPEN} {ANSWER_CLOSE}."
 )
 
 PROMPT_TEMPLATE = (
@@ -60,6 +61,45 @@ _BOXED = "\\boxed{"
 _NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 
 
+def normalise_question(text):
+    r"""A dataset's question in THIS pipeline's answer convention.
+
+    Datasets carry their own instructions about where the answer goes, and the countdown ones
+    say \boxed{}: both in the worked example ("the answer could be \boxed{2+3+5}") and in the
+    closing line ("put your final answer within \boxed{}"). Prepending a system prompt that
+    asks for <answer> tags leaves the model with TWO conventions and no way to tell which is
+    meant -- and only one of them is what the reward pays for.
+
+    So the question is rewritten rather than merely wrapped: every \boxed{X} becomes
+    <answer> X </answer>, including the empty \boxed{} of the closing instruction. The braces
+    are counted rather than matched to the first "}", so \boxed{(2+3)*5} survives intact.
+
+    Rewriting the QUESTION rather than teaching the reward a second convention is deliberate.
+    Two accepted formats mean two ways to be right, a policy free to drift between them, and a
+    format reward that no longer means one thing."""
+    if not text or _BOXED not in text:
+        return text or ""
+    out, i = [], 0
+    while True:
+        at = text.find(_BOXED, i)
+        if at < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:at])
+        j, depth, inner = at + len(_BOXED), 1, []
+        while j < len(text) and depth:
+            ch = text[j]
+            depth += (ch == "{") - (ch == "}")
+            if depth:
+                inner.append(ch)
+            j += 1
+        body = "".join(inner).strip()
+        out.append(f"{ANSWER_OPEN} {body} {ANSWER_CLOSE}" if body
+                   else f"{ANSWER_OPEN} {ANSWER_CLOSE}")
+        i = j
+    return "".join(out)
+
+
 def prompt(question, cfg=None):
     """The rollout prompt for one problem: system instruction, question, assistant turn.
 
@@ -69,8 +109,12 @@ def prompt(question, cfg=None):
     for <answer> tags and the extractor read neither -- so a completion that did exactly what
     the prompt said scored zero, every group was unanimous, every advantage was zero, and the
     run trained on nothing while looking healthy."""
-    sys_text = (cfg or {}).get("system_prompt") or SYSTEM_PROMPT
-    return PROMPT_TEMPLATE.format(system=sys_text, question=question.strip())
+    cfg = cfg or {}
+    sys_text = cfg.get("system_prompt") or SYSTEM_PROMPT
+    q = question.strip()
+    if cfg.get("normalise_question", True):
+        q = normalise_question(q).strip()
+    return PROMPT_TEMPLATE.format(system=sys_text, question=q)
 
 
 def _clean_number(s):

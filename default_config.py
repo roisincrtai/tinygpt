@@ -652,6 +652,14 @@ COT = dict(
     # instruction to answer inside \boxed{}; the extractor now reads \boxed{} first, so the two
     # agree. When they did not, a completion that obeyed the prompt exactly scored zero.
     system_prompt="",
+    # THE QUESTION IS REWRITTEN INTO OUR CONVENTION before it is asked. A dataset carries its
+    # own instruction about where the answer goes -- the countdown questions say \boxed{}, in
+    # the worked example and again in the closing line -- and a system prompt asking for
+    # <answer> tags on top of that leaves the model with two conventions and only one of them
+    # rewarded. normalise_question() turns every \boxed{X} into <answer> X </answer>, so the
+    # question, the instruction and the reward all name the same thing. Set False to ask the
+    # dataset's questions exactly as they are written.
+    normalise_question=True,
     length_penalty=0.0,         # per-token penalty on the response (0 = let it grow freely)
     # WHICH TASK. "countdown" (the default) is the Countdown number game: reach a target from
     # a few numbers using + - * / , each number at most once. "gsm8k" is grade-school word
