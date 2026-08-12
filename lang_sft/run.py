@@ -7,7 +7,7 @@ lang_sft/run.py -- stage 11: adapt the pretrained model to a NEW LANGUAGE.
 THREE STEPS, IN THIS ORDER, and the order is the whole design:
 
     1. THE VOCABULARY. The default BPE is loaded and used to read the new corpus, then
-       EXTENDED with merges learned on it (bpe_sft/run.py). Every existing id keeps its
+       EXTENDED with merges learned on it (tokenizer_sft/run.py). Every existing id keeps its
        meaning; the new merges are appended.
            -> checkpoints/lang-sft/<dataset>/bpe/bpe.json
     2. THE TOKEN STREAM. The corpus is tokenised WITH THAT EXTENDED VOCABULARY into
@@ -35,7 +35,7 @@ first is what makes the same number of steps cover several times as much Irish.
 
 WHY IT IS AN EXTENSION AND NOT A NEW VOCABULARY. New ids would mean the embedding rows learned
 in stage 5 now sit against different tokens: the pretrained checkpoint could not be used and
-this stage would be a retrain rather than an adaptation. See bpe_sft/run.py, which also
+this stage would be a retrain rather than an adaptation. See tokenizer_sft/run.py, which also
 explains the one thing extension is not free of -- the specials move, and a checkpoint has to
 be rearranged for it.
 
@@ -51,7 +51,7 @@ from helpers import common, lm
 from helpers import dataset_helpers as dsets
 from tokenizer.bpe import BPETokenizer
 
-import bpe_sft
+import tokenizer_sft
 
 STAGE = "lang_sft"
 
@@ -106,7 +106,7 @@ def build_tokenizer(ctx):
             f"[lang-sft] corpus directory does not exist: {d}\n"
             f"           No stage downloads. Fetch it first:\n"
             f"               ./stage1_download_data.sh --only {dataset_name(args)}")
-    out = bpe_sft.extended_path(dataset_name(args), ctx["ckdir"])
+    out = tokenizer_sft.extended_path(dataset_name(args), ctx["ckdir"])
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
     def texts():
@@ -118,7 +118,7 @@ def build_tokenizer(ctx):
         log(f"[lang-sft] vocabulary corpus: {n_files:,} files, {len(docs):,} documents")
         return [r["chosen"] for r in docs]
 
-    tok = bpe_sft.extend(config.BPE_PATH, out, LazyTexts(texts),
+    tok = tokenizer_sft.extend(config.BPE_PATH, out, LazyTexts(texts),
                          getattr(args, "lang_sft_merges", 0)
                          or config.LANG_SFT["extra_merges"], log=log,
                          plotdir=plot_dir(args),
@@ -217,7 +217,7 @@ def load_init_model(ctx, tok, log):
     if old is None:
         raise SystemExit("[lang-sft] the pretrain checkpoint carries no tokenizer and "
                          f"{config.BPE_PATH} does not exist: cannot tell what its ids mean")
-    state, n_new = bpe_sft.remap_specials(ck["model"], old, tok, log=log)
+    state, n_new = tokenizer_sft.remap_specials(ck["model"], old, tok, log=log)
     saved = ck.get("model_cfg")
     model = common.build_model(ctx["tok"], ctx["device"],
                                model_cfg=common.translate_cfg(saved) if saved else None)
@@ -245,7 +245,7 @@ def run(ctx):
     log("")
     log("=" * 78)
     log(f"STAGE 11, STEP 1 of 3: extend the vocabulary  -> "
-        f"{bpe_sft.extended_path(dataset_name(args), ctx['ckdir'])}")
+        f"{tokenizer_sft.extended_path(dataset_name(args), ctx['ckdir'])}")
     log(f"STAGE 11, STEP 2 of 3: tokenise the corpus    -> cache/tokens/ "
         f"(with the extended vocabulary)")
     log(f"STAGE 11, STEP 3 of 3: continue pretraining   -> "

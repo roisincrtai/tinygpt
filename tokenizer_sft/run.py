@@ -1,11 +1,11 @@
 """
-bpe_sft/run.py -- vocabulary adaptation: EXTEND a trained BPE with merges for a new corpus.
+tokenizer_sft/run.py -- vocabulary adaptation: EXTEND a trained BPE with merges for a new corpus.
 
     extend(base_path, out_path, texts, extra_merges, log)  -> the extended tokenizer
     extended_path(dataset)                                  where it is written
     remap_specials(state, old_tok, new_tok, log)            a checkpoint's rows, rearranged
 
-    python -m bpe_sft.run --lang_sft_dataset <name> [--lang_sft_merges N]
+    python -m tokenizer_sft.run --lang_sft_dataset <name> [--lang_sft_merges N]
 
 WHY EXTEND RATHER THAN RETRAIN. A vocabulary trained on English tokenises Irish badly -- not
 wrongly, a byte-level BPE can always fall back to raw bytes, but expensively, splitting common
@@ -44,7 +44,7 @@ from helpers import visualization as viz
 from tokenizer.bpe import BPETokenizer
 from tokenizer.run import with_extra_specials
 
-STAGE = "bpe_sft"
+STAGE = "tokenizer_sft"
 
 
 def extended_path(dataset, ckdir=None):

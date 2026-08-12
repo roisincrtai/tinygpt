@@ -613,7 +613,7 @@ DPO = dict(steps=590, lr=1e-6)       # 1 epoch; starts from SFT, ref = frozen SF
 # THE EXTENSION KEEPS EVERY EXISTING ID. The English merges stay, in order, and the new ones
 # are appended, so the pretrained embedding still means what it learned and the model needs
 # only more rows. A FRESH vocabulary would tokenise Irish better and throw the pretrained model
-# away with it. See bpe_sft/run.py, including the one thing extension is not free of: the id
+# away with it. See tokenizer_sft/run.py, including the one thing extension is not free of: the id
 # layout puts the specials LAST, so appending merges moves them, and a checkpoint has to be
 # rearranged for it.
 LANG_SFT = dict(
