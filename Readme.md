@@ -101,31 +101,42 @@ WikiText-103.
 already in the file; add your line inside each, beside the existing schemes:
 
 ```python
-SCHEMES = {                                          # default_config.py, ~line 266
+# default_config.py ~line 266 -- the architecture and the context schedule
+SCHEMES = {
     ...
     "zetagpt-baby": dict(n_layer=6, n_head=8, n_embd=512,
-                         context_window=[256, 512]),
+                         context_window=[256, 512]),   # trains at 256, then at 512
 }
 
-PRETRAIN_CORPUS = {                                  # ~line 144: which corpus it trains on
+# ~line 144 -- which corpus this scheme trains on
+PRETRAIN_CORPUS = {
     ...
     "zetagpt-baby": dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
 }
 
-SCHEME_BATCH = {                                     # ~line 286: sequences per step at the
-    ...                                              #            LONGEST window
-    "zetagpt-baby": 64,
+# ~line 286 -- BATCH SIZE: how many SEQUENCES go through one step. Not a length.
+# It is the batch for the LONGEST window (512 here); shorter windows scale it up.
+SCHEME_BATCH = {
+    ...
+    "zetagpt-baby": 64,        # 64 sequences x 512 tokens = 32,768 tokens per step
 }
 
-SCHEME_MICRO_TOKENS = {                              # ~line 309: 0 = no micro-batching,
-    ...                                              #            this one fits in one pass
+# ~line 309 -- sequences per forward pass when a step is too big to fit at once.
+# 0 = off: this model is small enough that the whole step goes through in one pass.
+SCHEME_MICRO_TOKENS = {
+    ...
     "zetagpt-baby": 0,
 }
 ```
 
-`n_head` is not a free choice: the head dimension is 64 everywhere, so it is `n_embd / 64` —
-512 / 64 = 8. `context_window` is the list of windows the run trains through and its largest
-entry is the model's context, so this model has a 512-token context.
+Three numbers are easy to confuse, so to be explicit: `context_window=[256, 512]` is the
+**sequence length**, `SCHEME_BATCH = 64` is **how many sequences per step**, and
+`SCHEME_MICRO_TOKENS = 0` is **how the step is split across forward passes**. Only the first
+is a length.
+
+`n_head` is not a free choice either: the head dimension is 64 everywhere, so it is
+`n_embd / 64` — 512 / 64 = 8. The largest entry of `context_window` is the model's context, so
+this model has a 512-token context.
 
 **Step 2 — set the scheme in `config.sh`**, or override it per run:
 
