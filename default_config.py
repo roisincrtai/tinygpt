@@ -670,7 +670,11 @@ COT = dict(
     # a policy-gradient objective over rollouts are not the same optimisation and never want
     # the same schedule.
     sft=True,                   # False (--no-cot_sft) = the R1-Zero setting, GRPO alone
-    sft_steps=10000,
+    # 7,000 steps is a little over one epoch of the countdown demonstrations at batch 3:
+    # 20,071 problems, all of which convert and verify, so 7,000 x 3 = 21,000 examples seen.
+    # The format is what this sub-stage teaches, and a format is learned in roughly one pass;
+    # more epochs mostly memorise the particular traces.
+    sft_steps=7000,
     sft_lr=1e-5,
     # The demonstrations are FILTERED before they are trained on: a reference trace whose own
     # final answer the verifier rejects would teach the model to be confidently wrong in the

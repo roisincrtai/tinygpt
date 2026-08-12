@@ -434,7 +434,7 @@ COT_LR="${COT_LR:-1e-5}"
 # scores alike, every advantage is zero, and GRPO trains on nothing while its curves look fine.
 # COT_SFT=0 turns it off, which is the R1-Zero setting.
 COT_SFT="${COT_SFT:-1}"
-COT_SFT_STEPS="${COT_SFT_STEPS:-10000}"
+COT_SFT_STEPS="${COT_SFT_STEPS:-7000}"   # ~1 epoch of the countdown demonstrations at batch 3
 COT_SFT_LR="${COT_SFT_LR:-1e-5}"
 COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which checkpoint the
                                     # SUPERVISED sub-stage starts from (and, with COT_SFT=0,
