@@ -636,8 +636,19 @@ COT = dict(
     # REWARD. Correctness is verified arithmetically; the format term pays only for producing
     # the think/answer structure at all, and is kept small so that formatting cannot be traded
     # against being right.
-    correct_reward=1.0,         # answer matches the gold answer
-    format_reward=0.2,          # <think>...</think><answer>...</answer> present and ordered
+    # THE REWARD IS A STAIRCASE, not a gate. Each tag is paid for INDEPENDENTLY, so a policy
+    # that has learned to close <think> but not yet <answer> is rewarded for the half it has --
+    # a single both-or-nothing format term leaves that state worth exactly as much as emitting
+    # neither, and nothing pulls the model the rest of the way. For a base model that has never
+    # seen this format, that gradient is the difference between learning it and not.
+    #
+    # THE WEIGHTS DO NOT INVITE TAG-FARMING, because GRPO's advantage is relative to the GROUP.
+    # A term every completion earns cancels out of the advantage entirely: the format terms
+    # teach while they still vary and go quiet once the whole group has the format, after which
+    # only correctness separates one completion from another.
+    correct_reward=2.0,         # the answer is right   -- worth both tags together
+    think_format_reward=1.0,    # a closed <think>...</think>
+    answer_format_reward=1.0,   # a closed <answer>...</answer>
     # A THIRD TERM, between format and correctness. Format pays for the tags; correctness pays
     # for the answer; a policy can satisfy the first with tags around nothing. This pays only
     # when the reasoning is long enough to be reasoning AND mentions the numbers the problem

@@ -199,8 +199,31 @@ def think_text(text):
     return (body[:cut] if cut > 0 else body).strip()
 
 
+def has_think_span(text):
+    """A closed <think>...</think>."""
+    return bool(_THINK_RE.search(text or ""))
+
+
+def has_answer_span(text):
+    """A closed <answer>...</answer>."""
+    return bool(_ANSWER_RE.search(text or ""))
+
+
 def is_formatted(text):
-    """True when the response carries a think span and an answer span, in that order."""
+    """Both spans, in that order -- the whole structure, reported but no longer the gate.
+
+    THE TWO TAGS ARE REWARDED SEPARATELY, and this is why. A single all-or-nothing format
+    reward has no gradient toward the halfway state: a policy that has learned to open and
+    close <think> but not yet <answer> earns exactly what one that emits neither earns, so
+    nothing pulls it the rest of the way. Paying for each tag makes a staircase it can climb
+    one step at a time, which for a base model that has never seen the format is the difference
+    between learning it and not.
+
+    THIS IS SAFER IN GRPO THAN IT WOULD BE ELSEWHERE. An advantage is a reward minus its
+    GROUP's mean, so a component every completion in a group earns contributes nothing to the
+    advantage: the format terms drive learning exactly while they vary, and stop mattering the
+    moment the whole group has the format. They cannot go on paying a policy to emit tags
+    instead of solving the problem, because by then they are constant within the group."""
     t, a = _THINK_RE.search(text or ""), _ANSWER_RE.search(text or "")
     return bool(t and a and t.start() < a.start())
 
@@ -221,7 +244,9 @@ def score(text, gold, cfg):
     never re-parses the text."""
     pred = extract_answer(text)
     correct = is_correct(text, gold, cfg.get("task", "gsm8k"))
-    formatted = is_formatted(text)
+    think_fmt = has_think_span(text)
+    answer_fmt = has_answer_span(text)
+    formatted = is_formatted(text)          # both, ordered -- reported, not a gate
     think = think_text(text)
     n_words = len((text or "").split())
     # THINKING THAT IS ABOUT THIS PROBLEM. A format reward pays for the tags and a correctness
@@ -237,11 +262,14 @@ def score(text, gold, cfg):
                      and len(think.split()) >= int(cfg.get("think_min_words", 8))
                      and _mentions_givens(think, gold))
     reward = (cfg["correct_reward"] * float(correct)
-              + cfg["format_reward"] * float(formatted)
+              + cfg.get("think_format_reward", 0.0) * float(think_fmt)
+              + cfg.get("answer_format_reward", 0.0) * float(answer_fmt)
               + cfg.get("think_reward", 0.0) * grounded
               - cfg.get("length_penalty", 0.0) * n_words)
     return {"reward": reward,
             "correct": float(correct),
+            "think_fmt": float(think_fmt),
+            "answer_fmt": float(answer_fmt),
             "formatted": float(formatted),
             "grounded": grounded,
             "think_len": float(len(think.split())),

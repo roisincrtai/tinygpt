@@ -484,7 +484,8 @@ def _cot_figure(mode, records, plotdir, plt, tag):
               ("dead_groups", "Dead groups (no spread, no gradient)", "fraction of groups"),
               ("reward_std", "Within-group reward spread", None),
               ("adv_abs", "Mean |advantage|", None),
-              ("format", "Well-formed think/answer rate", "fraction of rollouts"),
+              (("think_fmt", "answer_fmt"), "Tag rates, think and answer",
+               "fraction of rollouts"),
               ("grounded", "Grounded thinking rate", "fraction of rollouts"),
               ("aha", "Reflection rate", "fraction of rollouts"),
               ("resp_len", "Response length", "tokens"),
@@ -493,12 +494,17 @@ def _cot_figure(mode, records, plotdir, plt, tag):
               ("loss", "Total loss", None),
               ("entropy", "Policy entropy", "nats/token"),
               ("clip_frac", "Clipped fraction", "fraction of tokens")]
-    UNIT = ("accuracy", "aha", "format", "clip_frac", "dead_groups", "grounded")
+    UNIT = ("accuracy", "aha", "format", "clip_frac", "dead_groups", "grounded",
+            "think_fmt", "answer_fmt")
     for (key, title, ylab), ax in zip(panels, axes):
         if isinstance(key, tuple):
             # two series in one panel: the same hue would make them one line
-            ts = [_plot_trend(ax, step, col(k), cc, label=lab, ls=st)
-                  for k, cc, lab, st in zip(key, (c, "#888888"), ("longest", "p90"), ("-", "--"))]
+            labs = {"think_len_max": "longest", "think_len_p90": "p90",
+                    "think_fmt": "<think>", "answer_fmt": "<answer>"}
+            ts = [_plot_trend(ax, step, col(k), cc, label=labs.get(k, k), ls=st)
+                  for k, cc, st in zip(key, (c, "#888888"), ("-", "--"))]
+            if all(k in UNIT for k in key):
+                ax.set_ylim(0, 1.02)
             _fit_to_trend(ax, ts)
             if any(any(v is not None for v in col(k)) for k in key):
                 ax.legend(fontsize=8, frameon=False)

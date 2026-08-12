@@ -277,7 +277,8 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         think = verifier.think_text(texts[best])
         log(f"\n----- {tag('cot')} step {step}: best of {len(scored)} completions "
             f"(advantage {adv_seq[best].item():+.3f}, reward {rewards[best].item():+.3f}, "
-            f"correct {b['correct']:.0f}, format {b['formatted']:.0f}, "
+            f"correct {b['correct']:.0f}, think-tag {b.get('think_fmt', 0):.0f}, "
+            f"answer-tag {b.get('answer_fmt', 0):.0f}, "
             f"grounded {b.get('grounded', 0):.0f}, {n_kept} generated tokens) -----")
         # NOTHING IS TRUNCATED. A response cut at 1,200 characters hides the end, which is
         # where the answer is and where a run-on completion shows what it did instead of
@@ -311,7 +312,9 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         rec = {"step": step, "loss": pg_l + cfg["kl_coef"] * kl_l,
                "reward": rewards.mean().item(),
                "accuracy": mean("correct"),          # the verifier's verdict, not a proxy
-               "format": mean("formatted"),
+               "think_fmt": mean("think_fmt"),      # a closed <think> span
+               "answer_fmt": mean("answer_fmt"),    # a closed <answer> span
+               "format": mean("formatted"),         # both, ordered
                "grounded": mean("grounded"),         # thinking that mentions the givens
                "think_len": mean("think_len"),       # THE aha-moment curve
                # THE MEAN HIDES THE ARRIVAL. Longer deliberation appears in a FEW completions

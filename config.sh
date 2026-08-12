@@ -45,7 +45,7 @@ DPO_STEPS DPO_LR DPO_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
 SCALING_FLAGS \
-MODEL_FFN_FACTOR MODEL_DROPOUT MODEL_GATED_ATTN MODEL_D_CONV MODEL_SSM_CHUNK CORPUS_EXCLUDE TOKENS_SHARD_MB SFT_SUBSETS SFT_LIMIT REWARD_SUBSETS REWARD_VAL_SUBSETS REWARD_LIMIT RLHF_GEN_TEMP RLHF_PPO_EPOCHS RLHF_CLIP_EPS RLHF_GAMMA RLHF_LAM RLHF_VF_COEF RLHF_ENT_COEF RLHF_WHITEN_ADV RLHF_PROMPT_LIMIT RLHF_PROMPTS_PER_FILE COT_GEN_TEMP COT_CLIP_EPS COT_GRPO_EPOCHS COT_ENT_COEF COT_CORRECT_REWARD COT_FORMAT_REWARD COT_THINK_REWARD COT_LENGTH_PENALTY COT_LIMIT COT_EVAL_PROBLEMS COT_TRAIN_PREFIX COT_TEST_PREFIX COT_RECORDS_PER_FILE DISTILL_STUDENT_MAX_LEN DISTILL_MAX_NEW_TOKENS DISTILL_GEN_TEMP DISTILL_KL_COEF DISTILL_PROMPTS_PER_FILE SCALING_LR_REF_WIDTH SCALING_EVAL_EVERY SCALING_VAL_WINDOWS"
+MODEL_FFN_FACTOR MODEL_DROPOUT MODEL_GATED_ATTN MODEL_D_CONV MODEL_SSM_CHUNK CORPUS_EXCLUDE TOKENS_SHARD_MB SFT_SUBSETS SFT_LIMIT REWARD_SUBSETS REWARD_VAL_SUBSETS REWARD_LIMIT RLHF_GEN_TEMP RLHF_PPO_EPOCHS RLHF_CLIP_EPS RLHF_GAMMA RLHF_LAM RLHF_VF_COEF RLHF_ENT_COEF RLHF_WHITEN_ADV RLHF_PROMPT_LIMIT RLHF_PROMPTS_PER_FILE COT_GEN_TEMP COT_CLIP_EPS COT_GRPO_EPOCHS COT_ENT_COEF COT_CORRECT_REWARD COT_THINK_FORMAT_REWARD COT_ANSWER_FORMAT_REWARD COT_THINK_REWARD COT_LENGTH_PENALTY COT_LIMIT COT_EVAL_PROBLEMS COT_TRAIN_PREFIX COT_TEST_PREFIX COT_RECORDS_PER_FILE DISTILL_STUDENT_MAX_LEN DISTILL_MAX_NEW_TOKENS DISTILL_GEN_TEMP DISTILL_KL_COEF DISTILL_PROMPTS_PER_FILE SCALING_LR_REF_WIDTH SCALING_EVAL_EVERY SCALING_VAL_WINDOWS"
 
 # Which variables came from the ENVIRONMENT, recorded before a single default is applied:
 # export_yaml.sh must not overwrite these, or `GPU=cpu ./stage5_pretrain.sh` would lose to the
@@ -439,8 +439,15 @@ COT_GEN_TEMP="${COT_GEN_TEMP:-1.0}"         # sampling temperature of each compl
 COT_CLIP_EPS="${COT_CLIP_EPS:-0.2}"         # GRPO ratio clip
 COT_GRPO_EPOCHS="${COT_GRPO_EPOCHS:-2}"     # optimisation passes per group of rollouts
 COT_ENT_COEF="${COT_ENT_COEF:-0.0}"         # entropy bonus
-COT_CORRECT_REWARD="${COT_CORRECT_REWARD:-1.0}"   # reward for a VERIFIED answer -- the signal
-COT_FORMAT_REWARD="${COT_FORMAT_REWARD:-0.2}"     # smaller: producing the shape of an answer
+COT_CORRECT_REWARD="${COT_CORRECT_REWARD:-2.0}"   # the answer is right
+# THE FORMAT IS PAID FOR ONE TAG AT A TIME. A single both-or-nothing term leaves a policy that
+# has learned to close <think> but not <answer> earning exactly what one that emits neither
+# earns, so nothing pulls it the rest of the way -- and a base model has never seen this format.
+# Together the two tags are worth what a correct answer is worth, which sounds generous and is
+# not: GRPO's advantage is relative to the GROUP, so a term every completion earns cancels out
+# of it entirely. The format terms teach while they vary and go quiet once the group has them.
+COT_THINK_FORMAT_REWARD="${COT_THINK_FORMAT_REWARD:-1.0}"    # a closed <think>...</think>
+COT_ANSWER_FORMAT_REWARD="${COT_ANSWER_FORMAT_REWARD:-1.0}"  # a closed <answer>...</answer>
 COT_THINK_REWARD="${COT_THINK_REWARD:-0.3}"   # reasoning that is long enough AND mentions the
                                     # problem's numbers; a floor against tags around nothing
                                             # is worth less than producing a right one
@@ -582,7 +589,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$COT_ENT_COEF" ]            && COMMON_FLAGS="$COMMON_FLAGS --set COT.ent_coef=$COT_ENT_COEF"
 [ -n "$COT_CORRECT_REWARD" ]      && COMMON_FLAGS="$COMMON_FLAGS --set COT.correct_reward=$COT_CORRECT_REWARD"
 [ -n "$COT_THINK_REWARD" ]  && COMMON_FLAGS="$COMMON_FLAGS --set COT.think_reward=$COT_THINK_REWARD"
-[ -n "$COT_FORMAT_REWARD" ]       && COMMON_FLAGS="$COMMON_FLAGS --set COT.format_reward=$COT_FORMAT_REWARD"
+[ -n "$COT_THINK_FORMAT_REWARD" ]  && COMMON_FLAGS="$COMMON_FLAGS --set COT.think_format_reward=$COT_THINK_FORMAT_REWARD"
+[ -n "$COT_ANSWER_FORMAT_REWARD" ] && COMMON_FLAGS="$COMMON_FLAGS --set COT.answer_format_reward=$COT_ANSWER_FORMAT_REWARD"
 [ -n "$COT_LENGTH_PENALTY" ]      && COMMON_FLAGS="$COMMON_FLAGS --set COT.length_penalty=$COT_LENGTH_PENALTY"
 [ -n "$COT_LIMIT" ]               && COMMON_FLAGS="$COMMON_FLAGS --set COT.limit=$COT_LIMIT"
 [ -n "$COT_EVAL_PROBLEMS" ]       && COMMON_FLAGS="$COMMON_FLAGS --set COT.eval_problems=$COT_EVAL_PROBLEMS"
