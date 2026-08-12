@@ -294,20 +294,40 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         def mean(k):
             return sum(s[k] for s in scored) / len(scored)
 
+        # WITHIN-GROUP SPREAD, which is what GRPO actually runs on. There is no value network:
+        # a completion's advantage is its reward minus its group's mean, over the group's
+        # standard deviation. A group whose completions all score the same therefore has zero
+        # advantage everywhere and contributes NOTHING -- and a run in which most groups are
+        # like that is a run that looks healthy and learns nothing. `dead_groups` is the single
+        # number that says so, and it is the first thing to read when reward will not move.
+        rg = rewards.view(-1, G)
+        dead = float((rg.std(dim=1, unbiased=False) < 1e-8).float().mean().item())
+        think_words = [s["think_len"] for s in scored]
+        think_sorted = sorted(think_words)
         rec = {"step": step, "loss": pg_l + cfg["kl_coef"] * kl_l,
                "reward": rewards.mean().item(),
                "accuracy": mean("correct"),          # the verifier's verdict, not a proxy
                "format": mean("formatted"),
-               "grounded": mean("grounded"),
+               "grounded": mean("grounded"),         # thinking that mentions the givens
                "think_len": mean("think_len"),       # THE aha-moment curve
+               # THE MEAN HIDES THE ARRIVAL. Longer deliberation appears in a FEW completions
+               # first, and a mean over 24 of them moves by a word or two while the best has
+               # doubled. The maximum and the 90th percentile show it when the mean cannot.
+               "think_len_max": float(max(think_words) if think_words else 0.0),
+               "think_len_p90": float(think_sorted[max(0, int(0.9 * len(think_sorted)) - 1)]
+                                      if think_sorted else 0.0),
                "aha": mean("aha"),                   # reflection markers, a crude proxy
                "resp_len": rmask.sum(1).mean().item(),
+               "reward_std": float(rg.std(dim=1, unbiased=False).mean().item()),
+               "dead_groups": dead,                  # groups with no spread: wasted rollouts
+               "adv_abs": float(adv_seq.abs().mean().item()),
                "kl_ref": kl_l, "pg_loss": pg_l, "entropy": ent_l,
                "clip_frac": clipped, "gnorm": float(gnorm), "lr": cur_lr}
         hist.append(rec)
         if hasattr(bar, "set_postfix"):
             bar.set_postfix(acc=f"{rec['accuracy']:.2f}", rew=f"{rec['reward']:+.2f}",
-                            think=f"{rec['think_len']:.0f}w", aha=f"{rec['aha']:.2f}",
+                            think=f"{rec['think_len']:.0f}/{rec['think_len_max']:.0f}w",
+                            dead=f"{rec['dead_groups']:.2f}", aha=f"{rec['aha']:.2f}",
                             kl=f"{rec['kl_ref']:.4f}")
         if (step + 1) % args.checkpoint_every_steps == 0:
             save_ckpt(ckdir, STAGE, policy, opt, step + 1, total, [g, dg])

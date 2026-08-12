@@ -437,50 +437,82 @@ def _rlhf_figure(mode, records, plotdir, plt, tag):
 
 
 def _cot_figure(mode, records, plotdir, plt, tag):
-    """cot_dynamics<_tag>.pdf -- 3 rows x 4 for the chain-of-thought GRPO stage. The first two
-    panels are the ones the stage exists to show:
+    """cot_dynamics<_tag>.pdf -- 4 rows x 4 for the chain-of-thought GRPO stage. EVERY quantity
+    the stage records has a panel, because a run of this kind fails in several different ways
+    and each one is visible in exactly one of them.
 
-        1 THINK LENGTH -- words between the think tags. The reported "aha moment" is visible
-          here as a rising trend: the policy discovers that deliberating longer earns reward.
-        2 VERIFIED ACCURACY -- the fraction of rollouts whose extracted answer matches the
-          gold answer. Unlike a reward-model score this cannot be gamed by sounding fluent.
-        3 mean verifier reward (accuracy + format, what GRPO maximises)
-        4 reflection rate: rollouts containing a self-correction marker ("wait", "actually")
-        5 format rate: rollouts with a well-formed think/answer structure
-        6 mean response length in tokens, next to the think length in words
-        7 KL to the frozen reference (k3 estimator), the constraint being paid
-        8 GRPO policy loss, and 9 the total loss
-        10 policy entropy (collapse indicator), 11 clip fraction, 12 learning rate
+    THE FIRST ROW IS WHAT THE STAGE EXISTS TO SHOW.
+        1 THINK LENGTH, mean -- words between the think tags. The reported "aha moment" is a
+          rising trend here: the policy discovers that deliberating longer earns reward.
+        2 THINK LENGTH, longest and 90th percentile. The mean HIDES THE ARRIVAL: longer
+          deliberation appears in a few completions first, and a mean over 24 moves by a word
+          or two while the best has doubled.
+        3 VERIFIED ACCURACY -- extracted answer against gold. Unlike a reward-model score this
+          cannot be gamed by sounding fluent.
+        4 mean verifier reward, what GRPO maximises.
+
+    THE SECOND ROW IS WHETHER GRPO CAN LEARN AT ALL.
+        5 DEAD GROUPS -- the fraction whose completions all scored the same. Their advantages
+          are zero, so they contribute nothing; a run sitting near 1.0 here is doing rollouts
+          for no gradient, and no other panel will say so. THE FIRST THING TO READ when reward
+          will not move.
+        6 within-group reward spread, the denominator of the advantage.
+        7 mean |advantage|, the size of the signal actually reaching the policy.
+        8 format rate: well-formed think/answer structure.
+
+    THE THIRD ROW IS THE REWARD'S PARTS AND THE CONSTRAINT.
+        9 grounded rate: thinking long enough AND mentioning the problem's numbers.
+        10 reflection rate: a self-correction marker ("wait", "actually") -- a crude proxy.
+        11 response length in tokens, beside the think length in words.
+        12 KL to the frozen reference (k3), the constraint being paid.
+
+    THE FOURTH ROW IS OPTIMISATION HEALTH.
+        13 GRPO policy loss, 14 total loss, 15 policy entropy (collapse indicator),
+        16 clipped fraction; the gradient norm and the learning rate share the last panel.
     """
     if not records:
         return None
     step = [r["step"] for r in records]
     def col(k): return [r.get(k) for r in records]
     c = C[mode]
-    fig, ax2d = plt.subplots(3, 4, figsize=(18, 11.5))
+    fig, ax2d = plt.subplots(4, 4, figsize=(18, 15.0))
     axes = [a for row in ax2d for a in row]
-    panels = [("think_len", "Think length (the aha-moment curve)", "words"),
+    panels = [("think_len", "Think length, mean (the aha-moment curve)", "words"),
+              (("think_len_max", "think_len_p90"), "Think length, longest and p90", "words"),
               ("accuracy", "Verified answer accuracy", "fraction correct"),
               ("reward", "Verifier reward", None),
-              ("aha", "Reflection rate", "fraction of rollouts"),
+              ("dead_groups", "Dead groups (no spread, no gradient)", "fraction of groups"),
+              ("reward_std", "Within-group reward spread", None),
+              ("adv_abs", "Mean |advantage|", None),
               ("format", "Well-formed think/answer rate", "fraction of rollouts"),
+              ("grounded", "Grounded thinking rate", "fraction of rollouts"),
+              ("aha", "Reflection rate", "fraction of rollouts"),
               ("resp_len", "Response length", "tokens"),
               ("kl_ref", r"KL$(\pi\,\|\,\pi_{\mathrm{ref}})$", "nats/token"),
               ("pg_loss", "GRPO policy loss", None),
               ("loss", "Total loss", None),
               ("entropy", "Policy entropy", "nats/token"),
               ("clip_frac", "Clipped fraction", "fraction of tokens")]
+    UNIT = ("accuracy", "aha", "format", "clip_frac", "dead_groups", "grounded")
     for (key, title, ylab), ax in zip(panels, axes):
-        t = _plot_trend(ax, step, col(key), c); _fit_to_trend(ax, [t])
-        if key in ("accuracy", "aha", "format", "clip_frac"):
-            ax.set_ylim(0, 1.02)
-        if key in ("reward", "pg_loss", "loss", "kl_ref"):
-            ax.axhline(0, ls=":", color="k", alpha=0.4)
+        if isinstance(key, tuple):
+            # two series in one panel: the same hue would make them one line
+            ts = [_plot_trend(ax, step, col(k), cc, label=lab, ls=st)
+                  for k, cc, lab, st in zip(key, (c, "#888888"), ("longest", "p90"), ("-", "--"))]
+            _fit_to_trend(ax, ts)
+            if any(any(v is not None for v in col(k)) for k in key):
+                ax.legend(fontsize=8, frameon=False)
+        else:
+            t = _plot_trend(ax, step, col(key), c); _fit_to_trend(ax, [t])
+            if key in UNIT:
+                ax.set_ylim(0, 1.02)
+            if key in ("reward", "pg_loss", "loss", "kl_ref", "adv_abs", "reward_std"):
+                ax.axhline(0, ls=":", color="k", alpha=0.4)
         ax.set_title(title, weight="bold"); ax.set_xlabel("step")
         if ylab:
             ax.set_ylabel(ylab)
         _sci_x(ax)
-    _lr_panel(axes[11], step, col("lr"), c)
+    _lr_panel(axes[15], step, col("lr"), c)
     fig.tight_layout()
     out = _figure_path(plotdir, mode, tag)
     fig.savefig(out, bbox_inches="tight"); plt.close(fig)
