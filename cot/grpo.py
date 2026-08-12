@@ -54,13 +54,27 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len,
     """Sample one completion per row of `prompts` (already group-expanded by the caller, so
     the same prompt appears group_size times and each copy is sampled independently).
 
-    RIGHT padding with a per-row write cursor, the convention the model is trained under: a
-    left-padded row would give a query with no visible key, an all -inf attention row, and a
-    NaN that spreads through the value matmul into every later layer.
+    THE ROWS ARE DECODED IN BUCKETS OF EQUAL PROMPT LENGTH, and that is a throughput decision,
+    not a cosmetic one. The cache appends one column for ALL rows at once, so it is only
+    correct when every row's cursor sits at the same position -- and with right padding that
+    means equal prompts. A batch mixing lengths therefore fell back to recomputing the whole
+    prefix at every generated token: O(n^2) work instead of O(n).
+
+    That fallback was the normal case, not the exception. A GRPO step draws `batch` problems
+    and the countdown prompts are 196-203 tokens depending on how many digits their numbers
+    have, so all of them agreeing happens about 6% of the time. The other 94% of steps decoded
+    ~3,900 tokens quadratically, which is what made a single rollout take the better part of an
+    hour.
+
+    Bucketing costs nothing, because the grouping already exists: the `group_size` completions
+    of one problem are copies of ONE prompt and so are always the same length. Splitting a
+    24-row batch into its two or three distinct lengths turns one uncached decode into two or
+    three cached ones. The completions are unchanged -- rows are independent, and each bucket
+    is sampled from the same generator in the same order.
 
     Returns (ids, attn, resp_mask, texts): the batch, the mask of GENERATED tokens, and the
-    decoded completions the verifier scores."""
-    pad, eos = tok.pad_token_id, getattr(tok, "eos_token_id", None)
+    decoded completions the verifier scores, in the ORDER THE PROMPTS WERE GIVEN."""
+    pad = tok.pad_token_id
     # NO HARD RESPONSE LENGTH BY DEFAULT. `max_new = 0` means "whatever the context window has
     # left once the prompt is in it", computed from the LONGEST PROMPT ACTUALLY IN THIS BATCH.
     # A fixed cap cannot be right across the schemes: their windows run from 1,024 to 32,768,
@@ -71,6 +85,46 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len,
         max_new = max(MIN_NEW_TOKENS, max_len - max(len(p) for p in pids) - 1)
     keep = max(max_len - max_new, 8)
     pids = [pid[-keep:] if len(pid) > keep else pid for pid in pids]
+
+    buckets = {}
+    for i, p in enumerate(pids):
+        buckets.setdefault(len(p), []).append(i)
+
+    if len(buckets) == 1:
+        return _decode(policy, tok, pids, device, max_new, temperature, g,
+                       use_cache, cache_gib, "")
+
+    parts = {}
+    for k, (length, idx) in enumerate(sorted(buckets.items()), 1):
+        note = f" {k}/{len(buckets)} (prompt {length})"
+        parts[length] = (idx, _decode(policy, tok, [pids[i] for i in idx], device, max_new,
+                                      temperature, g, use_cache, cache_gib, note))
+
+    # REASSEMBLED IN THE CALLER'S ORDER. Every row's reward is compared against the mean of ITS
+    # OWN group, so a batch handed back in bucket order would standardise each completion
+    # against the wrong siblings -- a silent, plausible-looking corruption of every advantage.
+    B = len(pids)
+    T = max(p[1][0].shape[1] for p in parts.values())
+    ids = torch.full((B, T), pad, dtype=torch.long, device=device)
+    attn = torch.zeros(B, T, dtype=torch.long, device=device)
+    resp_mask = torch.zeros(B, T, dtype=torch.long, device=device)
+    texts = [None] * B
+    for idx, (bi, ba, br, bt) in parts.values():
+        w = bi.shape[1]
+        for j, i in enumerate(idx):
+            ids[i, :w], attn[i, :w], resp_mask[i, :w] = bi[j], ba[j], br[j]
+            texts[i] = bt[j]
+    return ids, attn, resp_mask, texts
+
+
+@torch.no_grad()
+def _decode(policy, tok, pids, device, max_new, temperature, g, use_cache, cache_gib, note):
+    """One bucket: sample a completion for every row of `pids`, which are all the same length.
+
+    RIGHT padding with a per-row write cursor, the convention the model is trained under: a
+    left-padded row would give a query with no visible key, an all -inf attention row, and a
+    NaN that spreads through the value matmul into every later layer."""
+    pad, eos = tok.pad_token_id, getattr(tok, "eos_token_id", None)
     B = len(pids)
     L0 = max(1, max(len(p) for p in pids))
     T = L0 + max_new
@@ -81,11 +135,14 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len,
         if p:
             ids[i, :len(p)] = torch.tensor(p, device=device)
             attn[i, :len(p)] = 1
-    # THE CACHE, WHEN EVERY ROW IS AT THE SAME POSITION. With right padding the rows' cursors
-    # differ whenever the prompts do, and a cache appends one column for ALL rows at once --
-    # so a shorter row would have its next token written at another row's position. Equal
-    # lengths make the cursors move in lockstep and the append correct. Unequal prompts fall
-    # back to recomputing the prefix, which is slower and right; nothing is silently wrong.
+    # THE CACHE APPLIES BECAUSE EVERY ROW IS AT THE SAME POSITION -- which is what the caller's
+    # bucketing guarantees, and the only thing it is for. The cache appends one column for ALL
+    # rows at once, so a shorter row would have its next token written at another row's
+    # position; equal lengths make the cursors move in lockstep and the append correct.
+    #
+    # An empty prompt still has no position to append after, so that one case falls back to
+    # recomputing the prefix. It cannot arise from a real problem, and refusing to decode would
+    # be worse than being slow.
     from helpers.kv_cache import Cache, budget_bytes
     same_len = len(set(len(p) for p in pids)) == 1 and all(pids)
     cache = (Cache(len(policy.blocks), budget_bytes(cache_gib))
@@ -95,7 +152,7 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len,
     rows = torch.arange(B, device=device)
     # one forward per generated column; the bar erases itself so it does not leave a line per
     # training step
-    for _ in progress(range(max_new), desc=tag("cot") + " rollout", total=max_new):
+    for _ in progress(range(max_new), desc=tag("cot") + " rollout" + note, total=max_new):
         active = ~done
         if not bool(active.any()):
             break
