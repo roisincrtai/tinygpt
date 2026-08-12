@@ -51,8 +51,23 @@ def corpus_files(root, exclude_dirs=(), extensions=None):
     excl = {d.lower() for d in (exclude_dirs or ())}
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d.lower() not in excl]
+        # DOTFILES AND DOT-DIRECTORIES ARE NOT CORPUS, whatever they are named. Three things
+        # land in a corpus directory that end in a corpus extension and are not text:
+        #
+        #   ._corpus_00001.parquet     an AppleDouble stub, written beside every file when the
+        #                              tree is copied from or through a Mac -- binary, and a
+        #                              duplicate of a name already counted
+        #   .zetagpt_download.json     this pipeline's own completion marker
+        #   .cache/huggingface/...     what snapshot_download keeps to make resume work
+        #
+        # Counting any of them changes the file count and the byte total, and those two ARE the
+        # corpus signature -- so a marker written beside a corpus would have silently
+        # invalidated every token stream built from it. A cache that took hours, discarded by a
+        # bookkeeping file.
+        dirnames[:] = [d for d in dirnames if d.lower() not in excl and not d.startswith(".")]
         for fn in filenames:
+            if fn.startswith("."):
+                continue
             if os.path.splitext(fn)[1].lower() in exts and _split_token(fn) not in excl:
                 out.append(os.path.join(dirpath, fn))
     return sorted(out)
