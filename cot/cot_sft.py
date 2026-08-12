@@ -132,9 +132,14 @@ def run(ctx, init_model, corpus):
     # fill_window: the samples run to the end of the context window and are printed whole.
     # What this sub-stage teaches is a LONG structured completion, and a preview cut at a few
     # hundred tokens would stop before the </think><answer> it exists to demonstrate.
+    #
+    # FIVE OF THEM, not twenty, for the same reason: each is thousands of tokens rather than
+    # sixty, so twenty would be minutes of generation between training steps and more text than
+    # anyone reads. The cadence is unchanged (--print_samples_every_steps).
     preview = common.make_preview(
         ctx["tok"], ctx["device"], args.max_len, log,
-        [d["prompt"] for d in corpus[:common.N_PREVIEW]], fill_window=True)
+        [d["prompt"] for d in corpus[:common.N_PREVIEW_LONG]], n=common.N_PREVIEW_LONG,
+        fill_window=True)
     model = lm.train(init_model, ctx["enc"], corpus, ctx["ckdir"], args, log,
                      ctx["monitor"], stage=STAGE, steps=args.cot_sft_steps,
                      lr=args.cot_sft_lr, preview=preview)

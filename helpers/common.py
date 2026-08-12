@@ -335,7 +335,13 @@ def frozen(model):
     return ref
 
 
-N_PREVIEW = 20                       # generation examples printed every --plot_every_steps
+N_PREVIEW = 20        # generation examples printed every --print_samples_every_steps
+
+# FEWER, WHEN EACH ONE FILLS THE CONTEXT WINDOW. A chain-of-thought sample runs to thousands of
+# tokens instead of sixty, so twenty of them is a wall of text nobody reads to the end and
+# several minutes of generation between training steps. Five is what fits on a screen and is
+# still enough to see whether the format holds across different prompts.
+N_PREVIEW_LONG = 5
 
 
 def corpus_prompts(corpus, n=N_PREVIEW, n_words=12, seed=0, tok=None):
