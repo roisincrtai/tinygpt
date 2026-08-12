@@ -651,6 +651,17 @@ COT = dict(
     # chance often enough for the group to have spread; a word problem at this scale usually
     # does not. It is also the task TinyZero used for the smallest published reproduction.
     task="countdown",
+    # INCREMENTAL DECODING. Rollouts are the dominant cost of this stage: without a cache,
+    # generating n tokens redoes the whole prefix n times, which is O(n^2) work. With one, each
+    # step extends the keys, values, convolution window and recurrence state that are already
+    # there. --no-kv_cache turns it off, for a comparison or when something is suspected.
+    kv_cache=True,
+    # WHAT THE CACHE MAY HOLD, in bytes. Attention's part grows with every token generated and
+    # a step decodes batch x group_size sequences at once -- 128 at the defaults -- so left
+    # unbounded it is tens of gigabytes on a long window. The rollout is split into groups that
+    # fit this and decoded one group at a time; sequences are independent, so the completions
+    # are the same and only the peak changes.
+    kv_cache_bytes=2 * 1024 ** 3,   # 2 GiB
     # DATA. Every .json under the task's directory; each countdown record carries a prompt, an
     # answer of {target, numbers}, and a reference trace the stage never trains on.
     data_dir=COT_COUNTDOWN_DIR,      # data/download/zetagpt-cot-countdown-game-20k

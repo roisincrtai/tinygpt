@@ -39,8 +39,9 @@ HuggingFace-compatible forward, so evaluation and generation code runs unchanged
 
 `mask_positions` (B,T bool) marks input tokens replaced by a learnable, input-only MASK embedding
 (self.mask_embed): an optional corruption hook, never a target and never in the output vocabulary,
-and inert unless it is passed. No KV cache (kept deliberately simple), so generation recomputes
-the prefix at every step.
+and inert unless it is passed. `cache=` (helpers/kv_cache.Cache) enables incremental decoding:
+attention appends its keys and values, and the state space module carries its convolution
+window and recurrence state, so generation costs O(n) rather than O(n^2).
 """
 import math
 
@@ -90,7 +91,7 @@ class CausalSelfAttention(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.rope = RotaryPositionalEmbedding(self.hd) if use_rope else None
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_mask=None, cache=None, layer=None):
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)
         q = q.view(B, T, self.n_head, self.hd).transpose(1, 2)
@@ -98,6 +99,15 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, self.hd).transpose(1, 2)
         if self.rope is not None:                                     # pe="rope" ablation only
             q, k = self.rope(q, k)
+        # THE HISTORY, when decoding incrementally. The new keys and values are appended and
+        # attention runs over everything so far; `is_causal` is then WRONG and must not be used,
+        # because with T new queries against T_past + T keys the causal mask is no longer the
+        # lower triangle of a square -- the queries sit at the END of the history, not at its
+        # start. Passing is_causal here would let a query attend to nothing and produce NaNs.
+        past = 0
+        if cache is not None and layer is not None:
+            past = 0 if cache.k[layer] is None else cache.k[layer].shape[2]
+            k, v = cache.append(layer, k, v)
         # TWO PATHS, ONE RESULT. On CUDA the fused kernel behind scaled_dot_product_attention
         # (FlashAttention) is used: it evaluates attention in tiles and recomputes the scores in
         # the backward pass, so the (B, nh, T, T) matrix below is NEVER MATERIALISED. That
@@ -110,26 +120,40 @@ class CausalSelfAttention(nn.Module):
         # below stays as the reference: it is what the model MEANS, it runs everywhere, and the
         # two are checked against each other rather than assumed to agree.
         if q.is_cuda:
-            if attn_mask is None:
+            if attn_mask is None and not past:
                 y = F.scaled_dot_product_attention(
                     q, k, v, is_causal=True,
+                    dropout_p=self.drop.p if self.training else 0.0)
+            elif attn_mask is None:
+                # query i (position past+i) may see key j <= past+i
+                S = k.shape[2]
+                keep = (torch.arange(S, device=x.device).view(1, S)
+                        <= torch.arange(past, past + T, device=x.device).view(T, 1))
+                y = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=keep.view(1, 1, T, S),
                     dropout_p=self.drop.p if self.training else 0.0)
             else:
                 # A padding mask cannot be combined with is_causal, so the two are merged into
                 # one bool mask. This costs a T x T bool (one byte per entry, not four) and is
                 # only ever taken by the fine-tuning stages, where sequences are short.
-                keep = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-                keep = keep.view(1, 1, T, T) & attn_mask.view(B, 1, 1, T).bool()
+                S = k.shape[2]
+                keep = (torch.arange(S, device=x.device).view(1, S)
+                        <= torch.arange(past, past + T, device=x.device).view(T, 1))
+                m = attn_mask if attn_mask.shape[1] == S else attn_mask[:, -S:]
+                keep = keep.view(1, 1, T, S) & m.view(B, 1, 1, S).bool()
                 y = F.scaled_dot_product_attention(
                     q, k, v, attn_mask=keep,
                     dropout_p=self.drop.p if self.training else 0.0)
             y = y.transpose(1, 2).contiguous().view(B, T, C)
         else:
-            att = (q @ k.transpose(-2, -1)) / math.sqrt(self.hd)      # (B, nh, T, T)
-            causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-            att = att.masked_fill(~causal.view(1, 1, T, T), float("-inf"))
-            if attn_mask is not None:                                 # (B, T) padding mask
-                att = att.masked_fill(~attn_mask.view(B, 1, 1, T).bool(), float("-inf"))
+            S = k.shape[2]
+            att = (q @ k.transpose(-2, -1)) / math.sqrt(self.hd)      # (B, nh, T, S)
+            causal = (torch.arange(S, device=x.device).view(1, S)
+                      <= torch.arange(past, past + T, device=x.device).view(T, 1))
+            att = att.masked_fill(~causal.view(1, 1, T, S), float("-inf"))
+            if attn_mask is not None:                                 # (B, S) padding mask
+                m = attn_mask if attn_mask.shape[1] == S else attn_mask[:, -S:]
+                att = att.masked_fill(~m.view(B, 1, 1, S).bool(), float("-inf"))
             att = self.drop(F.softmax(att, dim=-1))
             y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
         if self.gate is not None:
@@ -164,10 +188,10 @@ class Block(nn.Module):
         self.mlp = nn.Sequential(nn.Linear(n_embd, hidden), nn.GELU(),
                                  nn.Linear(hidden, n_embd), nn.Dropout(dropout))
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_mask=None, cache=None, layer=None):
         if self.ssm is not None:
-            x = x + self.ssm(self.ln0(x), attn_mask)
-        x = x + self.attn(self.ln1(x), attn_mask)
+            x = x + self.ssm(self.ln0(x), attn_mask, cache, layer)
+        x = x + self.attn(self.ln1(x), attn_mask, cache, layer)
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -296,7 +320,8 @@ class ZetaGPT(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def _trunk(self, input_ids, attention_mask, mask_positions, mask_gate, mask_vec, sub_ids=None):
+    def _trunk(self, input_ids, attention_mask, mask_positions, mask_gate, mask_vec,
+               sub_ids=None, cache=None):
         # THE INPUT FOLLOWS THE EMBEDDING, not the other way round. A caller hands ids on
         # whatever device it built them on; the lookup has to happen where the (tied) embedding
         # matrix is. Unsharded that is a no-op, since the two already agree.
@@ -326,33 +351,39 @@ class ZetaGPT(nn.Module):
         # path with `devs` empty and every comparison false. See model/parallel.py.
         devs = getattr(self, "_shard_devices", None)
         if not devs:
-            for blk in self.blocks:
-                x = blk(x, attention_mask)
+            for i, blk in enumerate(self.blocks):
+                x = blk(x, attention_mask, cache, i)
+            if cache is not None:
+                cache.advance(x.shape[1])
             return self.lnf(x)
         at, mask = None, attention_mask
-        for blk, i in zip(self.blocks, self._shard_where):
+        for j, (blk, i) in enumerate(zip(self.blocks, self._shard_where)):
             if devs[i] != at:
                 at = devs[i]
                 x = x.to(at)
                 mask = attention_mask.to(at) if attention_mask is not None else None
-            x = blk(x, mask)
+            x = blk(x, mask, cache, j)
+        if cache is not None:
+            cache.advance(x.shape[1])
         return self.lnf(x.to(devs[-1]))
 
     def hidden(self, input_ids=None, attention_mask=None, mask_positions=None, mask_gate=None,
-               mask_vec=None, sub_ids=None, **kw):
+               mask_vec=None, sub_ids=None, cache=None, **kw):
         """Final-layer hidden states (B,T,n_embd) -- what a linear mask head reads."""
-        return self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec, sub_ids)
+        return self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec,
+                           sub_ids, cache)
 
     def forward(self, input_ids=None, attention_mask=None, mask_positions=None, mask_gate=None,
-                mask_vec=None, sub_ids=None, mask_logits=False, **kw):
+                mask_vec=None, sub_ids=None, mask_logits=False, cache=None, **kw):
         """`sub_ids` makes the gate interpolate toward substitute-token embeddings (resampling
         corruption); otherwise it interpolates toward the MASK embedding."""
-        x = self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec, sub_ids)
+        x = self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec,
+                        sub_ids, cache)
         ml = (x @ self.mask_embed.to(x.dtype)) if mask_logits else None
         return Output(self.head(x), ml)
 
     def hidden_states(self, input_ids=None, attention_mask=None, mask_positions=None,
-                      mask_gate=None, mask_vec=None, sub_ids=None, **kw):
+                      mask_gate=None, mask_vec=None, sub_ids=None, cache=None, **kw):
         """The trunk's output, (B, T, n_embd), BEFORE the projection to the vocabulary.
 
         forward() applies `head` to all T positions at once, which produces a (B, T, vocab)
@@ -361,4 +392,4 @@ class ZetaGPT(nn.Module):
         instead and applies `head` itself; see helpers/lm.py. Nothing else differs, so the two
         routes give identical logits."""
         return self._trunk(input_ids, attention_mask, mask_positions, mask_gate, mask_vec,
-                           sub_ids)
+                           sub_ids, cache)

@@ -152,6 +152,12 @@ def parse_args(argv=None):
                     help="split the model's layers across every visible GPU (default)")
     ap.add_argument("--no-tensor_parallel", "--no_tensor_parallel", dest="tensor_parallel",
                     action="store_false", help="keep the whole model on one GPU")
+    # INCREMENTAL DECODING for the stages that generate. On by default: without it, producing
+    # n tokens costs O(n^2) forward work, which the context schedule made intolerable.
+    ap.add_argument("--kv_cache", dest="kv_cache", action="store_true", default=True,
+                    help="cache keys, values and the recurrence state while generating (default)")
+    ap.add_argument("--no-kv_cache", "--no_kv_cache", dest="kv_cache", action="store_false",
+                    help="recompute the whole prefix at every generated token")
     ap.add_argument("--max_len", type=int, default=t["max_len"],
                     help="truncation of an encoded example; 0 = the model's context window")
     ap.add_argument("--model_scheme", default=config.PRETRAIN["model_scheme"],

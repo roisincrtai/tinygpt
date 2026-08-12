@@ -40,7 +40,7 @@ PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
 SFT_STEPS SFT_LR SFT_FLAGS \
 REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
-COT_TASK COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
+KV_CACHE KV_CACHE_MB COT_TASK COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
@@ -257,6 +257,21 @@ LOSS_CHUNK="${LOSS_CHUNK:-8192}"    # TOKENS per slice (4.6 GiB at this size)
 # Set 0, or pass --no-tensor_parallel, to keep the whole model on one GPU. On a single-GPU
 # machine the setting makes no difference: there is nothing to split.
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"   # 1 = split layers across GPUs (default), 0 = one GPU
+
+# INCREMENTAL DECODING, for every stage that generates: rollouts, previews and chat.
+#
+# Without a cache, producing n tokens recomputes the whole prefix n times -- O(n^2) forward
+# work. With one, each step extends what is already there. This model needs FOUR things cached
+# per layer, not two: attention's keys and values, and the state space module's convolution
+# window and recurrence state, because a block is SSM -> attention -> FFN and the recurrence
+# would otherwise be re-run over the prefix regardless.
+#
+# KV_CACHE_MB BOUNDS IT. Attention's share grows with every token, and a GRPO step decodes
+# batch x group_size sequences at once, so an unbounded cache is tens of gigabytes at a long
+# window. The rollout is split into groups that fit, decoded one group at a time; sequences are
+# independent, so the completions are identical and only the peak changes.
+KV_CACHE="${KV_CACHE:-1}"           # 1 = cache while generating (default), 0 = recompute
+KV_CACHE_MB="${KV_CACHE_MB:-2048}"  # what the cache may hold, MB (2 GiB)
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
 BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and evaluation
@@ -507,6 +522,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$MICRO_BATCH" ]    && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
 [ "$CHUNKED_LOSS" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no_chunked_loss"
 [ "$TENSOR_PARALLEL" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no-tensor_parallel"
+[ "$KV_CACHE" = "0" ]    && COMMON_FLAGS="$COMMON_FLAGS --no-kv_cache"
+[ -n "$KV_CACHE_MB" ]    && COMMON_FLAGS="$COMMON_FLAGS --set COT.kv_cache_bytes=$(( KV_CACHE_MB * 1024 * 1024 ))"
 [ -n "$LOSS_CHUNK" ]     && COMMON_FLAGS="$COMMON_FLAGS --loss_chunk $LOSS_CHUNK"
 [ -n "$LR_SCHEDULE" ]    && COMMON_FLAGS="$COMMON_FLAGS --lr_schedule $LR_SCHEDULE"
 [ -n "$LR_MIN_FACTOR" ]  && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"

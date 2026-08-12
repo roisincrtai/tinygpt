@@ -37,7 +37,7 @@ def optimal_chunk(T):
     return max(1, min(int(round(math.sqrt(max(T, 1)))), T))
 
 
-def blocked_scan(a, v, chunk=None):
+def blocked_scan(a, v, chunk=None, h0=None):
     """The first-order recurrence h_t = a_t * h_{t-1} + v_t, over (B, T, C), computed in
     O(chunk + T/chunk) sequential steps instead of T. `chunk=None` (or "optimal") uses
     optimal_chunk(T) = round(sqrt(T)), which minimises that depth.
@@ -53,6 +53,13 @@ def blocked_scan(a, v, chunk=None):
     which is the trap this avoids.
     """
     B, T, C = v.shape
+    # AN INITIAL STATE, for incremental decoding: h_0 enters as an extra leading step whose
+    # decay is 1 and whose input is h0, so the recurrence continues rather than restarting.
+    # Prepending is exact and needs no special case inside the scan itself.
+    if h0 is not None:
+        a = torch.cat([torch.ones_like(a[:, :1]), a], dim=1)
+        v = torch.cat([h0.unsqueeze(1).to(v.dtype), v], dim=1)
+        return blocked_scan(a, v, chunk)[:, 1:]
     if chunk is None or isinstance(chunk, str):
         chunk = optimal_chunk(T)
     chunk = max(1, min(int(chunk), T))
@@ -167,16 +174,31 @@ class CausalSSM(nn.Module):
         # the decay logits negative, giving a ~ exp(-softplus(-2)) ~ 0.88 at initialisation.
         nn.init.constant_(self.a_proj.bias, -2.0)
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_mask=None, cache=None, layer=None):
         B, T, C = x.shape
         if attn_mask is not None:                        # padding must not enter the state
             x = x * attn_mask.unsqueeze(-1).to(x.dtype)
         v, g = self.in_proj(x).split(C, dim=2)
-        # depthwise CAUSAL convolution: pad on the left only, so step t never sees t+1
-        v = self.conv(F.pad(v.transpose(1, 2), (self.d_conv - 1, 0))).transpose(1, 2)
+        # THE STATE THIS MODULE CARRIES, when there is a cache to carry it in, is exactly two
+        # things: the convolution's input window and the recurrence's last state. Nothing else
+        # of the past is needed, because h_t = a_t h_{t-1} + (1-a_t) v_t reaches the whole
+        # prefix through h_{t-1} alone -- which is what makes an O(1) state enough and why
+        # incremental decoding of this architecture is cheap at all.
+        prev_conv = cache.conv[layer] if cache is not None and layer is not None else None
+        if prev_conv is not None:
+            vin = torch.cat([prev_conv, v], dim=1)       # (B, d_conv-1 + T, C)
+        else:
+            vin = F.pad(v.transpose(1, 2), (self.d_conv - 1, 0)).transpose(1, 2)
+        if cache is not None and layer is not None and self.d_conv > 1:
+            cache.conv[layer] = vin[:, -(self.d_conv - 1):].detach()
+        # depthwise CAUSAL convolution: the window is already left-extended, so no further pad
+        v = self.conv(vin.transpose(1, 2)).transpose(1, 2)[:, -T:]
         v = F.silu(v)
         a = torch.exp(-F.softplus(self.a_proj(x)))       # (B,T,C) in (0,1)
-        h = blocked_scan(a, (1.0 - a) * v, self.chunk)
+        h0 = cache.h[layer] if cache is not None and layer is not None else None
+        h = blocked_scan(a, (1.0 - a) * v, self.chunk, h0=h0)
+        if cache is not None and layer is not None:
+            cache.h[layer] = h[:, -1].detach()
         y = self.drop(self.out_proj(h * F.silu(g)))
         if self.collect:
             self._measure(x, a, h, y)
