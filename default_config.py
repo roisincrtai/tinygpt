@@ -638,6 +638,20 @@ COT = dict(
     # against being right.
     correct_reward=1.0,         # answer matches the gold answer
     format_reward=0.2,          # <think>...</think><answer>...</answer> present and ordered
+    # A THIRD TERM, between format and correctness. Format pays for the tags; correctness pays
+    # for the answer; a policy can satisfy the first with tags around nothing. This pays only
+    # when the reasoning is long enough to be reasoning AND mentions the numbers the problem
+    # gave it. It is a floor against the emptiest reward hacking, NOT a judge of whether the
+    # reasoning is right -- that cannot be checked by rule, which is why correctness exists.
+    think_reward=0.3,
+    think_min_words=8,          # below this, a "think" block is not thinking
+    # THE SYSTEM PROMPT. R1-Zero's only intervention on the prompt side: name the container for
+    # the reasoning, never demonstrate its content. Empty = verifier.SYSTEM_PROMPT.
+    #
+    # IT MUST ASK FOR WHAT THE REWARD PAYS FOR. The countdown questions carry their own
+    # instruction to answer inside \boxed{}; the extractor now reads \boxed{} first, so the two
+    # agree. When they did not, a completion that obeyed the prompt exactly scored zero.
+    system_prompt="",
     length_penalty=0.0,         # per-token penalty on the response (0 = let it grow freely)
     # WHICH TASK. "countdown" (the default) is the Countdown number game: reach a target from
     # a few numbers using + - * / , each number at most once. "gsm8k" is grade-school word

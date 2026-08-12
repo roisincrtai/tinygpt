@@ -216,7 +216,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         prompts, golds = [], []
         for p in batch:
             for _ in range(G):
-                prompts.append(verifier.prompt(p["question"]))
+                prompts.append(verifier.prompt(p["question"], cfg))
                 golds.append(p["answer"])
         # ---- 2. rollouts ---- #
         ids, attn, resp_mask, texts = rollout(policy, tok, prompts, device,
@@ -273,7 +273,8 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         think = verifier.think_text(texts[best])
         log(f"\n----- {tag('cot')} step {step}: best of {len(scored)} completions "
             f"(advantage {adv_seq[best].item():+.3f}, reward {rewards[best].item():+.3f}, "
-            f"correct {b['correct']:.0f}, {n_kept} generated tokens) -----")
+            f"correct {b['correct']:.0f}, format {b['formatted']:.0f}, "
+            f"grounded {b.get('grounded', 0):.0f}, {n_kept} generated tokens) -----")
         log(f"  PROMPT   {' '.join(prompts[best].split())[-400:]}")
         # THE THINK BLOCK ON ITS OWN LINE, because it is the thing this stage is for: whether a
         # policy learns to reason before answering is visible here and nowhere in the averages.
@@ -295,6 +296,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
                "reward": rewards.mean().item(),
                "accuracy": mean("correct"),          # the verifier's verdict, not a proxy
                "format": mean("formatted"),
+               "grounded": mean("grounded"),
                "think_len": mean("think_len"),       # THE aha-moment curve
                "aha": mean("aha"),                   # reflection markers, a crude proxy
                "resp_len": rmask.sum(1).mean().item(),
@@ -322,7 +324,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         idx = torch.randint(0, len(pool), (n_ev,), generator=dg).tolist()
         sel = [pool[i] for i in idx]
         ids, attn, resp_mask, texts = rollout(
-            policy, tok, [verifier.prompt(p["question"]) for p in sel], device,
+            policy, tok, [verifier.prompt(p["question"], cfg) for p in sel], device,
             cfg["max_new_tokens"], cfg["gen_temperature"], g, args.max_len,
             use_cache=getattr(args, "kv_cache", True) and cfg.get("kv_cache", True))
         sc = [verifier.score(t, p["answer"], cfg) for t, p in zip(texts, sel)]

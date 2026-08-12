@@ -123,7 +123,7 @@ def run(ctx):
 
     preview = common.make_preview(
         ctx["tok"], ctx["device"], args.max_len, log,
-        [verifier.prompt(p["question"]) for p in train[:common.N_PREVIEW]])
+        [verifier.prompt(p["question"], cfg) for p in train[:common.N_PREVIEW]])
     model = grpo.run(policy, ref, ctx["tok"], train, ctx["ckdir"], args, log,
                      ctx["monitor"], preview=preview, eval_set=test or None)
     preview(model, STAGE, "final")
