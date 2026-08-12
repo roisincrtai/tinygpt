@@ -220,6 +220,24 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
                                  f"points at nothing: {src}")
             shard["file"] = dst_name
 
+        # PROVENANCE, RECORDED AS FACT. A v1 signature hashed mtimes and the absolute root, so
+        # it says nothing about the packing the stream was built with -- and a v1 index predates
+        # the `packing` field that would have. Re-signing it as v2 therefore ASSERTS that the
+        # tokens were produced under the current max_words and text_column, which this tool
+        # cannot check and must not pretend to.
+        #
+        # It is not a NEW risk: the pipeline already adopts v1 streams through
+        # _equivalent_stream, so it was relying on the same assumption before the rename. But an
+        # implicit assumption becoming an explicit signature is exactly the moment to write down
+        # where the signature came from, so that a stream which later turns out to be packed
+        # differently can be traced rather than puzzled over.
+        if idx.get("sig", "").startswith("corpus|v1|"):
+            log(f"           NOTE: this stream carries a v1 signature and no packing record, so")
+            log(f"                 re-signing it as v2 assumes it was built with the current")
+            log(f"                 max_words={config.PRETRAIN['max_words']} and "
+                f"text_column={config.PRETRAIN['text_column']!r}.")
+            log(f"                 The pipeline already assumed that; it is now recorded.")
+        idx["migrated_from"] = {"name": old, "sig": old_sig, "tag": old_tag}
         idx["sig"] = new_sig
         # WRITTEN THROUGH A TEMPORARY AND RENAMED, like every other manifest write here: a
         # half-written index is an unreadable stream, and this runs on a cache that took hours.
