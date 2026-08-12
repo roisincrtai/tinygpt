@@ -817,14 +817,11 @@ COT = dict(
     # generating n tokens redoes the whole prefix n times, which is O(n^2) work. With one, each
     # step extends the keys, values, convolution window and recurrence state that are already
     # there. --no-kv_cache turns it off, for a comparison or when something is suspected.
-    # BF16 LIVE WEIGHTS. Halves the weights, the activations and the frozen reference -- and
-    # this stage holds TWO copies of the model, the policy and the reference it is kept near,
-    # so the saving is doubled. THE CHECKPOINT IS STILL FP32: MasterAdamW updates fp32 masters
-    # and save_ckpt casts on the way out, so bf16 is how the step fits on the card and never
-    # something the saved model inherits. The log-probs are computed in fp32 regardless
-    # (forward_logprobs casts before the log-softmax), because a ratio of two probabilities over
-    # a 50,259-way softmax is exactly where bf16's eight mantissa bits would show.
-    bf16=True,
+    # THERE IS NO bf16 KNOB HERE ANY MORE. This stage used to cast its live WEIGHTS to
+    # bfloat16 to make a long-completion step fit; mixed precision (MIXED_PRECISION, on by
+    # default) now gets the same activation saving across every stage without touching a
+    # weight -- which is the whole point, since an update below bf16's ~3 significant digits
+    # rounds away and fp32 masters are what prevent it. One precision policy, shared.
     kv_cache=True,
     # WHAT THE CACHE MAY HOLD, in GiB. Attention's part grows with every token generated and a
     # step decodes batch x group_size sequences at once -- 128 at the defaults -- so left

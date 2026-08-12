@@ -71,6 +71,10 @@ Resolved against the device, not asserted: CUDA with bf16 support gets it, and C
 pre-Ampere cards are told they are training in fp32 rather than left with a flag that reads as
 on. `MIXED_PRECISION=0`, or `--no-mixed_precision`, forces fp32 everywhere.
 
+**No weight is ever cast.** One precision policy, shared by every stage — there is no per-stage
+dtype knob, because a stage holding bf16 weights would be exactly the arrangement the fp32
+masters exist to prevent.
+
 ### Parallelism
 
 With more than one GPU the model's **layers** are split across them automatically: 2 GPUs and
