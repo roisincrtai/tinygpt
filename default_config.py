@@ -321,9 +321,25 @@ SCHEME_BATCH = {
 # was 18.1 GiB on the card, which puts a token at 1.88 MB for 24 layers of width 512 -- a third
 # more than the estimate that preceded it. The other schemes are scaled from that by
 # layers x width. Confirm with nvidia-smi on the first hundred steps before trusting them.
+#
+# RE-MEASURED UNDER MIXED PRECISION. 12,288 tokens per pass was 29.6 GiB in fp32 and is 25.4 GiB
+# with bf16 activations -- a saving of 4.2 GiB rather than half, because the part that did NOT
+# change is large: fp32 weights, their fp32 masters, fp32 gradients and Adam's two fp32 moments
+# come to ~7.0 GiB before a single activation exists, and that floor is flat in tokens. Only the
+# 22.6 GiB of activations moved, to 18.4 GiB, which is 1.53 MiB per token.
+#
+# SO THE BUDGET WAS RAISED RATHER THAN BANKED: 12,288 -> 19,456 tokens, ~36 GiB, since the point
+# of the saving is a bigger pass and not an idle card. Two figures come from that one:
+#
+#     peak     ~36.1 GiB, at the SHORTEST window, where 19 x 1,023 packs the budget most tightly
+#     8,192    2 sequences per pass instead of 1 -- the old setting could not fit two, so the
+#              longest window ran at 8,191 tokens per pass and left a third of the card unused
+#
+# SAFE TO CHANGE MID-RUN. The micro-batch splits a step into passes whose gradients accumulate;
+# the optimiser sees the same step either way, so a resumed run continues on the same curve.
 SCHEME_MICRO_TOKENS = {
     "zetagpt-tiny": 38912,      # 0.63 MB/token -> ~29.6 GiB
-    "zetagpt-s": 12288,         # 1.88 MB/token -> ~29.6 GiB (measured basis)
+    "zetagpt-s": 19456,         # 1.53 MiB/token bf16 + 7.0 GiB fixed -> ~36.1 GiB
     "zetagpt-m": 8192,          # 2.51 MB/token -> ~27.8 GiB
     # zetagpt-l AT ITS LONGEST WINDOW DOES NOT FIT ONE 44 GB CARD, and no micro-batch can make
     # it: a single sequence at 32,768 tokens is already ~125 GiB of block activations at 32
