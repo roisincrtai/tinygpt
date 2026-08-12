@@ -568,6 +568,15 @@ PRETRAIN = dict(
 # SFT is INSTRUCTION fine-tuning: the same length-normalized LM objective as pretraining, with
 # the loss masked to the RESPONSE, on the Tulu 3 SFT mixture (SFT_DIR).
 #
+# THE BATCH IS THIS STAGE'S OWN, 32, and not SCHEME_BATCH's 3. SCHEME_BATCH sizes a PRETRAINING
+# step, where every sequence fills the whole 8,192-token window; an instruction demonstration is
+# a few hundred tokens, so 3 would leave the card almost empty and make one epoch 313,115 steps.
+# config.sh passes --batch for this stage, which is also what stops SCHEME_BATCH being applied
+# (helpers.common._was_given). A batch is padded to its LONGEST record and this corpus is
+# ragged, so the micro-batch is ONE SEQUENCE PER PASS: a fixed number of sequences does not
+# bound the tokens per pass, and one sequence does -- at most the context window, 8,192, inside
+# the 12,288 SCHEME_MICRO_TOKENS measured for this scheme.
+#
 # THE STEP BUDGET IS ONE EPOCH. The mixture holds 939,343 conversations, which flatten to
 # slightly more demonstrations than that -- one per assistant turn, so a multi-turn conversation
 # contributes several -- and at batch 32:
@@ -588,6 +597,7 @@ PRETRAIN = dict(
 # spend on remembering.
 SFT = dict(
     steps=29355, lr=1e-6,       # 1 epoch of the Tulu 3 mixture at batch 32
+    batch=32, micro_batch=1,    # SFT_BATCH / SFT_MICRO_BATCH in config.sh, which passes both
     # WHICH rlhf_hh SUBSETS the demonstrations come from, IF this stage is pointed back at an
     # hh tree (--sft_dir). The TRAIN splits only: the test splits are what stages 7 and 10 hold
     # themselves out on, and fine-tuning on them would make every later evaluation a measurement

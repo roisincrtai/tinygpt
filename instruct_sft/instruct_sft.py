@@ -113,9 +113,19 @@ def run(ctx, init_model, corpus):
     # turn. Those two are allowed to differ -- but not silently, because a budget that is
     # half an epoch and a budget that is three looks identical from a loss curve.
     epoch = -(-len(corpus) // max(args.batch, 1))            # ceil
+    mb = int(getattr(args, "micro_batch", 0) or 0)
     log(f"[sft] one epoch = {epoch:,} steps at batch {args.batch} "
         f"({len(corpus):,} demonstrations); this run does {args.sft_steps:,} "
         f"({args.sft_steps / max(epoch, 1):.2f} epochs)")
+    # THE MICRO-BATCH, SAID OUT LOUD. lm.train only announces it when there is a context
+    # SCHEDULE to announce it alongside, and this stage has one window -- so without this the
+    # single number that decides whether the step fits in memory would never appear in the log.
+    log(f"[sft] {mb} sequence{'s' if mb != 1 else ''} per forward pass, "
+        f"{-(-args.batch // max(mb, 1))} passes per step (a batch is padded to its longest "
+        f"record, so this is what bounds the tokens per pass)"
+        if mb else
+        f"[sft] the whole batch of {args.batch} in one forward pass, padded to its longest "
+        f"record -- set SFT_MICRO_BATCH to split it")
     preview = common.make_preview(ctx["tok"], ctx["device"], args.max_len, log,
                                   common.corpus_prompts(corpus, seed=args.seed,
                                                         tok=ctx["tok"]))

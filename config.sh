@@ -37,7 +37,7 @@ EXTRA_SET COMMON_FLAGS \
 BPE_MERGES BPE_MIN_FREQ BPE_FLAGS \
 CORPUS_MAX_WORDS CORPUS_TEXT_COLUMN TOKENIZE_FLAGS \
 PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
-SFT_STEPS SFT_LR SFT_FLAGS \
+SFT_STEPS SFT_LR SFT_BATCH SFT_MICRO_BATCH SFT_FLAGS \
 REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
 KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_SFT COT_SFT_STEPS COT_SFT_LR COT_INIT COT_BATCH COT_GROUP COT_BF16 COT_SAMPLES_EVERY COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
@@ -383,10 +383,38 @@ PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 # =========================================================================== #
 # stage 6 -- supervised fine-tuning
 # =========================================================================== #
+# THIS STAGE SIZES ITS OWN BATCH, and must. SCHEME_BATCH is 3 for zetagpt-s because a
+# PRETRAINING sequence fills the whole 8,192-token window; an instruction demonstration is a few
+# hundred tokens, so the same 3 would leave the card almost empty and make one epoch 313,115
+# steps. Passing --batch here also stops default_config.SCHEME_BATCH being applied at all
+# (helpers.common._was_given), which is the mechanism, not a side effect.
+#
+# BATCH= still wins, because it falls through to it: a person who pinned a batch for the whole
+# run meant it for this stage too.
+SFT_BATCH="${SFT_BATCH:-${BATCH:-32}}"
+# ONE SEQUENCE PER FORWARD PASS. A batch is padded to the LONGEST record in it and this corpus
+# is ragged -- most demonstrations are a few hundred tokens, a few are thousands -- so a fixed
+# number of sequences per pass does not bound the tokens per pass, which is what memory is
+# actually linear in. One does bound it: a single record is at most the context window, 8,192
+# tokens, comfortably inside the 12,288 that SCHEME_MICRO_TOKENS measured for this scheme.
+#
+# WHAT IT COSTS is throughput, not accuracy: the gradients of 32 passes add up in the parameters
+# to exactly the step the whole batch would have given (helpers.lm weights each pass by its
+# share), but a pass carrying one short sequence uses little of the card. Raise it if the run is
+# slower than the memory headroom justifies -- and know that at 4 a batch whose longest record
+# is over ~3,000 tokens exceeds the measured budget.
+#
+# MICRO_BATCH= wins where it says something. It ships as 0, which is "off" for every other
+# stage and is exactly what this stage must not inherit, so 0 is read as "unset" here rather
+# than as a choice -- the one value that cannot have been meant for stage 6.
+if [ -z "${SFT_MICRO_BATCH:-}" ]; then
+    if [ "${MICRO_BATCH:-0}" != "0" ]; then SFT_MICRO_BATCH="$MICRO_BATCH"
+    else SFT_MICRO_BATCH=1; fi
+fi
 # ONE EPOCH of the Tulu 3 mixture: ceil(939,343 conversations / 32 per step) = 29,355 steps.
-# CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being one epoch. The stage
-# measures the true epoch length once the corpus is loaded -- after the per-turn expansion and
-# the deduplication -- and prints it beside this number, so the two never drift unnoticed.
+# CHANGE THIS WHENEVER SFT_BATCH CHANGES, or the budget silently stops being one epoch. The
+# stage measures the true epoch length once the corpus is loaded -- after the per-turn expansion
+# and the deduplication -- and prints it beside this number, so the two never drift unnoticed.
 SFT_STEPS="${SFT_STEPS:-29355}"
 SFT_LR="${SFT_LR:-1e-6}"
 SFT_FLAGS="${SFT_FLAGS:-}"
@@ -704,6 +732,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$PRETRAIN_LR" ]    && PRETRAIN_FLAGS="$PRETRAIN_FLAGS --pretrain_lr $PRETRAIN_LR"
 [ -n "$SFT_STEPS" ]      && SFT_FLAGS="$SFT_FLAGS --sft_steps $SFT_STEPS"
 [ -n "$SFT_LR" ]         && SFT_FLAGS="$SFT_FLAGS --sft_lr $SFT_LR"
+# AFTER the common flags on the command line, so these win: stage 6's batch is its own, and
+# BATCH= / MICRO_BATCH= in the environment still beat both, since _was_given reads them.
+[ -n "$SFT_BATCH" ]      && SFT_FLAGS="$SFT_FLAGS --batch $SFT_BATCH"
+[ -n "$SFT_MICRO_BATCH" ] && SFT_FLAGS="$SFT_FLAGS --micro_batch $SFT_MICRO_BATCH"
 [ -n "$REWARD_STEPS" ]   && REWARD_FLAGS="$REWARD_FLAGS --reward_steps $REWARD_STEPS"
 [ -n "$REWARD_LR" ]      && REWARD_FLAGS="$REWARD_FLAGS --reward_lr $REWARD_LR"
 [ -n "$RLHF_STEPS" ]     && RLHF_FLAGS="$RLHF_FLAGS --rlhf_steps $RLHF_STEPS"

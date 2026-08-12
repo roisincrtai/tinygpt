@@ -94,6 +94,14 @@ tokenises in minutes against a run of tens of thousands of steps. The budget is 
 the corpus is loaded and prints it beside the configured one, so a budget that has stopped being
 an epoch says so.
 
+This stage sizes its own batch (`SFT_BATCH`, 32) rather than taking `SCHEME_BATCH`, which is 3
+for `zetagpt-s` because a *pretraining* sequence fills the whole 8,192-token window while a
+demonstration is a few hundred tokens. A batch is padded to its longest record and the mixture
+is ragged, so the micro-batch is one sequence per forward pass (`SFT_MICRO_BATCH`): a fixed
+count of sequences does not bound the tokens per pass, and one sequence does — at most the
+context window, inside the measured per-pass budget. Raise it if throughput matters more than
+the headroom.
+
 ### Multilingual SFT
 
 Stage 11 adapts the pretrained model to another language in three sub-stages. The new corpus is
