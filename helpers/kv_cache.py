@@ -2,6 +2,7 @@
 kv_cache.py -- incremental decoding state, and the budget that bounds it.
 
     Cache(n_layer, budget_bytes)      an empty cache
+    budget_bytes(gib)                the configured --kv_cache_size as bytes
     cache.fits(batch, tokens, cfg)    would decoding this batch stay inside the budget?
     plan(n_seq, tokens, cfg, budget)  how many sequences to decode at once
     bytes_per_token(cfg)              the arithmetic, exposed so a caller can size its own run
@@ -45,6 +46,17 @@ compares the logits. Run it once on the machine you train on, after any change t
                a=c.parse_args([]); ctx=c.setup(a); print(kv.check(ctx['new_model'](), ctx['device']))"
 """
 import math
+
+
+GIB = 1024 ** 3
+
+
+def budget_bytes(size_gib):
+    """A configured size in GiB as bytes. 0 or less means unbounded."""
+    try:
+        return max(0, int(float(size_gib) * GIB))
+    except (TypeError, ValueError):
+        return 0
 
 
 def bytes_per_token(cfg, dtype_bytes=4):

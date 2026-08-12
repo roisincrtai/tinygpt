@@ -94,7 +94,7 @@ actually wanted costs `batch × vocab × 4`: **4.6 MB, flat**.
 
 **Cache, or pay O(n²).** Without a cache, generating n tokens recomputes the whole prefix n
 times. `helpers/kv_cache.py` keeps four tensors per layer — keys, values, the convolution
-window and the recurrence state — bounded by `KV_CACHE_MB`.
+window and the recurrence state — bounded by `--kv_cache_size`, in GiB.
 
 ```
 whole-sequence logits  =  batch × tokens × V × 4      1.80 GiB at 24 x 400

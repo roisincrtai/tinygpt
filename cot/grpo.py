@@ -49,7 +49,8 @@ MIN_NEW_TOKENS = 64
 # rollout
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len, use_cache=True):
+def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len,
+            use_cache=True, cache_gib=0.0):
     """Sample one completion per row of `prompts` (already group-expanded by the caller, so
     the same prompt appears group_size times and each copy is sampled independently).
 
@@ -85,9 +86,10 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len, use_
     # so a shorter row would have its next token written at another row's position. Equal
     # lengths make the cursors move in lockstep and the append correct. Unequal prompts fall
     # back to recomputing the prefix, which is slower and right; nothing is silently wrong.
-    from helpers.kv_cache import Cache
+    from helpers.kv_cache import Cache, budget_bytes
     same_len = len(set(len(p) for p in pids)) == 1 and all(pids)
-    cache = Cache(len(policy.blocks)) if (use_cache and same_len) else None
+    cache = (Cache(len(policy.blocks), budget_bytes(cache_gib))
+             if (use_cache and same_len) else None)
     cur = torch.tensor([max(len(p), 1) for p in pids], device=device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
     rows = torch.arange(B, device=device)
@@ -223,7 +225,9 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
                                               cfg["max_new_tokens"], cfg["gen_temperature"],
                                               g, args.max_len,
                                               use_cache=getattr(args, "kv_cache", True)
-                                              and cfg.get("kv_cache", True))
+                                              and cfg.get("kv_cache", True),
+                                              cache_gib=getattr(args, "kv_cache_size", 0.0)
+                                              or cfg.get("kv_cache_size", 0.0))
         rmask = resp_mask.float()
         if rmask.sum() < 1:
             continue
@@ -348,7 +352,8 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         ids, attn, resp_mask, texts = rollout(
             policy, tok, [verifier.prompt(p["question"], cfg) for p in sel], device,
             cfg["max_new_tokens"], cfg["gen_temperature"], g, args.max_len,
-            use_cache=getattr(args, "kv_cache", True) and cfg.get("kv_cache", True))
+            use_cache=getattr(args, "kv_cache", True) and cfg.get("kv_cache", True),
+            cache_gib=getattr(args, "kv_cache_size", 0.0) or cfg.get("kv_cache_size", 0.0))
         sc = [verifier.score(t, p["answer"], cfg) for t, p in zip(texts, sel)]
         evald = {"problems": n_ev,
                  "accuracy": sum(s["correct"] for s in sc) / max(len(sc), 1),

@@ -670,12 +670,15 @@ COT = dict(
     # step extends the keys, values, convolution window and recurrence state that are already
     # there. --no-kv_cache turns it off, for a comparison or when something is suspected.
     kv_cache=True,
-    # WHAT THE CACHE MAY HOLD, in bytes. Attention's part grows with every token generated and
-    # a step decodes batch x group_size sequences at once -- 128 at the defaults -- so left
+    # WHAT THE CACHE MAY HOLD, in GiB. Attention's part grows with every token generated and a
+    # step decodes batch x group_size sequences at once -- 128 at the defaults -- so left
     # unbounded it is tens of gigabytes on a long window. The rollout is split into groups that
     # fit this and decoded one group at a time; sequences are independent, so the completions
     # are the same and only the peak changes.
-    kv_cache_bytes=2 * 1024 ** 3,   # 2 GiB
+    #
+    # GiB, not bytes: this is a number a person sets against a card they can see, and 2 is
+    # readable where 2147483648 is a thing to be trusted. A float is accepted, so 0.5 works.
+    kv_cache_size=2.0,          # GiB
     # DATA. Every .json under the task's directory; each countdown record carries a prompt, an
     # answer of {target, numbers}, and a reference trace the stage never trains on.
     data_dir=COT_COUNTDOWN_DIR,      # data/download/zetagpt-cot-countdown-game-20k

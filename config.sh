@@ -40,7 +40,7 @@ PRETRAIN_STEPS PRETRAIN_LR PRETRAIN_FLAGS \
 SFT_STEPS SFT_LR SFT_FLAGS \
 REWARD_STEPS REWARD_LR REWARD_FLAGS \
 RLHF_STEPS RLHF_LR RLHF_KL_COEF RLHF_MAX_NEW_TOKENS RLHF_FLAGS \
-KV_CACHE KV_CACHE_MB COT_TASK COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
+KV_CACHE KV_CACHE_SIZE COT_TASK COT_STEPS COT_LR COT_INIT COT_GROUP COT_KL_COEF COT_MAX_NEW_TOKENS COT_FLAGS \
 DPO_STEPS DPO_LR DPO_FLAGS \
 DISTILL_STEPS DISTILL_LR DISTILL_TEACHER DISTILL_STUDENT DISTILL_FLAGS \
 SCALING_MODELS SCALING_BUDGETS SCALING_CONTEXT SCALING_BATCH SCALING_LR SCALING_LR_RULE \
@@ -266,12 +266,12 @@ TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"   # 1 = split layers across GPUs (defaul
 # window and recurrence state, because a block is SSM -> attention -> FFN and the recurrence
 # would otherwise be re-run over the prefix regardless.
 #
-# KV_CACHE_MB BOUNDS IT. Attention's share grows with every token, and a GRPO step decodes
+# KV_CACHE_SIZE BOUNDS IT. Attention's share grows with every token, and a GRPO step decodes
 # batch x group_size sequences at once, so an unbounded cache is tens of gigabytes at a long
 # window. The rollout is split into groups that fit, decoded one group at a time; sequences are
 # independent, so the completions are identical and only the peak changes.
 KV_CACHE="${KV_CACHE:-1}"           # 1 = cache while generating (default), 0 = recompute
-KV_CACHE_MB="${KV_CACHE_MB:-2048}"  # what the cache may hold, MB (2 GiB)
+KV_CACHE_SIZE="${KV_CACHE_SIZE:-2}" # what the cache may hold, GiB (a float is fine)
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"        # cosine | constant
 LR_MIN_FACTOR="${LR_MIN_FACTOR:-10.0}"      # cosine floor: minimum lr = stage lr / this
 BETA="${BETA:-0.1}"                 # implicit-reward beta, shared by DPO and evaluation
@@ -525,7 +525,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ "$CHUNKED_LOSS" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no_chunked_loss"
 [ "$TENSOR_PARALLEL" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no-tensor_parallel"
 [ "$KV_CACHE" = "0" ]    && COMMON_FLAGS="$COMMON_FLAGS --no-kv_cache"
-[ -n "$KV_CACHE_MB" ]    && COMMON_FLAGS="$COMMON_FLAGS --set COT.kv_cache_bytes=$(( KV_CACHE_MB * 1024 * 1024 ))"
+[ -n "$KV_CACHE_SIZE" ]  && COMMON_FLAGS="$COMMON_FLAGS --kv_cache_size $KV_CACHE_SIZE"
 [ -n "$LOSS_CHUNK" ]     && COMMON_FLAGS="$COMMON_FLAGS --loss_chunk $LOSS_CHUNK"
 [ -n "$LR_SCHEDULE" ]    && COMMON_FLAGS="$COMMON_FLAGS --lr_schedule $LR_SCHEDULE"
 [ -n "$LR_MIN_FACTOR" ]  && COMMON_FLAGS="$COMMON_FLAGS --lr_min_factor $LR_MIN_FACTOR"

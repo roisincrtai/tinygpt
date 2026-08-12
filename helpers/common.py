@@ -158,6 +158,11 @@ def parse_args(argv=None):
                     help="cache keys, values and the recurrence state while generating (default)")
     ap.add_argument("--no-kv_cache", "--no_kv_cache", dest="kv_cache", action="store_false",
                     help="recompute the whole prefix at every generated token")
+    ap.add_argument("--kv_cache_size", type=float, default=config.COT["kv_cache_size"],
+                    metavar="GiB",
+                    help="what the prefix cache may hold, in GiB; a rollout larger than this "
+                         "is decoded in groups that fit (default: "
+                         f"{config.COT['kv_cache_size']})")
     ap.add_argument("--max_len", type=int, default=t["max_len"],
                     help="truncation of an encoded example; 0 = the model's context window")
     ap.add_argument("--model_scheme", default=config.PRETRAIN["model_scheme"],
