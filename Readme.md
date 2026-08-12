@@ -77,6 +77,23 @@ policy never samples is a reward every completion earns alike, every advantage i
 the run trains on nothing while its curves look healthy. `--no-cot_sft` skips it, for the
 R1-Zero setting.
 
+### Instruction following
+
+Stage 6 fine-tunes the pretrained checkpoint on the Tülu 3 SFT mixture — 939k conversations of
+reasoning, code, mathematics, safety and several dozen languages, shipped as parquet shards of
+`messages` turns. Every conversation is flattened into **one demonstration per assistant turn**,
+each carrying everything said before it as its prompt, so a six-turn conversation is three
+demonstrations rather than one and the loss never lands on the user's words. The transcript form
+is the preference data's own — `\n\nHuman: … \n\nAssistant:` — which is what lets stages 7, 8 and
+10 score, roll out and align a model in the format they prompt it in.
+
+Nothing is pre-tokenised: the demonstrations are held as text and encoded in the collate step,
+because the loss mask and the transcript markers are decided there, and a mixture this size
+tokenises in minutes against a run of tens of thousands of steps. The budget is one epoch —
+`ceil(939,343 / 32) = 29,355` steps at 10⁻⁶ — and the stage measures the true epoch length once
+the corpus is loaded and prints it beside the configured one, so a budget that has stopped being
+an epoch says so.
+
 ### Multilingual SFT
 
 Stage 11 adapts the pretrained model to another language in three sub-stages. The new corpus is
@@ -194,7 +211,7 @@ pip install -r requirements.txt
 ./stage3_train_bpe_tokenizer.sh    # byte-level BPE
 ./stage4_tokenize_data.sh          # corpora -> memory-mapped token streams
 ./stage5_pretrain.sh               # pretraining
-./stage6_instruct_sft.sh           # supervised fine-tuning (needs the pretrain checkpoint)
+./stage6_instruct_sft.sh           # instruction SFT (needs the pretrain checkpoint)
 ./stage7_train_rlhf_reward.sh      # reward model
 ./stage8_instruct_tuning_rlhf.sh   # RLHF by PPO (needs the SFT and reward checkpoints)
 ./stage9_cot_aha_moment.sh         # chain of thought by GRPO
@@ -236,6 +253,11 @@ DATASET=/path/to/my_preferences ./stage7_train_rlhf_reward.sh
 SFT_DIR=/path/to/my_demos       ./stage6_instruct_sft.sh
 PRETRAIN_DIR=/path/to/my_corpus ./stage5_pretrain.sh
 ```
+
+Stage 6 reads three layouts, and says in its log which one it decided yours is: a **conversation
+mixture** (parquet or jsonl carrying a `messages` list of `{role, content}` turns), a
+**preference tree** (`<dir>/*_train/*.json`, of which it takes the chosen response), or a
+**folder of json/jsonl records** with any of the usual prompt and response field names.
 
 Talk to a trained checkpoint:
 

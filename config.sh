@@ -113,10 +113,11 @@ PRETRAIN_DIR="${PRETRAIN_DIR:-}"
 # stages can read different datasets.
 INSTRUCT_DIR="${INSTRUCT_DIR:-data/download/zetagpt-rlhf-instruction_following}"
 
-# FINE-TUNING DATA for stage 6: the same records stages 7, 8 and 10 read, of which stage 6
-# takes the CHOSEN response conditioned on its prompt. Point this elsewhere only to fine-tune
-# on something other than the preference data.
-SFT_DIR="${SFT_DIR:-data/download/zetagpt-rlhf-instruction_following/rlhf_hh}"
+# FINE-TUNING DATA for stage 6: the Tulu 3 SFT mixture -- 939k conversations, shipped as six
+# parquet shards of `messages` turns. It is NOT the preference tree above and not derived from
+# it: stages 7, 8 and 10 read rlhf_hh, stage 6 reads demonstrations. The layout is detected, so
+# pointing this at an hh tree or at your own folder of json records still works.
+SFT_DIR="${SFT_DIR:-data/download/zetagpt-instruction-following-sft-tulu-3-mixture}"
 
 DATA_LIMIT="${DATA_LIMIT:-0}"       # cap #preference pairs loaded; 0 = all
 VAL_FRAC="${VAL_FRAC:-0.05}"        # validation fraction, used only for a layout that ships
@@ -382,12 +383,16 @@ PRETRAIN_FLAGS="${PRETRAIN_FLAGS:-}"
 # =========================================================================== #
 # stage 6 -- supervised fine-tuning
 # =========================================================================== #
-SFT_STEPS="${SFT_STEPS:-2342}"
+# ONE EPOCH of the Tulu 3 mixture: ceil(939,343 conversations / 32 per step) = 29,355 steps.
+# CHANGE THIS WHENEVER BATCH CHANGES, or the budget silently stops being one epoch. The stage
+# measures the true epoch length once the corpus is loaded -- after the per-turn expansion and
+# the deduplication -- and prints it beside this number, so the two never drift unnoticed.
+SFT_STEPS="${SFT_STEPS:-29355}"
 SFT_LR="${SFT_LR:-1e-6}"
 SFT_FLAGS="${SFT_FLAGS:-}"
 
 SFT_SUBSETS="${SFT_SUBSETS:-helpful_train,harmless_train}"  # split dirs read from an hh tree
-SFT_LIMIT="${SFT_LIMIT:-0}"         # cap demonstrations per subset; 0 = all
+SFT_LIMIT="${SFT_LIMIT:-0}"         # cap demonstrations loaded; 0 = all
 
 # =========================================================================== #
 # stage 7 -- reward model (sigmoid + BCE)

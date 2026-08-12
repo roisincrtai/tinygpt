@@ -180,8 +180,9 @@ def parse_args(argv=None):
                          "default_config.PRETRAIN_CORPUS, which is set for every scheme. "
                          "Read locally: no stage downloads, see tools/download_data.py")
     ap.add_argument("--sft_dir", default="",
-                    help="fine-tuning data directory; empty = default_config.SFT_DIR, "
-                         "which is <instruct_dir>/rlhf_hh")
+                    help="fine-tuning data directory; empty = default_config.SFT_DIR, the "
+                         "Tulu 3 SFT mixture. A conversation mixture, an hh tree or your own "
+                         "folder of json records: the layout is detected and reported")
     ap.add_argument("--instruct_dir", default="",
                     help="root of the instruction-tuning tree (alpaca_gpt4/, rlhf_hh/) used "
                          "by stages 6, 7, 8 and 10, and by distillation; empty = "

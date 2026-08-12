@@ -39,7 +39,8 @@
 zetagpt-tiny_pretrain-corpus_wikitext103        | roisincrtai/zetagpt-tiny_pretrain-corpus_wikitext103        | 500 | pretraining corpus for ZetaGPT-Tiny: WikiText-103
 zetagpt-pretrain_fineweb-edu-2BT                | roisincrtai/zetagpt-pretrain_fineweb-edu-2BT                |   0 | pretraining corpus for ZetaGPT-S: the ~2B-token (~10 GB) FineWeb-Edu subset
 zetagpt-pretrain_fineweb-edu-10BT               | roisincrtai/zetagpt-pretrain_fineweb-edu-10BT               |   0 | pretraining corpus for ZetaGPT-M and ZetaGPT-L: the 10B-token FineWeb-Edu sample
-zetagpt-rlhf-instruction_following              | roisincrtai/zetagpt-rlhf-instruction_following              |   0 | instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout prompts, shared by stages 6, 7 and 10
+zetagpt-rlhf-instruction_following              | roisincrtai/zetagpt-rlhf-instruction_following              |   0 | instruction tuning: rlhf_hh preference pairs and alpaca_gpt4 rollout prompts, shared by stages 7, 8 and 10
+zetagpt-instruction-following-sft-tulu-3-mixture | roisincrtai/zetagpt-instruction-following-sft-tulu-3-mixture |   0 | stage 6 instruction SFT: the Tulu 3 SFT mixture, 939k conversations as `messages` turns in 6 parquet shards
 zetagpt-cot-countdown-game-20k                  | roisincrtai/zetagpt-cot-countdown-game-20k                  |   0 | stage 9 GRPO: 20k Countdown arithmetic problems, each with a target, its numbers and a reference trace
 zetagpt-grpo-cot_gsm8k                          | roisincrtai/zetagpt-grpo-cot_gsm8k                          |   0 | grade-school word problems, the alternative stage 9 task (set COT_TASK=gsm8k)
 zetagpt-pretrain-gaelic-uccix_irish_textual_corpus | roisincrtai/zetagpt-pretrain-gaelic-uccix_irish_textual_corpus | 500 | stage 11 language adaptation: the UCCIX Irish textual corpus (Gaelic)

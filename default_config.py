@@ -160,18 +160,29 @@ INSTRUCTION_DIR = INSTRUCT_DIR                             # no nesting; kept as
 ALPACA_DIR = os.path.join(INSTRUCT_DIR, "alpaca_gpt4")     # alpaca_gpt4_<batch>.json
 HH_DIR = os.path.join(INSTRUCT_DIR, "rlhf_hh")             # {helpful,harmless}_{train,test}/
 
-# rlhf_hh SERVES FOUR STAGES, each taking a different projection of the same records:
+# rlhf_hh SERVES THE THREE PREFERENCE STAGES, each taking a different projection of the same
+# records:
 #
-#   4 SFT     prompt + chosen, trained as a language model on the response  (SFT_DIR)
-#   5 reward  (prompt, chosen, rejected) as a binary classification         (HH_DIR)
-#   6 RLHF    the prompts alone, to roll out from                           (prompt_dir)
-#   8 DPO     (prompt, chosen, rejected) as a preference                    (dataset "hh")
+#   7 reward  (prompt, chosen, rejected) as a binary classification         (HH_DIR)
+#   8 RLHF    the prompts alone, to roll out from                           (prompt_dir)
+#  10 DPO     (prompt, chosen, rejected) as a preference                    (dataset "hh")
 #
-# One dataset behind all four is worth more than four tidier ones: the reward model then scores
-# the same distribution the policy was fine-tuned on and is rolled out over, which is the
-# assumption every one of those objectives is written under and the thing that quietly breaks
-# when each stage is fed from somewhere different.
-SFT_DIR = HH_DIR
+# One dataset behind all three is worth more than three tidier ones: the reward model scores the
+# distribution the policy is rolled out over, which is the assumption those objectives are
+# written under and the thing that quietly breaks when each stage is fed from somewhere
+# different.
+#
+# STAGE 6 IS THE EXCEPTION, and deliberately. Instruction following is not something hh teaches:
+# hh is a preference between two answers to the same question, collected to say which is more
+# helpful, and its chosen half is a demonstration only by accident. The Tulu 3 SFT mixture is
+# 939k conversations assembled to be demonstrations -- reasoning, code, maths, safety, several
+# dozen languages -- and it is what stage 6 now fine-tunes on. See SFT below.
+#
+# WHAT THAT COSTS. The policy is no longer fine-tuned on the distribution the reward model is
+# fitted to, so stage 7's scores are further from stage 6's output than they were. That is the
+# arrangement Tulu 3 itself uses -- SFT on the mixture, preferences from elsewhere -- and the KL
+# term in stages 8 and 10 is what holds the policy near the model that was actually fine-tuned.
+SFT_DIR = dataset_dir("zetagpt-instruction-following-sft-tulu-3-mixture")
 
 
 def set_instruct_root(path):
@@ -179,11 +190,15 @@ def set_instruct_root(path):
 
     The derived directories are module-level constants read from several places, so moving the
     root has to move them together; doing it here rather than at each call site is what stops
-    one stage reading the downloaded preference pairs while another reads the shipped ones."""
-    global INSTRUCT_DIR, INSTRUCTION_DIR, ALPACA_DIR, HH_DIR, SFT_DIR
+    one stage reading the downloaded preference pairs while another reads the shipped ones.
+
+    SFT_DIR IS NOT ONE OF THEM any more. Stage 6's corpus is its own dataset, not a subdirectory
+    of this tree, so moving the preference tree must not silently drag the fine-tuning data back
+    into it -- which is exactly what this function used to do. Use --sft_dir to move that."""
+    global INSTRUCT_DIR, INSTRUCTION_DIR, ALPACA_DIR, HH_DIR
     INSTRUCT_DIR = INSTRUCTION_DIR = path
     ALPACA_DIR = os.path.join(path, "alpaca_gpt4")
-    HH_DIR = SFT_DIR = os.path.join(path, "rlhf_hh")
+    HH_DIR = os.path.join(path, "rlhf_hh")
     RLHF["prompt_dir"] = HH_DIR
     return INSTRUCT_DIR
 
@@ -550,15 +565,36 @@ PRETRAIN = dict(
     exclude_dirs=["test", "valid", "validation"],
 )
 
-# SFT is DOMAIN-ADAPTIVE fine-tuning: the same length-normalized LM objective as pretraining,
-# on the target-domain text under the fine-tuning data (scanned exactly like the pretraining corpus).
+# SFT is INSTRUCTION fine-tuning: the same length-normalized LM objective as pretraining, with
+# the loss masked to the RESPONSE, on the Tulu 3 SFT mixture (SFT_DIR).
+#
+# THE STEP BUDGET IS ONE EPOCH. The mixture holds 939,343 conversations, which flatten to
+# slightly more demonstrations than that -- one per assistant turn, so a multi-turn conversation
+# contributes several -- and at batch 32:
+#
+#     ceil(939,343 / 32) = 29,355 steps
+#
+# The true figure is measured at load time, after deduplication, and PRINTED beside this one
+# ("one epoch = N steps ... this run does M"), because the two are allowed to differ and a
+# budget that turns out to be a third of an epoch looks exactly like one that is a whole epoch
+# from the loss curve alone. Raise SFT.limit's twin SFT_LIMIT in config.sh to shorten the run
+# instead of the budget: half the corpus for half the steps is a different experiment from the
+# whole corpus seen half as often.
+#
+# ONE epoch and not two, at 1e-6. Instruction tuning is teaching a format the pretrained model
+# already has the language for, and a second pass over a mixture this size buys memorisation of
+# individual answers rather than more instruction following -- the Tulu 3 recipe itself is two
+# epochs over the mixture for a 8B model, and this is a 133M one with far less capacity to
+# spend on remembering.
 SFT = dict(
-    steps=2342, lr=1e-6,        # 2 epochs
-    # WHICH rlhf_hh SUBSETS the demonstrations come from. The TRAIN splits only: the test
-    # splits are what stages 7 and 10 hold themselves out on, and fine-tuning on them would make
-    # every later evaluation a measurement of memorisation instead of generalisation.
+    steps=29355, lr=1e-6,       # 1 epoch of the Tulu 3 mixture at batch 32
+    # WHICH rlhf_hh SUBSETS the demonstrations come from, IF this stage is pointed back at an
+    # hh tree (--sft_dir). The TRAIN splits only: the test splits are what stages 7 and 10 hold
+    # themselves out on, and fine-tuning on them would make every later evaluation a measurement
+    # of memorisation instead of generalisation. Ignored by the chat layout, which has no
+    # subset directories -- its subsets are a COLUMN, and it is read whole.
     subsets=["helpful_train", "harmless_train"],
-    limit=0,                    # cap the pairs taken per subset (0 = all)
+    limit=0,                    # cap the demonstrations loaded (0 = all)
 )
 
 # reward model: ZetaGPT trunk + scalar head; binary classification with sigmoid + BCE,

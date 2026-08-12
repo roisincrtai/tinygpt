@@ -3,6 +3,8 @@ dataset_helpers.py -- every dataset the alignment stages read, behind one interf
 
     preference pairs      {prompt, chosen, rejected} -- the downloaded HH tree, or ANY local
                           folder of json/jsonl records; the layout is detected, not declared
+    conversations         parquet or jsonl records carrying a `messages` list of {role,
+                          content} turns -- the shape the Tulu 3 SFT mixture ships in
     instruction prompts   the `prompt` field of the instruction batches
     corpora               plain documents, packed to a word budget
 
@@ -20,11 +22,16 @@ import torch
 import default_config as config
 
 
-# THE TWO LAYOUTS, TOLD APART BY LOOKING RATHER THAN BY BEING TOLD.
+# THE THREE LAYOUTS, TOLD APART BY LOOKING RATHER THAN BY BEING TOLD.
 #
 #   "hh"     a tree of SPLIT DIRECTORIES -- <root>/<name>_train/*.json and <name>_test/*.json,
 #            the shape the downloaded rlhf_hh ships in. It carries its OWN held-out split, so
 #            no validation set is carved out of the training half.
+#   "chat"   CONVERSATIONS: records carrying a `messages` list of {role, content} turns, in
+#            parquet shards or jsonl. This is the shape every modern instruction mixture ships
+#            in -- Tulu 3, OpenAssistant, ShareGPT exports -- and it is not a preference
+#            format: there is no rejected response anywhere in it, so it feeds stage 6 and
+#            nothing that learns from a preference.
 #   "local"  any other folder: json / jsonl records anywhere beneath it, split by --val_frac.
 #
 # Detection rather than a --format flag, because the layout is a FACT ABOUT THE DIRECTORY and
@@ -37,6 +44,24 @@ DATASETS = {
 }
 
 TRAIN_SUFFIX, VAL_SUFFIX = "_train", "_test"
+
+# THE TRANSCRIPT FORM A CONVERSATION IS FLATTENED INTO, which is rlhf_hh's own and deliberately
+# so. Stage 6 fine-tunes on this text, stage 7 fits a reward model on hh, stage 8 rolls out from
+# hh prompts and stage 10 reads hh preferences; if stage 6 taught the model a different way of
+# marking who is speaking, every later stage would be prompting it in a format it had been
+# trained out of. One set of markers is what keeps the four stages talking about the same
+# object, and it is why this is a constant rather than an argument.
+#
+#     "\n\nHuman: <text>\n\nAssistant: <text>\n\nHuman: ...\n\nAssistant:"
+#
+# A prompt ALWAYS ends at "\n\nAssistant:" with no trailing space, because Encoder.encode
+# tokenises the response as " " + text -- exactly as it does for an hh pair.
+CHAT_MARKERS = {"user": "\n\nHuman:", "human": "\n\nHuman:",
+                "assistant": "\n\nAssistant:", "gpt": "\n\nAssistant:",
+                "system": "\n\nSystem:"}
+CHAT_FIELD = "messages"                       # the column/key holding the list of turns
+CHAT_ROLE_FIELDS = ("role", "from")           # what a turn calls the speaker
+CHAT_TEXT_FIELDS = ("content", "value", "text")   # what a turn calls what was said
 
 # Field names a local record may use. The first one present wins. This is deliberately short:
 # these are the spellings the common preference/instruction formats actually use (alpaca,
@@ -63,19 +88,49 @@ def split_dirs(root, suffix):
             if d.endswith(suffix) and glob.glob(os.path.join(root, d, "*.json"))]
 
 
+def chat_files(root):
+    """The parquet shards beneath `root`, sorted. AppleDouble stubs (`._name.parquet`, written
+    beside every file when a tree is copied through a Mac) are not parquet and are skipped
+    here rather than raising in the reader."""
+    files = glob.glob(os.path.join(root, "**", "*.parquet"), recursive=True)
+    return sorted(f for f in files if not os.path.basename(f).startswith("._"))
+
+
+def _has_messages(path):
+    """Does this jsonl/json file's FIRST record carry a list of turns? One record is enough:
+    a mixture is homogeneous, and reading a gigabyte to answer a question about its shape is
+    the kind of check that gets removed later for being slow."""
+    for raw in _read_records(path)[:1]:
+        if isinstance(raw, dict) and isinstance(raw.get(CHAT_FIELD), list):
+            return True
+    return False
+
+
 def detect_layout(root):
-    """"hh", "local" or "missing" for a data directory -- what it IS, not what it is called.
+    """"hh", "chat", "local" or "missing" for a data directory -- what it IS, not what it is
+    called.
 
     A directory is read as an HH tree when it contains at least one *_train subdirectory of
-    json batches, because that split is the only thing the two layouts disagree about. Anything
-    else that holds json or jsonl anywhere beneath it is "local"."""
+    json batches, because that split is the only thing those layouts disagree about. Parquet
+    beneath it means a conversation mixture: no other dataset this pipeline reads through here
+    is columnar, and the pretraining corpora -- which are also parquet -- go through
+    load_pretrain_corpus instead and never reach this function. A json/jsonl file whose first
+    record carries a `messages` list is a conversation mixture too. Anything else holding json
+    or jsonl is "local".
+
+    Parquet is recognised WITHOUT importing pyarrow, so a checkout that has not installed it
+    still gets the honest error from the reader ("pyarrow is required to read ...") rather than
+    the misleading one from the detector ("no records found")."""
     if not root or not os.path.isdir(root):
         return "missing"
     if split_dirs(root, TRAIN_SUFFIX):
         return "hh"
+    if chat_files(root):
+        return "chat"
     for pat in ("*.json", "*.jsonl"):
-        if glob.glob(os.path.join(root, "**", pat), recursive=True):
-            return "local"
+        hits = sorted(glob.glob(os.path.join(root, "**", pat), recursive=True))
+        if hits:
+            return "chat" if _has_messages(hits[0]) else "local"
     return "missing"
 
 
@@ -94,6 +149,11 @@ def describe(root):
         tr = ", ".join(split_dirs(root, TRAIN_SUFFIX)) or "-"
         ev = ", ".join(split_dirs(root, VAL_SUFFIX)) or "none"
         return f"hh tree (own split: train [{tr}], val [{ev}])"
+    if layout == "chat":
+        n = len(chat_files(root)) or len(_record_files(root))
+        kind = "parquet shard" if chat_files(root) else "json/jsonl file"
+        return (f"chat mixture ({n} {kind}{'s' if n != 1 else ''} of `{CHAT_FIELD}` "
+                f"conversations, one record per assistant turn, split by --val_frac)")
     if layout == "local":
         n = len(_record_files(root))
         return f"local folder ({n} json/jsonl file{'s' if n != 1 else ''}, split by --val_frac)"
@@ -193,6 +253,131 @@ def load_local_pairs(root, limit=0, seed=0, desc="[local] reading records"):
     return out[:limit] if limit else out
 
 
+# --------------------------------------------------------------------------- #
+# conversations  ->  one {prompt, chosen, rejected} record per ASSISTANT TURN
+# --------------------------------------------------------------------------- #
+def _turn(t):
+    """One raw turn -> (role, text), or None. `role`/`content` is the Tulu 3 and OpenAI
+    spelling; `from`/`value` is the ShareGPT one. Both are read because a mixture assembled
+    from several exports carries both."""
+    if not isinstance(t, dict):
+        return None
+    role = _first(t, CHAT_ROLE_FIELDS).lower()
+    text = _first(t, CHAT_TEXT_FIELDS)
+    return (role, text) if role and text else None
+
+
+def conversation_records(turns):
+    """One conversation -> a list of {prompt, chosen, rejected} records, ONE PER ASSISTANT TURN.
+
+    WHY PER TURN AND NOT PER CONVERSATION. A six-turn conversation contains three demonstrations
+    of how to answer, not one, and the later ones are the interesting ones -- they are the only
+    place the model sees an answer that has to account for what was already said. Training on
+    the final turn alone throws two thirds of that away; training on the whole transcript as one
+    sequence would put loss on the USER's words, teaching the model to write both halves of the
+    conversation, which is the one thing an assistant must not do.
+
+    So each assistant turn becomes its own record, carrying everything said before it as the
+    prompt. The loss then lands exactly on the assistant tokens, through the response mask
+    Encoder already builds, with no change to the {prompt, chosen, rejected} shape stages 7, 8
+    and 10 share. What it costs is that a shared prefix is tokenised once per turn it precedes:
+    real, and small, because the mixture is overwhelmingly single-turn -- and the alternative
+    (one sequence, several masked spans) would mean a second kind of response mask everywhere.
+
+    A SYSTEM turn is kept, marked as such, and never trained on: it is instruction, not an
+    answer. A conversation that opens with an assistant turn yields nothing from it -- there is
+    no prompt to condition on -- which is why the check is on `history` rather than on the
+    index."""
+    out, history = [], []
+    for raw in turns or []:
+        t = _turn(raw)
+        if not t:
+            continue
+        role, text = t
+        marker = CHAT_MARKERS.get(role)
+        if marker is None:                        # a role we do not model: tool calls, etc.
+            continue
+        if marker == CHAT_MARKERS["assistant"] and history:
+            out.append({"prompt": "".join(history) + CHAT_MARKERS["assistant"],
+                        "chosen": text, "rejected": ""})
+        history.append(f"{marker} {text}")
+    return out
+
+
+def _parquet_conversations(path, log=print):
+    """The `messages` column of one parquet shard, ROW GROUP BY ROW GROUP.
+
+    Streamed rather than read whole: a shard here is a few hundred megabytes compressed and
+    several times that as Python strings, and the caller is accumulating every one of them --
+    so the peak is what matters, and pulling a whole shard into an Arrow table before turning
+    it into records would add that table to the peak for no gain."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as e:
+        raise SystemExit(
+            f"[chat] {os.path.basename(path)} is parquet and pyarrow is not importable ({e}).\n"
+            f"       pip install pyarrow  (it is in requirements.txt)")
+    pf = pq.ParquetFile(path)
+    names = set(pf.schema_arrow.names)
+    if CHAT_FIELD not in names:
+        raise SystemExit(
+            f"[chat] {os.path.basename(path)} has no `{CHAT_FIELD}` column.\n"
+            f"       Columns present: {', '.join(sorted(names))}\n"
+            f"       This directory was read as a conversation mixture because it holds "
+            f"parquet;\n       point --sft_dir at the right one, or convert it to "
+            f"{{prompt, chosen}} json.")
+    for batch in pf.iter_batches(batch_size=512, columns=[CHAT_FIELD]):
+        for turns in batch.column(0).to_pylist():
+            yield turns
+
+
+def chat_conversations(root):
+    """(files, total_conversations) for `root` -- the second WITHOUT reading a single row.
+
+    A parquet file states its row count in its footer, so the denominator of the progress bar
+    is known before the first byte of data is decoded. A bar that cannot say how much is left
+    is barely a bar on a corpus this size."""
+    files = chat_files(root)
+    if not files:
+        return _record_files(root), 0
+    total = 0
+    try:
+        import pyarrow.parquet as pq
+        for f in files:
+            total += pq.ParquetFile(f).metadata.num_rows
+    except Exception:                                          # noqa: BLE001
+        total = 0                       # unknown: the bar counts up instead of down
+    return files, total
+
+
+def load_chat_pairs(root, limit=0, seed=0, desc="[chat] reading conversations"):
+    """Every conversation beneath `root`, flattened to one record per assistant turn.
+
+    `limit` caps RECORDS, not conversations, and stops the read there: it is what makes a
+    smoke test of this stage take seconds instead of loading a million demonstrations to throw
+    all but a thousand away."""
+    from helpers import bar
+    files, total = chat_conversations(root)
+    out, n_conv = [], 0
+    with bar(desc, unit="conv", total=total or None) as b:
+        for fp in files:
+            src = (_parquet_conversations(fp) if fp.endswith(".parquet")
+                   else (r.get(CHAT_FIELD) for r in _read_records(fp)))
+            for turns in src:
+                n_conv += 1
+                out.extend(conversation_records(turns))
+                b.update(1)
+                if n_conv % 2000 == 0:
+                    b.set_postfix_str(f"{os.path.basename(fp)}, {len(out):,} demonstrations")
+                if limit and len(out) >= limit:
+                    b.set_postfix_str(f"stopped at --limit {limit:,}")
+                    random.Random(seed).shuffle(out)
+                    return out[:limit]
+        b.set_postfix_str(f"{n_conv:,} conversations, {len(out):,} demonstrations")
+    random.Random(seed).shuffle(out)
+    return out
+
+
 def load_train_val(root, train_subsets=None, val_subsets=None, val_frac=0.05, seed=0,
                    limit=0, val_limit=0):
     """(train, val, layout) from `root`, whichever layout it turns out to be.
@@ -205,8 +390,9 @@ def load_train_val(root, train_subsets=None, val_subsets=None, val_frac=0.05, se
     layout = detect_layout(root)
     if layout == "missing":
         raise SystemExit(
-            f"[data] no preference records under {root or '(unset)'}\n"
-            f"       Expected either an hh tree (<root>/*_train/*.json) or a folder of\n"
+            f"[data] no records under {root or '(unset)'}\n"
+            f"       Expected an hh tree (<root>/*_train/*.json), a conversation mixture\n"
+            f"       (parquet or jsonl with a `{CHAT_FIELD}` list of turns), or a folder of\n"
             f"       json/jsonl records with prompt/chosen[/rejected] fields.\n"
             f"       No stage downloads. Run:  ./stage1_download_data.sh")
     if layout == "hh":
@@ -217,7 +403,8 @@ def load_train_val(root, train_subsets=None, val_subsets=None, val_frac=0.05, se
                             limit=val_limit or (max(limit // 20, 200) if limit else 0),
                             seed=seed + 1) if ev_names else []
     else:
-        recs = load_local_pairs(root, limit=limit, seed=seed)
+        recs = (load_chat_pairs(root, limit=limit, seed=seed) if layout == "chat"
+                else load_local_pairs(root, limit=limit, seed=seed))
         cut = min(len(recs) - 1, int(len(recs) * val_frac)) if len(recs) > 1 else 0
         val, train = recs[:cut], recs[cut:]
         if val_limit:
