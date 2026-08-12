@@ -417,13 +417,21 @@ def make_preview(tok, device, max_len, log, prompts, n=N_PREVIEW, fill_window=Fa
         out(f"\n===== {tag(stage)} @ step {step}: {len(sel)} generation examples "
             f"(temp={s['temperature']} top_k={s['top_k']} top_p={s['top_p']}, {cap}) =====\n",
             flush=True)
-        # NO progress bar here: the block is meant to be READ, and a bar redrawing itself
-        # between the printed lines destroys it. The numbered [i/n] header is the progress.
+        # THE BAR GOES ON THE GENERATION, NOT BETWEEN THE PRINTED LINES. The block is meant to
+        # be read, and a bar redrawing itself among its lines destroys that -- but a generation
+        # that takes minutes and prints nothing is indistinguishable from a hung process, and
+        # this project's rule is that every long-running loop reports.
+        #
+        # So each sample announces itself, generates under a SELF-ERASING bar (progress() passes
+        # leave=False), and the bar is gone by the time the response is printed. At
+        # SAMPLING["max_new"] = 60 this was never needed; fill_window made one sample up to
+        # 7,800 tokens, and five of them a wait with nothing on screen at all.
         for i, pr in enumerate(sel, 1):
             ids = tok(pr, add_special_tokens=False)["input_ids"]
             budget = max(1, int(max_len) - len(ids)) if fill_window else s["max_new"]
             gen = generate(model, ids, device, budget, s["temperature"],
-                           s["top_k"], s["top_p"], eos, max_len)
+                           s["top_k"], s["top_p"], eos, max_len,
+                           desc=f"{tag(stage)} sample {i}/{len(sel)}" if fill_window else "")
             text = decode(tok, gen)
             # UNTRUNCATED, and with its line breaks intact when the window is being filled: a
             # chain of thought collapsed onto one line is not readable, and reading it is the

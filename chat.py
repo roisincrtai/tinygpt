@@ -212,13 +212,46 @@ def decode(tok, ids):
 
 
 @torch.no_grad()
-def generate(model, prompt_ids, device, max_new, temperature, top_k, top_p, eos_id, max_len):
-    """Autoregressive sampling; no KV cache (recompute the prefix each step)."""
+def generate(model, prompt_ids, device, max_new, temperature, top_k, top_p, eos_id, max_len,
+             desc=""):
+    """Autoregressive sampling, CACHED, and REPORTED while it runs.
+
+    IT RECOMPUTED THE WHOLE PREFIX AT EVERY STEP -- O(n^2). That was tolerable while a preview
+    was sixty tokens; it stopped being tolerable the moment the chain-of-thought previews began
+    filling the context window, because one 7,800-token sample is then 30,423,900 token-forwards
+    instead of 7,800, and five of them are 152 million. The cache keeps each layer's keys,
+    values, convolution window and recurrence state, exactly as the GRPO rollout does.
+
+    AND IT PRINTED NOTHING WHILE IT RAN. `desc` puts a self-erasing bar on the token loop, so a
+    long generation shows progress and leaves no trace in the block afterwards -- which is what
+    the surrounding preview needs: something to read, not a bar wedged between its lines. A
+    generation that takes minutes with no output is indistinguishable from a hung process, and
+    this project's rule that every long-running loop reports is there for exactly that reason."""
+    from helpers.kv_cache import Cache
+    from helpers.utils import progress
     cur, out = list(prompt_ids), []
-    for _ in range(max_new):
+    cache = Cache(len(model.blocks)) if hasattr(model, "blocks") else None
+    fed = 0                                   # how much of `cur` the cache has already seen
+    steps = progress(range(max_new), desc=desc) if desc else range(max_new)
+    for _ in steps:
         ctx = cur[-max_len:] if max_len else cur
-        x = torch.tensor([ctx], device=device)
-        logits = model(input_ids=x, attention_mask=torch.ones_like(x)).logits[0, -1].float()
+        if cache is not None and fed and len(ctx) == len(cur):
+            x = torch.tensor([cur[fed:]], device=device)          # only what is new
+            h = model.hidden_states(input_ids=x, cache=cache)
+            logits = model.head(h[:, -1])[0].float()
+            fed = len(cur)
+        elif cache is not None:
+            # the first pass, or a window that has begun sliding: the cache cannot describe a
+            # prefix that has been truncated, so it is rebuilt from what is actually visible
+            if len(ctx) != len(cur):
+                cache = Cache(len(model.blocks))
+            x = torch.tensor([ctx], device=device)
+            h = model.hidden_states(input_ids=x, cache=cache)
+            logits = model.head(h[:, -1])[0].float()
+            fed = len(cur)
+        else:
+            x = torch.tensor([ctx], device=device)
+            logits = model(input_ids=x, attention_mask=torch.ones_like(x)).logits[0, -1].float()
         if temperature <= 0:
             nxt = int(logits.argmax())
         else:
@@ -237,6 +270,8 @@ def generate(model, prompt_ids, device, max_new, temperature, top_k, top_p, eos_
         if eos_id is not None and nxt == eos_id:
             break
         cur.append(nxt); out.append(nxt)
+    if hasattr(steps, "close"):
+        steps.close()
     return out
 
 
