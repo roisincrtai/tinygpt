@@ -275,19 +275,21 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
             f"(advantage {adv_seq[best].item():+.3f}, reward {rewards[best].item():+.3f}, "
             f"correct {b['correct']:.0f}, format {b['formatted']:.0f}, "
             f"grounded {b.get('grounded', 0):.0f}, {n_kept} generated tokens) -----")
-        log(f"  PROMPT   {' '.join(prompts[best].split())[-400:]}")
-        # THE THINK BLOCK ON ITS OWN LINE, because it is the thing this stage is for: whether a
-        # policy learns to reason before answering is visible here and nowhere in the averages.
-        # When there is no think block the completion was malformed, and the raw text is shown
-        # instead -- a blank line would hide exactly the failure worth seeing.
+        # NOTHING IS TRUNCATED. A response cut at 1,200 characters hides the end, which is
+        # where the answer is and where a run-on completion shows what it did instead of
+        # stopping -- and those are the two things worth looking at. Each part gets its own
+        # heading, on its own line, with a blank line between: a reasoning trace is read, not
+        # scanned, and it does not fit on one line at any length worth printing.
+        log(f"\nPROMPT:\n{prompts[best]}")
+        # When there is no think block the completion was malformed, and the RAW text is shown
+        # under a name that says so -- a blank THINK would hide exactly the failure worth seeing.
         if verifier.has_think_tags(texts[best]) and think.strip():
-            log(f"  THINK    {' '.join(think.split())[:1200]}")
+            log(f"\nTHINK:\n{think}")
         else:
-            log(f"  THINK    (no {verifier.THINK_OPEN} block) "
-                f"RAW {' '.join(texts[best].split())[:1200]}")
-        log(f"  ANSWER   {b['pred']!r}")
-        log(f"  GOLD     {golds[best]!r}")
-        log("-" * 78)
+            log(f"\nTHINK: (no {verifier.THINK_OPEN} block, raw completion)\n{texts[best]}")
+        log(f"\nANSWER\n{b['pred']}")
+        log(f"\nGOLD     {golds[best]!r}")
+        log("-" * 78 + "\n")
 
         def mean(k):
             return sum(s[k] for s in scored) / len(scored)
