@@ -197,7 +197,7 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 #     batch 32   ~21 GB      batch 56   ~35 GB  (88% of 40 GB)
 #     batch 48   ~30 GB      batch 64   ~40 GB  (no headroom -- expect OOM)
 #
-# 32, for a ~44 GB card BUDGETED TO ~35 GB. The gap is deliberate: a card's nameplate size is
+# 32, for a card with ~36 GB usable, BUDGETED TO ~30 GB. The gap is deliberate: a card's nameplate size is
 # not what a run may use. Fragmentation, allocator rounding, kernel workspaces, a second
 # process and the driver's own reservation all come out of the same 44 GB, and a step that
 # fits on average but not at its peak fails hours in rather than at once.
@@ -211,7 +211,7 @@ MODEL_SSM_CHUNK="${MODEL_SSM_CHUNK:-optimal}" # blocked-scan chunk; "optimal" = 
 #                                        3 x T x 50,259 in fp32: logits, log-softmax, its
 #                                        gradient. The largest single term at this size.
 #
-#     batch 24  22.1 GiB      batch 36  32.3 GiB
+#     batch 24  22.1 GiB      batch 36  32.3 GiB  over budget
 #     batch 32  28.9 GiB      batch 40  35.7 GiB  over budget
 #                             batch 56  49.2 GiB  out of memory, observed
 #

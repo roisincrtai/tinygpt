@@ -303,16 +303,16 @@ SCHEME_BATCH = {
 # more than the estimate that preceded it. The other schemes are scaled from that by
 # layers x width. Confirm with nvidia-smi on the first hundred steps before trusting them.
 SCHEME_MICRO_TOKENS = {
-    "zetagpt-tiny": 47104,      # 0.63 MB/token -> ~34.6 GiB
-    "zetagpt-s": 14336,         # 1.88 MB/token -> ~33.4 GiB (measured basis)
-    "zetagpt-m": 10240,         # 2.51 MB/token -> ~32.8 GiB
+    "zetagpt-tiny": 38912,      # 0.63 MB/token -> ~29.6 GiB
+    "zetagpt-s": 12288,         # 1.88 MB/token -> ~29.6 GiB (measured basis)
+    "zetagpt-m": 8192,          # 2.51 MB/token -> ~27.8 GiB
     # zetagpt-l AT ITS LONGEST WINDOW DOES NOT FIT ONE 44 GB CARD, and no micro-batch can make
     # it: a single sequence at 32,768 tokens is already ~125 GiB of block activations at 32
     # layers and d_model 1024, and one sequence is the smallest pass there is. What that needs
     # is gradient checkpointing over the blocks -- storing each block's input and recomputing
     # its interior in the backward pass -- which this pipeline does not yet do. Until it does,
     # -L trains at the windows it fits and the budget below governs those.
-    "zetagpt-l": 3072,          # 5.02 MB/token -> ~31.2 GiB, up to the 4,096 window
+    "zetagpt-l": 2048,          # 5.01 MB/token -> ~26.2 GiB, up to the 4,096 window
 }
 
 def windows(value):

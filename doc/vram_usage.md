@@ -81,6 +81,26 @@ attention  =  L × H × T² × 4 bytes × m          explicit        (CPU, MPS)
 The second term is why long context is impossible without the first: at `L = 32`, `H = 16`,
 `T = 32,768` and `m = 1` it is **2,048 GiB** for one sequence.
 
+### 5. Generation — a trap, not a term
+
+Rollouts and previews are not training steps, and their memory does not appear above. Two
+things decide it.
+
+**Project one position, not all of them.** `forward()` returns `(batch, tokens, vocab)`, and a
+sampler keeps one column of it. At 24 sequences and 400 tokens that discarded tensor is
+**1.80 GiB**, reallocated at every generated token and growing with the sequence — which is
+exactly what filled a 46 GiB card. `hidden_states()` followed by `head()` on the positions
+actually wanted costs `batch × vocab × 4`: **4.6 MB, flat**.
+
+**Cache, or pay O(n²).** Without a cache, generating n tokens recomputes the whole prefix n
+times. `helpers/kv_cache.py` keeps four tensors per layer — keys, values, the convolution
+window and the recurrence state — bounded by `KV_CACHE_MB`.
+
+```
+whole-sequence logits  =  batch × tokens × V × 4      1.80 GiB at 24 x 400
+one-position logits    =  batch × V × 4               4.6 MB, whatever the length
+```
+
 ### Total
 
 ```
@@ -111,12 +131,12 @@ Scaling the measurement by `L × d` gives the per-token cost used to configure e
 
 | Scheme | measured per token | `SCHEME_MICRO_TOKENS` | peak at that budget |
 |---|---|---|---|
-| `zetagpt-tiny` | 0.63 MB | 47,104 | ~34.6 GiB |
-| `zetagpt-s` | **1.88 MB** (measured) | 14,336 | ~33.4 GiB |
-| `zetagpt-m` | 2.51 MB | 10,240 | ~32.8 GiB |
-| `zetagpt-l` | 5.02 MB | 3,072 | ~31.2 GiB |
+| `zetagpt-tiny` | 0.63 MB | 38,912 | ~29.6 GiB |
+| `zetagpt-s` | **1.88 MB** (measured) | 12,288 | ~29.6 GiB |
+| `zetagpt-m` | 2.51 MB | 8,192 | ~27.8 GiB |
+| `zetagpt-l` | 5.01 MB | 2,048 | ~26.2 GiB |
 
-All four are sized to a **35 GiB working budget on a 44–46 GiB card**. The gap is deliberate:
+All four are sized to a **30 GiB working budget on a card with ~36 GiB usable**. The gap is deliberate:
 fragmentation, allocator rounding, kernel workspace and the driver's own reservation come out
 of the same total, and a step that fits on average but not at its peak fails hours in rather
 than at once.
@@ -176,7 +196,7 @@ even reach it with one sequence.
 
 ## Sizing a scheme for your own card
 
-1. **Choose a working budget.** Leave 20–25% of the card unspent, for the reasons above.
+1. **Choose a working budget.** Leave 15–25% of the card unspent, for the reasons above.
 2. **Subtract the fixed terms.** `P × 20 bytes` for the optimiser, plus `3 × C × V × 4` for
    the loss slice — 4.60 GiB at the default `LOSS_CHUNK=8192`.
 3. **Divide by the per-token cost** to get the tokens one pass may hold. Use the measured

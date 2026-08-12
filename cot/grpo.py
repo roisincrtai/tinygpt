@@ -49,7 +49,7 @@ MIN_NEW_TOKENS = 64
 # rollout
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len):
+def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len, use_cache=True):
     """Sample one completion per row of `prompts` (already group-expanded by the caller, so
     the same prompt appears group_size times and each copy is sampled independently).
 
@@ -80,6 +80,14 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len):
         if p:
             ids[i, :len(p)] = torch.tensor(p, device=device)
             attn[i, :len(p)] = 1
+    # THE CACHE, WHEN EVERY ROW IS AT THE SAME POSITION. With right padding the rows' cursors
+    # differ whenever the prompts do, and a cache appends one column for ALL rows at once --
+    # so a shorter row would have its next token written at another row's position. Equal
+    # lengths make the cursors move in lockstep and the append correct. Unequal prompts fall
+    # back to recomputing the prefix, which is slower and right; nothing is silently wrong.
+    from helpers.kv_cache import Cache
+    same_len = len(set(len(p) for p in pids)) == 1 and all(pids)
+    cache = Cache(len(policy.blocks)) if (use_cache and same_len) else None
     cur = torch.tensor([max(len(p), 1) for p in pids], device=device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
     rows = torch.arange(B, device=device)
@@ -90,8 +98,21 @@ def rollout(policy, tok, prompts, device, max_new, temperature, g, max_len):
         if not bool(active.any()):
             break
         hi = int(cur.max())
-        logits = policy(input_ids=ids[:, :hi], attention_mask=attn[:, :hi]).logits
-        step_logits = logits[rows, cur - 1].float()
+        # ONE POSITION'S LOGITS, NOT THE WHOLE SEQUENCE'S. forward() projects every position to
+        # the vocabulary and returns (B, T, 50259); sampling then keeps one column of it and
+        # throws the rest away. At 24 sequences and 400 tokens that discarded tensor is 1.9 GB,
+        # it is reallocated at every generated token, and it grows as the sequence does -- which
+        # is what filled the card. Taking the hidden states and projecting only the positions
+        # actually needed costs (B, 50259): 4.8 MB, flat.
+        if cache is None:
+            h = policy.hidden_states(input_ids=ids[:, :hi], attention_mask=attn[:, :hi])
+            step_h = h[rows, cur - 1]
+        else:
+            # the prompt once, then one column at a time; len(cache) is what it already holds
+            lo = len(cache)
+            h = policy.hidden_states(input_ids=ids[:, lo:hi], cache=cache)
+            step_h = h[:, -1]
+        step_logits = policy.head(step_h).float()
         probs = F.softmax(step_logits / max(temperature, 1e-6), dim=-1).cpu()
         nxt = torch.multinomial(probs, 1, generator=g).squeeze(-1).to(device)
         r, c = rows[active], cur[active]
@@ -200,7 +221,9 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         # ---- 2. rollouts ---- #
         ids, attn, resp_mask, texts = rollout(policy, tok, prompts, device,
                                               cfg["max_new_tokens"], cfg["gen_temperature"],
-                                              g, args.max_len)
+                                              g, args.max_len,
+                                              use_cache=getattr(args, "kv_cache", True)
+                                              and cfg.get("kv_cache", True))
         rmask = resp_mask.float()
         if rmask.sum() < 1:
             continue
@@ -300,7 +323,8 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         sel = [pool[i] for i in idx]
         ids, attn, resp_mask, texts = rollout(
             policy, tok, [verifier.prompt(p["question"]) for p in sel], device,
-            cfg["max_new_tokens"], cfg["gen_temperature"], g, args.max_len)
+            cfg["max_new_tokens"], cfg["gen_temperature"], g, args.max_len,
+            use_cache=getattr(args, "kv_cache", True) and cfg.get("kv_cache", True))
         sc = [verifier.score(t, p["answer"], cfg) for t, p in zip(texts, sel)]
         evald = {"problems": n_ev,
                  "accuracy": sum(s["correct"] for s in sc) / max(len(sc), 1),
