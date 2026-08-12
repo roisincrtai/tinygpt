@@ -105,7 +105,7 @@ def context_schedule(args, steps, docs, log, stage):
 
     ONE WINDOW UNLESS ALL THREE CONDITIONS HOLD: the corpus is a packed stream (a list of
     records cannot be re-cut to an arbitrary length), the scheme declares a schedule, and the
-    run has not pinned a context of its own with --context_window or --max_len. A stage that
+    run has not pinned a context of its own with --context_window. A stage that
     was told which window to use is not second-guessed."""
     import default_config as config
     one = [(0, steps, max(int(args.max_len), 2), int(args.batch),

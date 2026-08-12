@@ -219,6 +219,10 @@ def load_init_model(ctx, tok, log):
                          f"{config.BPE_PATH} does not exist: cannot tell what its ids mean")
     state, n_new = tokenizer_sft.remap_specials(ck["model"], old, tok, log=log)
     saved = ck.get("model_cfg")
+    # this stage loads the checkpoint itself rather than through load_stage_model, so it takes
+    # the context from it explicitly -- the same rule, applied in the one place that bypasses
+    # the common path
+    common.adopt_context(ctx, saved, STAGE)
     model = common.build_model(ctx["tok"], ctx["device"],
                                model_cfg=common.translate_cfg(saved) if saved else None)
     model.resize_token_embeddings(len(tok), allow_shrink=True)

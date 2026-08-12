@@ -171,8 +171,6 @@ def parse_args(argv=None):
                     help="what the prefix cache may hold, in GiB; a rollout larger than this "
                          "is decoded in groups that fit (default: "
                          f"{config.COT['kv_cache_size']})")
-    ap.add_argument("--max_len", type=int, default=t["max_len"],
-                    help="truncation of an encoded example; 0 = the model's context window")
     ap.add_argument("--model_scheme", default=config.PRETRAIN["model_scheme"],
                     choices=list(config.SCHEMES),
                     help="which configuration scheme to build: depth, width and the context "
@@ -277,14 +275,20 @@ def parse_args(argv=None):
     args = ap.parse_args(argv)
     args.model_dir = config.MODEL_DIR
     args.data_dir = config.DOWNLOAD_DIR
-    # --max_len is the truncation applied when an example is encoded. Left at 0 it follows the
-    # model that is actually going to be built -- the scheme's context window, or whatever
-    # --context_window overrode it with -- rather than a constant. Reading it from
-    # config.MODEL, as this did, meant a run that asked for a different scheme or context
-    # silently encoded at the default's length, and the mismatch surfaced only as a truncation
-    # rate nobody was looking at.
-    if not args.max_len:
-        args.max_len = model_cfg_from_args(args)["block_size"]
+    # THE CONTEXT LENGTH IS THE MODEL'S, AND IS NOT A KNOB. It is derived from the architecture
+    # actually being built -- the scheme's context window, or whatever --context_window
+    # overrode it with -- and it travels inside every checkpoint as model_cfg["block_size"], so
+    # a stage that loads one adopts that checkpoint's context rather than a configured guess
+    # (see load_stage_model).
+    #
+    # IT USED TO BE CONFIGURABLE, AND THE TWO DISAGREED TWICE. First a default of 256 against a
+    # 512-token window, so training ran at 256 while every figure said 512. Then 512, correct
+    # while zetagpt-s WAS a 512-token model and stale from the moment the schemes grew to
+    # 8,192 -- which cut 99% of stage 9's demonstrations to their last 512 tokens against a
+    # mean length of 2,058, and capped every GRPO rollout at ~308 new tokens on a model with
+    # 8,192 to spend. Neither failure raised anything; both were a number in one file quietly
+    # contradicting a number in another. There is now one number, and it belongs to the model.
+    args.max_len = model_cfg_from_args(args)["block_size"]
 
     # THE CORPUS DIRECTORIES, resolved once here rather than read from the config module at
     # each use. --instruct_dir moves a whole tree, so it is applied through config's own setter
@@ -555,6 +559,32 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
             "pref_prompts": pref_prompts}
 
 
+def adopt_context(ctx, saved, stage):
+    """Take the context length from a checkpoint's own architecture. Returns it, or 0.
+
+    A stage continuing from a model trained at 8,192 must encode at 8,192 -- the same argument
+    that makes a checkpoint's width and depth authoritative over whatever default_config.py
+    currently says. There is no --max_len to override it with any more, and this is why: the
+    number belongs to the model, and every place it was also written down was a place for the
+    two to disagree.
+
+    Both the arguments and the ENCODER are updated. The encoder holds its own copy and is what
+    actually truncates, so moving one without the other would leave the log reporting a context
+    the data never saw."""
+    block = int((saved or {}).get("block_size") or 0)
+    args = ctx.get("args")
+    if not block or args is None:
+        return 0
+    if int(getattr(args, "max_len", 0)) != block:
+        ctx.get("log", print)(
+            f"[{stage}] context {int(getattr(args, 'max_len', 0)):,} -> {block:,}, from the "
+            f"checkpoint's own architecture")
+    args.max_len = block
+    if ctx.get("enc") is not None:
+        ctx["enc"].max_len = block
+    return block
+
+
 def load_stage_model(ctx, stage, train_mode=False):
     """A fresh model with stage `stage`'s saved weights loaded. Exits with a clear message if
     that checkpoint does not exist yet, since the stages depend on each other's outputs."""
@@ -568,6 +598,10 @@ def load_stage_model(ctx, stage, train_mode=False):
     saved = ck.get("model_cfg")
     if saved:
         m = build_model(ctx["tok"], ctx["device"], model_cfg=translate_cfg(saved))
+        # THE CHECKPOINT'S CONTEXT COMES WITH ITS ARCHITECTURE. A stage continuing from a model
+        # trained at 8,192 must encode at 8,192, whatever the configuration in force happens to
+        # say -- the same argument that makes the checkpoint's width and depth authoritative.
+        adopt_context(ctx, saved, stage)
     else:
         m = ctx["new_model"]()
     load_growing(m, ck["model"], log=ctx.get("log", print))

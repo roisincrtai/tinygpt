@@ -419,7 +419,6 @@ TRAIN = dict(
                                 # 50,259 x 4 = 4.6 GiB, which is worth spending: a slice small
                                 # enough to be free is also small enough that the step becomes
                                 # dozens of tiny matmuls, each recomputed in the backward pass
-    max_len=0,                  # 0 = auto: the model's own context window (block_size)
     beta=0.1,                   # implicit-reward beta, shared by DPO / evaluation
     val_frac=0.05,              # validation fraction of the preference file
     limit=0,                    # cap #preference pairs loaded (0 = all)
@@ -920,8 +919,6 @@ SHELL_DEFAULTS = {
     "DATA_LIMIT": TRAIN["limit"],
     "VAL_FRAC": TRAIN["val_frac"],
     "BETA": TRAIN["beta"],
-    # max_len=0 means "the model's context", so report the number that ends up in force
-    "MAX_LEN": MODEL["block_size"],
     "MODEL_SCHEME": PRETRAIN["model_scheme"],
     "PRETRAIN_DIR": os.path.relpath(PRETRAIN_CORPUS[PRETRAIN["model_scheme"]], ROOT)
                     if PRETRAIN_CORPUS[PRETRAIN["model_scheme"]] else "(unset for this scheme)",

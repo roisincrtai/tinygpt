@@ -1,4 +1,4 @@
-# ZetaGPT: A Positional–Encoding–Free State–Space–Attention Compact Language Models
+# ZetaGPT: A Positional–Encoding–Free State–Space–Attention Compact Language Model
 
 **ZetaGPT** is a compact, positional-encoding-free (NoPE) language model architecture that
 uses a state-space-attention mixture block to handle long-context sequences implicitly. It

@@ -29,7 +29,7 @@
 # printed at the end, so a knob added in one place cannot be forgotten by the other.
 ZETAGPT_VARS="PY GPU SEED \
 DATASET PRETRAIN_DIR INSTRUCT_DIR SFT_DIR DATA_LIMIT VAL_FRAC \
-MODEL_SCHEME CONTEXT_WINDOW PE MAX_LEN \
+MODEL_SCHEME CONTEXT_WINDOW PE \
 BATCH MICRO_BATCH CHUNKED_LOSS LOSS_CHUNK TENSOR_PARALLEL LR_SCHEDULE LR_MIN_FACTOR BETA \
 PLOT_EVERY PRINT_SAMPLES_EVERY CKPT_EVERY SSM_STATS_EVERY NO_RESUME \
 EVAL_EVERY EVAL_PAIRS EB_EVERY EB_PAIRS ROLLOUT_TEMP N_HIST N_ROLL ROLL_TOKENS P_GRID \
@@ -173,12 +173,14 @@ CONTEXT_WINDOW="${CONTEXT_WINDOW:-}"  # blank = the scheme's own schedule. A COM
 #   PE=rope ./stage5_pretrain.sh
 PE="${PE:-ssm}"                     # ssm | rope
 
-# TRUNCATION of an encoded example, in tokens. Keep this EQUAL TO CONTEXT_WINDOW unless you
-# mean to truncate below it -- to fit a longer-context model on a smaller machine, say.
-# The two disagreeing is a quiet and expensive kind of wrong: this shipped as 256 while the
-# window was 512, so training ran at 256 while every figure and table said 512, and roughly
-# four fifths of documents lost their opening to truncation.
-MAX_LEN="${MAX_LEN:-512}"
+# THE CONTEXT LENGTH IS NOT CONFIGURED HERE. It is the model's own -- CONTEXT_WINDOW above, or
+# the scheme's -- and it travels inside every checkpoint, so a stage that continues from one
+# adopts that checkpoint's context rather than a number repeated in a second file.
+#
+# There WAS a MAX_LEN here and the two disagreed twice, quietly both times: 256 against a
+# 512-token window, then 512 against the 8,192 the schemes grew to. The second cut 99% of
+# stage 9's chain-of-thought demonstrations to their last 512 tokens and capped every GRPO
+# rollout at ~308 new tokens. To train at less than the full window, set CONTEXT_WINDOW.
 
 # The rest of the architecture. Depth, width and the context window come from the scheme
 # above; these are the choices a scheme does not fix.
@@ -579,7 +581,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/export_yaml.sh" "$ZETAGPT_YAML"
 [ -n "$MODEL_SCHEME" ]   && COMMON_FLAGS="$COMMON_FLAGS --model_scheme $MODEL_SCHEME"
 [ -n "$CONTEXT_WINDOW" ] && COMMON_FLAGS="$COMMON_FLAGS --context_window $CONTEXT_WINDOW"
 [ -n "$PE" ]             && COMMON_FLAGS="$COMMON_FLAGS --pe $PE"
-[ -n "$MAX_LEN" ]        && COMMON_FLAGS="$COMMON_FLAGS --max_len $MAX_LEN"
 [ -n "$BATCH" ]          && COMMON_FLAGS="$COMMON_FLAGS --batch $BATCH"
 [ -n "$MICRO_BATCH" ]    && COMMON_FLAGS="$COMMON_FLAGS --micro_batch $MICRO_BATCH"
 [ "$CHUNKED_LOSS" = "0" ] && COMMON_FLAGS="$COMMON_FLAGS --no_chunked_loss"
