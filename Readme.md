@@ -77,6 +77,20 @@ policy never samples is a reward every completion earns alike, every advantage i
 the run trains on nothing while its curves look healthy. `--no-cot_sft` skips it, for the
 R1-Zero setting.
 
+### Multilingual SFT
+
+Stage 11 adapts the pretrained model to another language in three sub-stages. The new corpus is
+first pre-tokenised with the BPE trained on the pretraining set, and that vocabulary is then
+*continued* — extended with merges learned on the new corpus, so every existing id keeps its
+meaning and only new ones are appended, writing
+`checkpoints/lang-sft/<dataset>/bpe/bpe.json`. The corpus is then tokenised with the extended
+vocabulary into memory-mapped shards, and the pretrained checkpoint is fine-tuned on that
+stream with its embedding grown to match. Extending rather than retraining the vocabulary is
+what keeps the adaptation cheap: a byte-level BPE never fails on an unseen language, it just
+spends four or five tokens on words an adapted vocabulary spells in one, while a *fresh*
+vocabulary would tokenise well and discard the pretrained model with it, since new ids mean the
+learned embedding rows sit against different tokens.
+
 ### Customized configuration scheme
 
 A scheme is one entry in `default_config.SCHEMES`; `context_window` is the list of windows it
