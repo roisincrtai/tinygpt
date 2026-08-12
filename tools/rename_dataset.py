@@ -89,16 +89,28 @@ def corpus_files_and_bytes(root):
     return files, total
 
 
-def streams_for(name):
-    """Every (directory, stem) pair holding a token stream of `name`, under any tokenizer.
+def streams_for(name, log=print):
+    """Every (directory, filename, manifest) holding a token stream of `name`, under any
+    tokenizer. Read and validated HERE, before anything on disk is touched.
 
     TWO LAYOUTS. The current one puts a corpus at cache/tokens/<tok>/<name>/; the older one
     mirrored the corpus's path, cache/tokens/<tok>/data/download/<name>/. A machine that has
     been running this pipeline across the change has both, and a migration that only knew about
     one would leave the other stranded -- invisible to the pipeline and impossible to explain
-    later."""
+    later.
+
+    NOT EVERYTHING ENDING IN _index.json IS A MANIFEST. `._<name>_index.json` is an AppleDouble
+    stub, which macOS writes beside every file when a tree is copied from or through a Mac --
+    so a cache built on a laptop and rsynced to a cluster is full of them. They are binary,
+    json.load raises UnicodeDecodeError on them, and they name streams that do not exist.
+    helpers.utils._streams_in has guarded against them for exactly this reason; this did not,
+    and a dry run on the cluster died on the first one it met.
+
+    A file that is not readable JSON, or that lacks the store's magic, is SKIPPED AND REPORTED
+    rather than raised on: the alternative is a migration that refuses to run because of a file
+    it was never going to move."""
     root = os.path.join(config.CACHE_DIR, "tokens")
-    out = []
+    out, skipped = [], []
     if not os.path.isdir(root):
         return out
     for tokdir in sorted(os.listdir(root)):
@@ -108,10 +120,24 @@ def streams_for(name):
         for dirpath, dirnames, filenames in os.walk(base):
             if os.path.basename(dirpath) != name:
                 continue
-            for fn in filenames:
-                if fn.endswith("_index.json"):
-                    out.append((dirpath, fn))
+            for fn in sorted(filenames):
+                if not fn.endswith("_index.json") or fn.startswith("._"):
+                    if fn.startswith("._") and fn.endswith("_index.json"):
+                        skipped.append((os.path.join(dirpath, fn), "AppleDouble stub"))
+                    continue
+                try:
+                    with open(os.path.join(dirpath, fn), encoding="utf-8") as fh:
+                        idx = json.load(fh)
+                except (OSError, ValueError, UnicodeDecodeError) as e:
+                    skipped.append((os.path.join(dirpath, fn), type(e).__name__))
+                    continue
+                if idx.get("magic") != helpers.token_store_magic():
+                    skipped.append((os.path.join(dirpath, fn), "not a token-store manifest"))
+                    continue
+                out.append((dirpath, fn, idx))
             dirnames[:] = []          # a corpus directory holds no corpus directories
+    for path, why in skipped:
+        log(f"[rename] skipping {os.path.basename(path)} ({why})")
     return out
 
 
@@ -124,6 +150,12 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
     files that will actually be there."""
     old_dir = config.dataset_dir(old)
     new_dir = config.dataset_dir(new)
+
+    # EVERY MANIFEST IS READ FIRST, BEFORE THE DATA MOVES. A file this cannot parse used to
+    # raise here -- after os.rename had already renamed the corpus -- leaving the data under the
+    # new name and the cache under the old one, which is the one state neither the pipeline nor
+    # a second run of this tool knows how to interpret. Read, validate, then move.
+    streams = streams_for(old, log=log)
 
     if not cache_only:
         if not os.path.isdir(old_dir) and os.path.isdir(new_dir):
@@ -151,7 +183,6 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
     files, total = corpus_files_and_bytes(here)
     log(f"[rename] corpus: {len(files):,} files, {total:,} bytes")
 
-    streams = streams_for(old)
     if not streams:
         log(f"[rename] no token streams found for {old} -- nothing further to do")
         return 0
@@ -161,10 +192,7 @@ def migrate(old, new, dry_run=False, cache_only=False, log=print):
     # global one. Reading the tokenizer from the path is what makes that possible without
     # loading four vocabularies.
     n = 0
-    for dirpath, index_name in streams:
-        old_index = os.path.join(dirpath, index_name)
-        with open(old_index, encoding="utf-8") as fh:
-            idx = json.load(fh)
+    for dirpath, index_name, idx in streams:
         old_sig = idx.get("sig", "")
         old_tag = index_name[len(old) + 1:-len("_index.json")]
 
