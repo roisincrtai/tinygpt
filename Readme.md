@@ -53,27 +53,32 @@ through — `zetagpt-m` is `[1024, 2048, 4096, 8192, 16384]` — and each window
 step budget, shortest first. The batch is sized at the longest window and scales up as the
 window shortens, so tokens per step stay constant across the whole run.
 
-### Mixed precision
+### Mix-Precision Training
 
-On by default wherever the hardware has it: **bfloat16 for the activations, the matmuls and the
-backward pass; fp32 for everything that accumulates** — the weights, the optimiser state, the
-gradient accumulation, and every reduction, meaning layer-norm statistics, softmax, log-softmax,
-logsumexp and the loss. `torch.autocast` draws that line and keeps the reductions on its fp32
-list, so no stage has to remember to.
+**bfloat16 activations, fp32 weights and fp32 optimiser state.** Every stage, on by default
+wherever the hardware has it — bf16 for the matmuls and the backward pass, fp32 for everything
+that accumulates: the weights, Adam's moments, the gradient accumulation, and the reductions
+(layer norm, softmax, logsumexp, the loss). No weight is ever cast, and no stage has a dtype of
+its own.
 
-bf16 rather than fp16 because it keeps fp32's eight exponent bits and spends mantissa instead:
-gradients neither overflow nor underflow, and no loss scaling is needed — there is no
-`GradScaler` anywhere in this repository and none is wanted. fp32 masters rather than pure bf16
-because once the weights are large next to the updates, an update below bf16's three significant
-digits rounds away entirely and training stalls with a curve that merely looks flat.
+```bash
+./stage5_pretrain.sh                          # on, if the GPU is CUDA with bf16
+MIXED_PRECISION=0 ./stage5_pretrain.sh        # off: fp32 everywhere
+python -m pretrain.run --no-mixed_precision   # off, for one run
+```
 
-Resolved against the device, not asserted: CUDA with bf16 support gets it, and CPU, MPS and
-pre-Ampere cards are told they are training in fp32 rather than left with a flag that reads as
-on. `MIXED_PRECISION=0`, or `--no-mixed_precision`, forces fp32 everywhere.
+It resolves against the device rather than being asserted: CPU, MPS and pre-Ampere cards are
+told they are training in fp32 instead of being left with a flag that reads as on. The run
+prints which it got:
 
-**No weight is ever cast.** One precision policy, shared by every stage — there is no per-stage
-dtype knob, because a stage holding bf16 weights would be exactly the arrangement the fp32
-masters exist to prevent.
+```
+precision: bf16 activations, fp32 weights and optimiser state (mixed)
+```
+
+bf16 and not fp16 because it keeps fp32's eight exponent bits, so gradients neither overflow nor
+underflow and no loss scaling is needed — there is no `GradScaler` here and none is wanted. fp32
+weights and not pure bf16 because an update below bf16's three significant digits rounds away
+entirely, and training then stalls on a curve that merely looks flat.
 
 ### Parallelism
 
