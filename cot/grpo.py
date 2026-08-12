@@ -28,6 +28,7 @@ Figure:     outputs/plots/cot/dynamics_<model>_<pe>_cot-grpo.pdf
 """
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 import default_config as config
 from chat import decode
@@ -43,6 +44,11 @@ STAGE = "cot"
 # to answer with would make every completion empty and every reward zero, which looks like a
 # model that cannot reason rather than a budget that left it no room.
 MIN_NEW_TOKENS = 64
+
+# POSITIONS PER SLICE of the vocabulary projection in forward_logprobs. 8,192 rows of 50,259
+# floats is 1.5 GiB live, against the 11.2 GiB the unsliced version needed for one call at
+# 24 x 2,495 -- and unlike that figure this one does not grow as completions lengthen.
+LP_CHUNK = 8192
 
 
 # --------------------------------------------------------------------------- #
@@ -190,15 +196,56 @@ def _decode(policy, tok, pids, device, max_new, temperature, g, use_cache, cache
     return ids, attn, resp_mask, texts
 
 
-def forward_logprobs(policy, ids, attn, need_entropy=False):
+def _chunk_lp(head, h, tgt, need_entropy):
+    """Log-probs (and optionally entropy) for ONE slice of flattened positions.
+
+    Called through torch.utils.checkpoint: the (chunk, vocab) logits and their log-softmax
+    exist during this call, are freed when it returns, and are recomputed slice by slice in the
+    backward pass. What survives is (chunk,) -- four bytes a token instead of four bytes a token
+    TIMES THE VOCABULARY."""
+    logits = head(h).float()
+    la = F.log_softmax(logits, dim=-1)
+    lp = la.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+    ent = -(la.exp() * la).sum(-1) if need_entropy else lp.new_zeros(())
+    return lp, ent
+
+
+def forward_logprobs(policy, ids, attn, need_entropy=False, chunk=LP_CHUNK):
     """Per-token log-probs in the TOKEN FRAME (index j scores ids[:, j] given the prefix), and
-    optionally per-token entropy at the same sites."""
+    optionally per-token entropy at the same sites.
+
+    CHUNKED OVER TOKENS, because the whole-sequence version could not fit. It built the full
+    (batch, tokens, vocab) logits and then a second tensor the same size for the log-softmax:
+    at 24 rollouts of 2,495 tokens over a 50,259 vocabulary that is 11.2 GiB EACH, and this is
+    called four times per step -- old, reference, and once per GRPO epoch. It is the reason the
+    stage ran out of memory the moment completions got long, and it got worse exactly as the
+    policy learned to think for longer, which is the behaviour the stage exists to produce.
+
+    Flattening before slicing is what makes `chunk` mean what it says: this many rows of
+    (vocab) exist at a time, whatever shape the batch has. Slicing the position axis alone
+    would still hand the projection every sequence at once.
+
+    The arithmetic is unchanged -- same positions, same targets, same normalisation."""
     h = policy.hidden(input_ids=ids, attention_mask=attn)
-    logits = policy.head(h)[:, :-1].float()
-    lp_all = F.log_softmax(logits, dim=-1)
-    lp = lp_all.gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-    lp_tok = F.pad(lp, (1, 0))
-    ent_tok = F.pad(-(lp_all.exp() * lp_all).sum(-1), (1, 0)) if need_entropy else None
+    B, T, D = h.shape
+    tgt = ids[:, 1:]
+    hf, tf = h[:, :-1].reshape(-1, D), tgt.reshape(-1)
+    n = hf.shape[0]
+    step = int(chunk) or n
+    lps, ents = [], []
+    for a in range(0, n, step):
+        b = min(a + step, n)
+        if torch.is_grad_enabled() and hf.requires_grad:
+            lp, ent = checkpoint(_chunk_lp, policy.head, hf[a:b], tf[a:b], need_entropy,
+                                 use_reentrant=False)
+        else:
+            # no graph to trade against recomputation: checkpoint would only cost a second pass
+            lp, ent = _chunk_lp(policy.head, hf[a:b], tf[a:b], need_entropy)
+        lps.append(lp)
+        if need_entropy:
+            ents.append(ent)
+    lp_tok = F.pad(torch.cat(lps).view(B, T - 1), (1, 0))
+    ent_tok = F.pad(torch.cat(ents).view(B, T - 1), (1, 0)) if need_entropy else None
     return lp_tok, ent_tok
 
 

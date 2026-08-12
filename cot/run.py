@@ -111,6 +111,23 @@ def load_problems(log, split, cfg=None):
     return out, len(files)
 
 
+def _cast(model, args):
+    """The model in bfloat16 when the stage asked for it, unchanged otherwise.
+
+    CAST BEFORE THE OPTIMISER IS BUILT, because MasterAdamW takes its fp32 masters from the
+    parameters it is handed: cast afterwards and the masters would be bf16 copies of bf16
+    weights, and the fp32 update path -- the entire reason the optimiser is written that way --
+    would quietly do nothing.
+
+    Nothing else changes. save_ckpt writes fp32 (helpers.fp32_state) and forward_logprobs casts
+    to fp32 before the log-softmax, so the artefact and the probability arithmetic are the same
+    whichever way this goes."""
+    import torch
+    if not getattr(args, "cot_bf16", False):
+        return model
+    return model.to(torch.bfloat16)
+
+
 def run(ctx):
     """The whole of stage 9: the reasoning SFT, then GRPO from its checkpoint."""
     args, log = ctx["args"], ctx["log"]
@@ -159,6 +176,8 @@ def run(ctx):
     # and not args.cot_init: a policy initialised from the base model would have none of the
     # format the SFT just paid for.
     init = args.cot_init
+    if args.cot_bf16:
+        log("[cot] bfloat16 live weights (the checkpoint is written in fp32)")
     if args.cot_sft:
         log(f"--- sub-stage 1/2: CoT SFT ({args.cot_sft_steps:,} steps, lr "
             f"{args.cot_sft_lr:g}, from {init}) ---")
@@ -171,7 +190,8 @@ def run(ctx):
                 f"      set COT.trace_field to the field that holds them (this run read "
                 f"{trace_field(cfg)!r}),\n      or --no-cot_sft to\n"
                 "      run GRPO alone.")
-        cot_sft.run(ctx, common.load_stage_model(ctx, init, train_mode=True), demos)
+        cot_sft.run(ctx, _cast(common.load_stage_model(ctx, init, train_mode=True), args),
+                    demos)
         init = cot_sft.STAGE
 
     # --- 2. the reinforcement half: the answer, against the verifier --------------------- #
@@ -179,7 +199,7 @@ def run(ctx):
         f"from {init}) ---")
     log(f"=== CoT by GRPO (policy from {init}, reward = verified answer + format, "
         f"KL to frozen {init}) ===")
-    base = common.load_stage_model(ctx, init)
+    base = _cast(common.load_stage_model(ctx, init), args)
     ref = common.frozen(base)                       # the KL anchor: the policy's own origin
     policy = common.frozen(base)
     policy.requires_grad_(True)

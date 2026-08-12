@@ -634,9 +634,24 @@ def model_cfg_of(model):
     return dict(cfg) if isinstance(cfg, dict) else None
 
 
+def fp32_state(model):
+    """A state dict with every floating tensor in fp32, whatever the live weights are.
+
+    A CHECKPOINT IS FP32 EVEN WHEN THE RUN IS NOT. bf16 is a way to fit a step on a card; it is
+    not a property of the model, and writing it into the file would make the saved model
+    permanently lossier than the one that produced it -- every later stage loading a vocabulary
+    projection that has already lost eight bits of mantissa, for a memory saving that only
+    mattered while the step was in flight. MasterAdamW keeps fp32 masters for the same reason,
+    and this is the same argument applied to the artefact.
+
+    Integer and boolean buffers are left alone: casting them would change what they mean."""
+    return {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+            for k, v in model.state_dict().items()}
+
+
 def save_ckpt(ckdir, stage, model, opt, step, total, gens, evald=None, extra=None):
     os.makedirs(stage_dir(ckdir, stage), exist_ok=True)
-    _atomic_torch_save({"model": model.state_dict(),
+    _atomic_torch_save({"model": fp32_state(model),
                 # THE ARCHITECTURE TRAVELS WITH THE WEIGHTS. Reading it back beats trusting
                 # default_config.py, which may have moved on since the run (a different width, a
                 # different depth), and a mismatch there is a silent wrong-model bug.

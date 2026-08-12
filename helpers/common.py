@@ -251,6 +251,16 @@ def parse_args(argv=None):
                     help="checkpoint the reasoning SFT starts from -- and, with --no-cot_sft, "
                          "the checkpoint GRPO itself starts from; 'pretrain' is the R1-Zero "
                          "setting (no supervised reasoning anywhere before the RL)")
+    # BF16 LIVE WEIGHTS FOR STAGE 9. Halves what the weights, the activations and the frozen
+    # reference occupy, which is what makes a long-completion GRPO step fit. The CHECKPOINT is
+    # unaffected -- MasterAdamW keeps fp32 masters and save_ckpt writes fp32 (helpers.fp32_state)
+    # -- so this is a way to fit the step, not a property of the model.
+    ap.add_argument("--cot_bf16", dest="cot_bf16", action="store_true",
+                    default=config.COT["bf16"],
+                    help="run stage 9 with bfloat16 live weights (default); the checkpoint "
+                         "stays fp32")
+    ap.add_argument("--no-cot_bf16", "--no_cot_bf16", dest="cot_bf16", action="store_false",
+                    help="keep stage 9 in fp32 throughout")
     ap.add_argument("--cot_samples_every", type=int, default=config.COT["samples_every"],
                     help="print the GRPO rollout samples every N steps; 0 = follow "
                          "--print_samples_every_steps. Separate because a GRPO step costs a "
