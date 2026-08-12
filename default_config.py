@@ -24,7 +24,7 @@ instruction tree holds. NOTHING HERE DOWNLOADS; see DATASETS below and tools/dow
                                 one row per article in a `text` column. The held-out shards are
                                 excluded by PRETRAIN["exclude_dirs"], which matches file names
                                 as well as directories
-    data/download/zetagpt-small_pretrain-corpus_fineweb-edu_10GB/
+    data/download/zetagpt-pretrain_fineweb-edu-2BT/
                                 pretraining corpus for S, ~2B tokens. Every file under it
                                 (recursive) whose extension is in CORPUS_EXTENSIONS, minus
                                 PRETRAIN["exclude_dirs"]
@@ -143,7 +143,7 @@ def dataset_dir(name):
 # PRETRAIN_DIR (or --pretrain_dir) when that is what you mean to measure.
 PRETRAIN_CORPUS = {
     "zetagpt-tiny": dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
-    "zetagpt-s": dataset_dir("zetagpt-small_pretrain-corpus_fineweb-edu_10GB"),
+    "zetagpt-s": dataset_dir("zetagpt-pretrain_fineweb-edu-2BT"),
     "zetagpt-m": dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
     "zetagpt-l": dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
 }
@@ -668,7 +668,12 @@ LANG_SFT = dict(
 # ("wait", "let me re-check") start to appear. Both are tracked every step and drawn in
 # outputs/plots/cot/cot_dynamics.pdf, alongside accuracy against the verifier.
 COT = dict(
-    steps=10000, lr=1e-5,       # GRPO: the second of the stage's two runs
+    # 1e-6 (10^-6) for BOTH sub-stages. This is the rate the GRPO literature uses at this
+    # scale -- DeepSeek's own GRPO runs sit at 1e-6 -- and it is not interchangeable with 1e-5:
+    # a policy-gradient step is taken against an advantage that is already standardised within
+    # its group, so the update is large before the rate is applied, and ten times too much
+    # learning rate does not train ten times faster, it collapses the policy.
+    steps=10000, lr=1e-6,       # GRPO: the second of the stage's two runs
     # THE REASONING SFT, run first. `sft_steps` and `sft_lr` are its own budget: the GRPO
     # numbers above do not apply to it, because a likelihood objective over demonstrations and
     # a policy-gradient objective over rollouts are not the same optimisation and never want
@@ -679,7 +684,7 @@ COT = dict(
     # The format is what this sub-stage teaches, and a format is learned in roughly one pass;
     # more epochs mostly memorise the particular traces.
     sft_steps=7000,
-    sft_lr=1e-5,
+    sft_lr=1e-6,
     # The demonstrations are FILTERED before they are trained on: a reference trace whose own
     # final answer the verifier rejects would teach the model to be confidently wrong in the
     # right format, and a stage that checks answers arithmetically has no excuse for training

@@ -92,10 +92,10 @@ DATASET="${DATASET:-hh}"
 # TRAINING CORPUS as well. Set here it applies to whatever scheme is selected; BLANK it to let
 # each scheme use its own from default_config.PRETRAIN_CORPUS:
 #
-#   zetagpt-tiny   zetagpt-tiny_pretrain-corpus_wikitext103        ~105M tokens
-#   zetagpt-s      zetagpt-small_pretrain-corpus_fineweb-edu_10GB  ~2B tokens (~10 GB)
-#   zetagpt-m      zetagpt-pretrain_fineweb-edu-10BT               ~10B tokens
-#   zetagpt-l      zetagpt-pretrain_fineweb-edu-10BT               ~10B tokens
+#   zetagpt-tiny   zetagpt-tiny_pretrain-corpus_wikitext103   ~105M tokens
+#   zetagpt-s      zetagpt-pretrain_fineweb-edu-2BT           ~2B tokens (~10 GB)
+#   zetagpt-m      zetagpt-pretrain_fineweb-edu-10BT          ~10B tokens
+#   zetagpt-l      zetagpt-pretrain_fineweb-edu-10BT          ~10B tokens
 #
 # The ladder is not one corpus because ~20 tokens per parameter puts S at ~2.7B and L at ~12B,
 # and a 61.5M model does not need 2B tokens while a 623M model is not fed by them.
@@ -438,7 +438,7 @@ RLHF_PROMPTS_PER_FILE="${RLHF_PROMPTS_PER_FILE:-1000}"
 # also the task the smallest published R1-Zero reproductions used.
 COT_TASK="${COT_TASK:-countdown}"   # countdown | gsm8k
 COT_STEPS="${COT_STEPS:-10000}"
-COT_LR="${COT_LR:-1e-5}"
+COT_LR="${COT_LR:-1e-6}"
 # THE SUPERVISED SUB-STAGE, run before GRPO. It trains on the dataset's own reference traces,
 # rewritten into this pipeline's <think>/<answer> form, and teaches only the FORMAT. Without it
 # a base model never samples the format the reward pays for, so every completion in a group
@@ -446,7 +446,7 @@ COT_LR="${COT_LR:-1e-5}"
 # COT_SFT=0 turns it off, which is the R1-Zero setting.
 COT_SFT="${COT_SFT:-1}"
 COT_SFT_STEPS="${COT_SFT_STEPS:-7000}"   # ~1 epoch of the countdown demonstrations at batch 3
-COT_SFT_LR="${COT_SFT_LR:-1e-5}"
+COT_SFT_LR="${COT_SFT_LR:-1e-6}"
 COT_INIT="${COT_INIT:-pretrain}"    # pretrain | sft | rlhf | dpo -- which checkpoint the
                                     # SUPERVISED sub-stage starts from (and, with COT_SFT=0,
                                     # which one GRPO starts from). GRPO otherwise starts from
