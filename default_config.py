@@ -696,7 +696,15 @@ COT = dict(
                                 #   "sft"      -- after the general instruction tuning
                                 #   "rlhf" / "dpo" -- continue an aligned policy
                                 # Overridable per run: COT_INIT=sft ./stage9_cot_aha_moment.sh
-    group_size=8,               # completions sampled per prompt; the group IS the baseline
+    # PROMPTS PER STEP, this stage's own. It cannot borrow SCHEME_BATCH: that is sized for a
+    # pretraining step of `batch` sequences, and a GRPO step is `batch x group_size` sequences
+    # of a length the policy chooses -- up to the whole context window. 2 x 4 = 8 rollouts is
+    # what fits a 44 GiB card at an 8,192 window; raise it on a larger one.
+    batch=2,
+    group_size=4,               # completions sampled per prompt; the group IS the baseline.
+                                # MUST be >= 2 -- with 1 every advantage is exactly zero. 4 is
+                                # the smallest group with usable spread; 8 is less noisy and
+                                # costs twice the rollout memory.
     # RESPONSE LENGTH: 0 = WHATEVER THE CONTEXT WINDOW HAS LEFT once the prompt is in it,
     # computed per batch from the longest prompt actually in it. A fixed number cannot be right
     # across the schemes -- their windows run from 1,024 to 32,768 -- and this stage exists to

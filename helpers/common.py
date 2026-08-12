@@ -265,6 +265,10 @@ def parse_args(argv=None):
                     help="print the GRPO rollout samples every N steps; 0 = follow "
                          "--print_samples_every_steps. Separate because a GRPO step costs a "
                          "whole group of rollouts and there are far fewer of them")
+    ap.add_argument("--cot_batch", type=int, default=config.COT["batch"],
+                    help="problems per GRPO step; the rollout is this x --cot_group. Separate "
+                         "from --batch because a GRPO step is that many SEQUENCES of "
+                         "context-window length, not that many training examples")
     ap.add_argument("--cot_group", type=int, default=config.COT["group_size"],
                     help="completions sampled per problem; the group is GRPO's baseline "
                          "and must be >= 2")

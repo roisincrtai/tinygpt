@@ -146,9 +146,9 @@ def run(ctx):
         ("train problems", helpers.count(len(train))),
         ("test files", helpers.count(n_test_files)),
         ("test problems", helpers.count(len(test))),
-        ("prompts per step", f"{args.batch:,}"),
+        ("prompts per step", f"{args.cot_batch:,}"),
         ("completions per prompt", f"{args.cot_group:,}"),
-        ("rollouts per step", f"{args.batch * args.cot_group:,}"),
+        ("rollouts per step", f"{args.cot_batch * args.cot_group:,}"),
         # every term of the reward, by name -- the figure plots them separately, so a table
         # that collapsed them into one number could not be checked against it
         ("reward", f"correct {cfg['correct_reward']} "

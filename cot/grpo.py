@@ -274,6 +274,11 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
     cfg = config.COT
     total, lr = args.cot_steps, args.cot_lr
     G = max(int(args.cot_group), 1)
+    # PROMPTS PER STEP IS THIS STAGE'S OWN, not args.batch. args.batch is SCHEME_BATCH, sized
+    # for a pretraining step of that many sequences at the scheme's window; a GRPO step is
+    # B x G sequences whose length the POLICY chooses, up to the whole window. Borrowing the
+    # one number for the other is how a step that fits in stage 5 fills the card in stage 9.
+    B = max(int(getattr(args, "cot_batch", 0) or args.batch), 1)
     device = next(policy.parameters()).device
 
     ck = load_ckpt(ckdir, STAGE) if args.resume else None
@@ -292,7 +297,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
     opt = MasterAdamW(list(policy.parameters()), lr=lr)
     sched = CosineLR(opt, lr, total, args.lr_min_factor, args.lr_schedule)
     log(f"cot: lr={sched.describe()} steps={total} group={G} "
-        f"prompts/step={args.batch} rollouts/step={args.batch * G} "
+        f"prompts/step={B} rollouts/step={B * G} "
         f"max_new={cfg['max_new_tokens'] or 'fills the window'} "
         f"clip={cfg['clip_eps']} kl_coef={cfg['kl_coef']} "
         f"-> {ckpt_path(ckdir, STAGE)}")
@@ -317,7 +322,7 @@ def run(policy, ref, tok, problems, ckdir, args, log, monitor, preview=None, eva
         cur_lr = sched.step(step)
         # ---- 1. a batch of problems, each repeated group_size times ---- #
         policy.eval()
-        idx = torch.randint(0, N, (args.batch,), generator=dg).tolist()
+        idx = torch.randint(0, N, (B,), generator=dg).tolist()
         batch = [problems[i] for i in idx]
         prompts, golds = [], []
         for p in batch:
