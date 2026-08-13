@@ -248,15 +248,28 @@ def spec_hf(key, repo, device, dtype, log):
     model = model.to(device=device, dtype=dtype)
     c = model.config
     n_pos = int(getattr(c, "n_positions", 0) or getattr(c, "max_position_embeddings", 0) or 0)
-    learned = str(getattr(c, "model_type", "")).startswith("gpt2")
+    # A LEARNED POSITION TABLE IS FOUND BY LOOKING FOR ONE, not by recognising a family name.
+    # This tested `model_type.startswith("gpt2")`, which is false for GPT-Neo -- and TinyStories
+    # is GPT-Neo, with a `wpe` table of 2,048 rows exactly like GPT-2's. It was therefore
+    # treated as rotary, run out to 2,560, and died inside its own causal mask:
+    #     RuntimeError: The size of tensor a (2048) must match the size of tensor b (2560)
+    # A parameter named wpe / embed_positions / position_embeddings IS the table, whatever the
+    # architecture is called, and every rotary model lacks all three.
+    learned = any(("wpe" in n) or ("embed_positions" in n) or ("position_embeddings" in n)
+                  for n, _ in model.named_parameters())
     trunk = getattr(model, "transformer", None) or getattr(model, "model", None)
     return _finish({
         "key": key, "name": repo.split("/")[-1],
         "encode": lambda t: tk(t, add_special_tokens=False)["input_ids"],
-        # A LEARNED TABLE IS A WALL; RoPE IS A SLOPE. GPT-2 cannot be run past its rows at all,
-        # so max_pos is a hard stop; a rotary model runs and degrades, so its training length
-        # is recorded but nothing is refused.
+        # A LEARNED TABLE IS A WALL; RoPE IS A SLOPE. A model with a position table cannot be
+        # run past its rows at all, so max_pos is a hard stop; a rotary model runs and
+        # degrades, so its training length is recorded but nothing is refused.
         "max_pos": n_pos if learned else 0, "train_len": n_pos or 2048,
+        # WHAT THE MODEL SAYS ABOUT ITSELF, kept even for the rotary ones. It is not enforced
+        # there -- running past it is the measurement -- but it is what tells a failure beyond
+        # this length apart from a failure inside it, which is the difference between a fact to
+        # plot and a bug to raise. See score_ids.
+        "declared_max": n_pos,
         "step": None, "total": None, "checkpoint": repo,
         "positional": "learned absolute table" if learned else "RoPE",
         # transformers' OWN incremental path: past_key_values in, past_key_values out. Same
@@ -403,12 +416,24 @@ def score_ids(spec, pid, sid, device, chunk, desc=""):
                 steps.set_postfix_str(f"{n_done:,} scored, "
                                       f"{total / max(n_done, 1):.3f} nats/tok")
             del lg, tgt, logits
-    except (RuntimeError, MemoryError) as e:
-        # RUNNING OUT OF MEMORY IS THE EXPECTED END OF A CURVE, not a failure of the run: even
-        # chunked, the cache itself grows with T. Anything that is NOT an allocation failure is
-        # a real bug and is re-raised.
-        if not is_alloc_error(e):
+    except (RuntimeError, MemoryError, IndexError) as e:
+        # TWO EXPECTED ENDS OF A CURVE, and everything else is a bug.
+        #
+        # RUNNING OUT OF MEMORY: even chunked, the cache itself grows with T.
+        #
+        # AND RUNNING PAST WHAT THE MODEL DECLARES. An implementation may hold a causal mask or
+        # a position table sized to max_position_embeddings and fail on its own shapes rather
+        # than on ours -- which is a FACT ABOUT THE LENGTH and belongs in the figure. It counts
+        # only BEYOND the declared length: the same error inside it is a real bug, and is
+        # raised. That distinction is the whole guard; without it this would swallow the next
+        # genuine shape error and report it as a context limit.
+        dm = spec.get("declared_max") or 0
+        beyond = dm and T > dm
+        if not (is_alloc_error(e) or beyond):
             raise
+        if beyond and not is_alloc_error(e):
+            spec["_note"] = (f"refused {T:,} tokens past its declared "
+                             f"{dm:,}: {type(e).__name__}")
         empty_cache()
         return None, len(sid), 0, T, False
     finally:
