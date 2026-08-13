@@ -2,16 +2,16 @@
 evaluation/content_extrapolation.py -- how far past its training length a model still models
 text, for ZetaGPT and for GPT-2 small side by side.
 
-    python -m evaluation.content_extrapolation
-    python -m evaluation.content_extrapolation --base 512 --dtype bf16
-    python -m evaluation.content_extrapolation --gpt2 ""      # ZetaGPT only
-    python -m evaluation.content_extrapolation --plot_only
+    python evals/content_extrapolation.py
+    python evals/content_extrapolation.py --base 512 --dtype bf16
+    python evals/content_extrapolation.py --gpt2 ""      # ZetaGPT only
+    python evals/content_extrapolation.py --plot_only
 
 Writes outputs/plots/pretrain/content_extrapolation.pdf -- one ROW PER MODEL, ZetaGPT above
 and GPT-2 small below -- and the numbers behind it to outputs/eval/content_extrapolation.json.
 To hold an ablation beside the run it is compared with, give both an explicit name:
 
-    python -m evaluation.content_extrapolation \
+    python evals/content_extrapolation.py \
         --checkpoint checkpoints/pretrain/checkpoint_zetagpt-s_rope_pretrain.pt \
         --out outputs/plots/pretrain/content_extrapolation_rope.pdf \
         --json outputs/eval/content_extrapolation_rope.json
@@ -81,11 +81,19 @@ matrix alone is 6 GiB at T=8192 and 388 GiB at T=65536. Lengths whose estimate e
 out-of-memory kill; a real OOM is also caught and recorded. --dtype bf16 roughly halves the
 requirement and buys about one rung.
 """
+import os
+import sys
+
+# RUNNABLE AS A SCRIPT, not only as a module. `python evals/<name>.py` is what a person
+# types, and without this it fails on `import default_config` -- the project root is on
+# the path when python is given a module (-m) and is NOT when it is given a file.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 import argparse
 import glob
 import json
 import math
-import os
 import random
 
 import torch

@@ -23,7 +23,7 @@ Entry points:
 
     method_monitor(mode, records, plotdir, tag)   live redraw during training
     bpe_monitor(history, plotdir, tag)            the tokenizer's own build dynamics
-    eval_figure(RES, methods, p_grid, plotdir)    exposure_bias.pdf / bounds.pdf from eval.py
+    eval_figure(RES, methods, p_grid, plotdir)    exposure_bias.pdf / bounds.pdf from evals/eval.py
 
 House style throughout: a faint per-step series under a bold moving-average trend, axes
 scaled to the trend rather than to outliers, scientific tick labels on the step axis.
@@ -792,7 +792,7 @@ def _exposure_bias_figure(evals, roll_m, plotdir, plt, tag):
 
 def _displacement(e):
     """(Delta log p_rejected, Delta log p_chosen) for the likelihood-displacement plane.
-    Prefer eval.py's dlp_w/dlp_l (rollout-token log-prob change); else fall back to the mean
+    Prefer evals/eval.py's dlp_w/dlp_l (rollout-token log-prob change); else fall back to the mean
     teacher-forced implicit reward from the reward-margin histogram (hist r_w/r_l)."""
     import numpy as np
     if e.get("dlp_w") is not None and e.get("dlp_l") is not None:
@@ -854,12 +854,12 @@ def _bounds_figure(evals, roll_m, methods, plotdir, plt, tag):
 
 
 # --------------------------------------------------------------------------- #
-# evaluation figure (called from eval.py) -- same exposure_bias.pdf / bounds.pdf
-# as the trainer, from eval.py's RES["results"] (which also carries dlp_w/dlp_l).
+# evaluation figure (called from evals/eval.py) -- same exposure_bias.pdf / bounds.pdf
+# as the trainer, from evals/evals/eval.py's RES["results"] (which also carries dlp_w/dlp_l).
 # --------------------------------------------------------------------------- #
 def eval_figure(RES, methods, p_grid, plotdir, tag=""):
     """Write exposure_bias.pdf (1x4) and bounds.pdf (1x3) -- identical format to the trainer's
-    figures -- from eval.py's RES. Returns the list of written paths."""
+    figures -- from evals/evals/eval.py's RES. Returns the list of written paths."""
     plt = _plt()
     os.makedirs(plotdir, exist_ok=True)
     tag = tag or RES.get("tag", "")

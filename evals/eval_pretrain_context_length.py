@@ -1,10 +1,10 @@
 """
-evaluation/evaluate_pretrain_context_generalization.py -- does a PRETRAINED model actually use
-a long context, and does it still work past the length it was trained at?
+evals/eval_pretrain_context_length.py -- does a PRETRAINED model actually use a long context,
+and does it still work past the length it was trained at?
 
-    python -m evaluation.evaluate_pretrain_context_generalization
-    python -m evaluation.evaluate_pretrain_context_generalization --only zetagpt
-    python -m evaluation.evaluate_pretrain_context_generalization --plot_only
+    python evals/eval_pretrain_context_length.py
+    python evals/eval_pretrain_context_length.py --only zetagpt
+    python evals/eval_pretrain_context_length.py --plot_only
 
     outputs/plots/evaluation/pretrain_context_generalization.pdf
     outputs/eval/pretrain_context_generalization.json
@@ -52,10 +52,18 @@ Nothing here is fetched by this script except the comparison weights, through tr
 own cache (config.MODEL_DIR). A model that cannot be loaded is SKIPPED AND REPORTED, never
 fatal: an evaluation that dies because one baseline is missing has wasted the others.
 """
+import os
+import sys
+
+# RUNNABLE AS A SCRIPT, not only as a module. `python evals/<name>.py` is what a person
+# types, and without this it fails on `import default_config` -- the project root is on
+# the path when python is given a module (-m) and is NOT when it is given a file.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 import argparse
 import json
 import math
-import os
 import random
 
 import torch

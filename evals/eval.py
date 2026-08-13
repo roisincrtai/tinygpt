@@ -9,10 +9,18 @@ Reads checkpoints/<stage>/checkpoint_<model>_<pe>_<stage-label>.pt and reports, 
 
 Results go to results/eval_<dataset>_<stage>.json and figures to outputs/plots/eval/.
 
-    python eval.py --stages dpo
-    python eval.py --stages dpo --plot_only     # redraw from the saved JSON
+    python evals/eval.py --stages dpo
+    python evals/eval.py --stages dpo --plot_only     # redraw from the saved JSON
 """
 import os
+import sys
+
+# RUNNABLE AS A SCRIPT, not only as a module. `python evals/<name>.py` is what a person
+# types, and without this it fails on `import default_config` -- the project root is on
+# the path when python is given a module (-m) and is NOT when it is given a file.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 import json
 import argparse
 

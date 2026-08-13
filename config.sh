@@ -325,7 +325,7 @@ SSM_STATS_EVERY="${SSM_STATS_EVERY:-200}"   # state space diagnostics -- memory 
 NO_RESUME="${NO_RESUME:-0}"         # 1 = ignore checkpoints and start from scratch
 
 # =========================================================================== #
-# 7. diagnostic probes -- read by the DPO stage and by eval.py
+# 7. diagnostic probes -- read by the DPO stage and by evals/eval.py
 # =========================================================================== #
 EVAL_EVERY="${EVAL_EVERY:-0}"       # held-out probe every N steps; 0 = follow PLOT_EVERY
 EVAL_PAIRS="${EVAL_PAIRS:-32}"      # pairs per held-out probe
