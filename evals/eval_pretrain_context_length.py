@@ -119,10 +119,18 @@ from tokenizer import BPETokenizer
 # trained per-reader rather than published, so there is nothing to fetch. Gemma 3 is gated on
 # the Hub and will be skipped with a report unless `huggingface-cli login` has been run --
 # which is exactly what a skipped baseline is for.
+# THE TINYSTORIES MODELS ARE NOT IN HERE, and that is a judgement about what a baseline IS.
+# They were trained on synthetic three-year-old's stories with a vocabulary of a few thousand
+# words -- so on WikiText they sit at 1.9-2.1 nats/byte and 4-9% accuracy, FLAT at every
+# context length, with copy gains that scatter around zero and passkey scores worse than a
+# uniform guess. None of that measures a positional scheme; it measures a distribution
+# mismatch, and a curve that cannot move cannot show whether context is being used.
+#
+# A long-context comparison needs models that read the text at all. Their numbers stay in the
+# cache and in the README's table; they are not drawn, and they are not measured again.
+HIDDEN = ("tinystories-1m", "tinystories-8m", "tinystories-33m")
+
 BASELINES = {
-    "tinystories-1m": "roneneldan/TinyStories-1M",       # 3.7M,   learned,   512
-    "tinystories-8m": "roneneldan/TinyStories-8M",       # 19.7M,  learned,   512
-    "tinystories-33m": "roneneldan/TinyStories-33M",     # 68.5M,  learned,   512
     "pythia-70m": "EleutherAI/pythia-70m",               # 70.4M,  RoPE,      2,048
     "gpt2": "gpt2",                                      # 124M,   learned,   1,024
     "smollm2-135m": "HuggingFaceTB/SmolLM2-135M",        # 134.5M, RoPE,      8,192
@@ -136,7 +144,6 @@ BASELINES = {
 # from a bucket written before that used instead of having no circle at all. It is the same
 # number the README's table gives.
 NATIVE_CONTEXT = {
-    "tinystories-1m": 2048, "tinystories-8m": 2048, "tinystories-33m": 2048,
     "pythia-70m": 2048, "gpt2": 1024, "smollm2-135m": 8192,
     "gemma3-270m": 32768, "qwen3-0.6b": 32768, "qwen": 32768, "tinyllama": 2048,
 }
@@ -1392,6 +1399,8 @@ def cached_models(args, corpus, log):
         if not fn.endswith(".json"):
             continue
         key = fn[:-len(".json")]
+        if key in HIDDEN:                  # measured once, kept on disk, never drawn again
+            continue
         try:
             with open(os.path.join(CACHE_DIR, fn), "r", encoding="utf-8") as fh:
                 d = json.load(fh)
