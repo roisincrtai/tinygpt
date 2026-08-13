@@ -164,6 +164,14 @@ BASELINES = {
 # the loaded model's config and is stored with its points; this table is what a row rebuilt
 # from a bucket written before that used instead of having no circle at all. It is the same
 # number the README's table gives.
+# THE POSITIONAL SCHEME OF EACH BASELINE -- what goes in its legend entry. Normally read off
+# the loaded model; this is the fallback for a row rebuilt from a bucket written before the
+# scheme was stored, and the authority for ALiBi, which no config announces in a single field.
+NATIVE_PE = {
+    "pythia-70m": "rope", "gpt2": "learned", "pythia-160m": "rope", "smollm2-135m": "rope",
+    "gemma3-270m": "rope", "smollm2-360m": "rope", "qwen": "rope", "bloom-560m": "alibi",
+    "qwen3-0.6b": "rope", "tinyllama": "rope",
+}
 NATIVE_CONTEXT = {
     "pythia-70m": 2048, "gpt2": 1024, "pythia-160m": 2048, "smollm2-135m": 8192,
     "gemma3-270m": 32768, "smollm2-360m": 8192, "qwen": 32768, "bloom-560m": 2048,
@@ -320,7 +328,9 @@ def spec_zetagpt(args, device, dtype, log):
         "max_pos": 0, "train_len": args.base or int(cfg.get("block_size", 512)),
         "step": ck.get("step"), "total": ck.get("total"),
         "checkpoint": os.path.relpath(path, config.ROOT),
-        "positional": "none (state space recurrence)",
+        # nope/ssa: no positional encoding, and the state-space-attention block that is why
+        # none is needed. One says what is absent, the other what stands in its place.
+        "positional": "nope/ssa" if cfg.get("pe", "ssm") == "ssm" else "rope",
         # ONE CHUNK OF TOKENS, ATTENDING TO EVERYTHING ALREADY CACHED. helpers.kv_cache.Cache
         # carries four tensors per layer -- attention's keys and values, and the state space
         # module's convolution window and recurrence state -- because a block is SSM ->
@@ -454,6 +464,14 @@ def spec_hf(key, repo, device, dtype, log, args):
     # architecture is called, and every rotary model lacks all three.
     learned = any(("wpe" in n) or ("embed_positions" in n) or ("position_embeddings" in n)
                   for n, _ in model.named_parameters())
+    # AND ALiBi IS NOT RoPE. "no learned table" was being read as rotary, which is right for
+    # nine of these and wrong for BLOOM: ALiBi has no table AND no rotation, it biases attention
+    # by distance -- and it is the one scheme in the set that claims to extrapolate, so calling
+    # it RoPE in the legend would hide the comparison the baseline was added for.
+    mt = str(getattr(c, "model_type", "")).lower()
+    pe = ("learned" if learned else
+          "alibi" if (mt in ("bloom", "mpt") or bool(getattr(c, "alibi", False)))
+          else NATIVE_PE.get(key, "rope"))
     native = n_pos                     # what it was TRAINED at, whatever is done to it after
     state = {"rows": n_pos}
     grows = bool(learned and args.extend_positions)
@@ -502,7 +520,7 @@ def spec_hf(key, repo, device, dtype, log, args):
         # bug (raised), and neither is quietly turned into a shorter curve.
         "declared_max": 0 if grows else n_pos,
         "step": None, "total": None, "checkpoint": repo,
-        "positional": "learned absolute table" if learned else "RoPE",
+        "positional": pe,
         # transformers' OWN incremental path: past_key_values in, past_key_values out. Same
         # reason as above -- the attention matrix becomes (chunk x T) instead of (T x T).
         "shape": {
@@ -1360,21 +1378,41 @@ RUN_KEYS = ("corpus", "target_chars", "documents", "trials", "copy_words", "seed
             "unit")
 
 
-def label_for(key, name, params):
-    """The legend entry for one model: the scheme's name, and for ours its size.
+def label_for(key, name, params, pe=""):
+    """The legend entry for one model: its name, and its positional scheme.
 
-    OURS IS NAMED BY ITS SCHEME -- zetagpt-s, from default_config.SCHEMES via
-    helpers.model_name -- and carries its parameter count, because the whole table is a size
-    ladder and the one row a reader is looking for should say where on it. The baselines carry
-    their published names, which already are how anyone refers to them.
+        gpt2 (learned)   pythia-70m (rope)   bloom-560m (alibi)   zetagpt-s (nope/ssa)
 
-    The size is appended AFTER clean_name, so the parenthetical it removes and the parenthetical
-    this adds cannot be confused: one is a note about method that does not belong in a legend,
-    the other is the model's size, which does."""
+    THE SCHEME IS WHAT THE FIGURE IS ABOUT, so it belongs where the eye already is. Eleven
+    curves sorted by size tell a reader nothing about why two of them behave differently past a
+    training window; the one word in brackets does, and it turns the legend into the
+    experiment's design rather than a list of downloads.
+
+    Ours is named by its SCHEME -- zetagpt-s, from default_config.SCHEMES via helpers.model_name
+    -- which is the name its checkpoints and figures are already filed under.
+
+    Appended AFTER clean_name, so the parenthetical that is stripped and this one cannot be
+    confused: one was a note about a method applied to a table, this is the method itself."""
     base = clean_name(name)
-    if key == "zetagpt" and params:
-        return f"{base} ({params / 1e6:.0f}M)"
-    return base
+    tag = str(pe or "").strip().lower()
+    return f"{base} ({tag})" if tag else base
+
+
+def normalise_pe(text):
+    """The scheme as one lower-case word, whatever an older bucket wrote there.
+
+    Buckets exist carrying "RoPE", "learned absolute table" and "none (state space recurrence)"
+    -- the long forms this used before the legend needed a word. They are the same three facts."""
+    t = str(text or "").strip().lower()
+    if not t:
+        return ""
+    if "none" in t or t.startswith("nope"):
+        return "nope/ssa"
+    if "learned" in t:
+        return "learned"
+    if "alibi" in t:
+        return "alibi"
+    return "rope" if "rope" in t else t
 
 
 def clean_name(name):
@@ -1450,7 +1488,9 @@ def cached_models(args, corpus, log):
         if not (found and points):
             continue
         row.update(meta)
-        row["name"] = label_for(key, row.get("name") or key, row.get("params"))
+        row["positional"] = normalise_pe(row.get("positional")) or NATIVE_PE.get(key, "")
+        row["name"] = label_for(key, row.get("name") or key, row.get("params"),
+                                row["positional"])
         # AND A CIRCLE EVEN WITHOUT META. A window is a property of the model, not of when its
         # points happened to be written; the table above supplies it when the bucket cannot.
         if not row.get("train_len"):
@@ -1713,7 +1753,8 @@ def main():
         log(f"\n[context] === {spec['name']}  ({i}/{len(specs)}) ===")
         m = {k: spec[k] for k in ("key", "name", "params", "train_len", "max_pos",
                                   "positional", "checkpoint", "step", "total")}
-        m["name"] = label_for(m["key"], m["name"], m.get("params"))
+        m["name"] = label_for(m["key"], m["name"], m.get("params"),
+                              m.get("positional"))
         m["curve"], m["copy"], m["passkey"] = [], [], []
         at = next((j for j, r in enumerate(res["models"]) if r["key"] == spec["key"]), None)
         if at is None:
