@@ -353,11 +353,38 @@ def long_documents(data_dir, want_chars, log, limit=64):
     same, and the flat curve reads as success. So documents are used whole, the longest first,
     and if none is long enough the run SAYS SO rather than quietly measuring nothing."""
     from helpers import corpus_files
+    from helpers.corpus_id import _split_token
     from helpers.utils import _pack
-    files = corpus_files(data_dir, config.PRETRAIN["exclude_dirs"])[:limit]
-    if not files:
+    # THE HELD-OUT SPLIT, AND NOTHING ELSE. This is an EVALUATION: scoring a model on the text
+    # it was trained on measures how much of it the model memorised, and a context curve
+    # measured that way says nothing about generalisation. corpus_files' `exclude_dirs` is the
+    # wrong instrument -- it drops directories named test/valid/validation, which a corpus of
+    # flat `<name>_00000.parquet` shards does not have, so it excluded NOTHING and the sweep
+    # read the training set. The split is selected here by name instead, and its ABSENCE IS
+    # FATAL rather than a silent fall back to training data.
+    every = corpus_files(data_dir, ())
+    files = [f for f in every
+             if _split_token(os.path.basename(f)) in ("validation", "valid", "test", "eval")]
+    if not every:
         raise SystemExit(f"[context] no corpus under {data_dir}\n"
                          f"          ./stage1_download_data.sh")
+    if not files:
+        wiki = config.dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")
+        raise SystemExit(
+            f"[context] {os.path.relpath(data_dir, config.ROOT)} has no held-out split: all "
+            f"{len(every):,} of its files are training data.\n"
+            f"          Evaluating on them would measure memorisation, so this refuses "
+            f"rather than report it as generalisation.\n"
+            f"          Point --data_dir at a corpus that ships one, e.g.\n"
+            f"              --data_dir {os.path.relpath(wiki, config.ROOT)}\n"
+            f"          (its validation-*.parquet is genuinely unseen), or hold shards of "
+            f"this corpus out of pretraining\n"
+            f"          by naming them validation-*.parquet -- PRETRAIN.exclude_dirs already "
+            f"keeps such a split out of training.")
+    log(f"[context] held-out split: {len(files):,} of {len(every):,} files under "
+        f"{os.path.relpath(data_dir, config.ROOT)} "
+        f"({', '.join(sorted({_split_token(os.path.basename(f)) for f in files}))})")
+    files = files[:limit]
     docs = []
     for fp in progress(files, desc="[context] scanning for long documents", total=len(files)):
         try:
