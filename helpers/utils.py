@@ -1119,11 +1119,19 @@ def holdout_probe(policy, ref, enc, pairs, beta, gen=None, roll_temp=1.0, batch=
 # PRE-TOKENISED CORPORA, cached on disk.
 #
 # Tokenising the corpus once per training STEP is pure waste: the same documents are encoded
-# thousands of times by the same tokenizer. Each source file is tokenised ONCE and stored
-# under a mirror of its path, in a directory named for THE TOKENIZER THAT PRODUCED IT:
+# thousands of times by the same tokenizer. A corpus is tokenised ONCE into shards named for
+# THE DATASET, in a directory named for THE TOKENIZER THAT PRODUCED IT:
 #
-#     data/download/<corpus>/<path>/<name>.parquet
-#         ->  cache/tokens/bpe_<256+merges>_<fp>/data/download/<corpus>/.../<name>.parquet.<sig>.tokens
+#     data/download/<corpus>/**            (any depth, any of CORPUS_EXTENSIONS)
+#         ->  cache/tokens/bpe_<256+merges>_<fp>/<corpus>/<corpus>_<sig>_00000.tokens
+#                                                        <corpus>_<sig>_index.json
+#
+# THE DATASET NAMES THE DIRECTORY, NOT ITS PATH. An earlier version mirrored the corpus's path
+# under the cache root -- cache/tokens/<tok>/data/download/<corpus>/ -- so two machines that had
+# put the same corpus in different places looked in different directories and the second
+# retokenised what the first had finished. The dataset name travels with the data; the path does
+# not. Streams written under the old rule are still FOUND, by _legacy_stream_dirs, because they
+# are correct and they took hours; nothing is orphaned by the change.
 #
 # THE TOKENIZER IS THE DIRECTORY, not a field inside the file, so two vocabularies coexist
 # instead of overwriting each other: retrain the BPE, try the new vocabulary, go back, and the
@@ -1140,11 +1148,11 @@ def holdout_probe(policy, ref, enc, pairs, beta, gen=None, roll_temp=1.0, batch=
 # NAME rather than only in the header so that two settings do not evict each other's entries
 # turn by turn; the same signature is also stored inside and checked on read.
 #
-# Format: one JSON header line, then the ids of every packed document concatenated as
-# little-endian uint32. The header's `sig` identifies the tokenizer AND the packing, and
-# `src_mtime`/`src_size` the source file, so a rebuilt vocabulary, a changed `max_words` or an
-# edited file all invalidate the entry -- a stale cache can never silently train the wrong
-# tokens.
+# Format: `<corpus>_<sig>_index.json` is the manifest -- signature, dtype, eos, the shard list
+# and the resume cursor -- and each `_NNNNN.tokens` shard holds the ids of the packed documents
+# it covers, concatenated, memory-mapped on first touch. The manifest names its shards by BARE
+# FILENAME and resolves them against its own directory, which is what lets a cache directory be
+# moved or renamed without breaking a single stream.
 # --------------------------------------------------------------------------- #
 _FINGERPRINTS = {}
 
@@ -1677,6 +1685,12 @@ def load_token_corpora(stage, roots, tok, max_words=200, exclude_dirs=(), log=pr
     A corpus with no files is REPORTED AND SKIPPED rather than fatal: a list is a list, and
     losing the whole run because the fourth entry has not been downloaded yet would be the
     wrong trade."""
+    # IMPORTED HERE, as everything in this module imports token_store: helpers/__init__ does
+    # `from .utils import *`, so a module-level import of a sibling would run while the package
+    # is still initialising. A function-local import binds the name in THIS function -- the one
+    # in build_token_stream does not reach here, which is exactly how MultiStream came to be
+    # referenced with nothing bound to it.
+    from . import token_store
     roots = [r for r in (roots if isinstance(roots, (list, tuple)) else [roots]) if r]
     streams, names, n_files, missing = [], [], 0, []
     for root in roots:

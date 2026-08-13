@@ -35,8 +35,12 @@ instruction tree holds. NOTHING HERE DOWNLOADS; see DATASETS below and tools/dow
                                 alpaca_gpt4/    an alternative prompt bank, unused by default
     data/download/zetagpt-grpo-cot_gsm8k/
                                 reasoning problems: {train,test}_<batch>.json
-    cache/tokens/<tokenizer>/   pre-tokenised corpora as .tokens files, mirroring the
-                                source path. The directory is the TOKENIZER
+    cache/tokens/<tokenizer>/<corpus>/
+                                pre-tokenised corpora as sharded .tokens files beside
+                                their _index.json, one directory per DATASET -- named
+                                for the dataset, never for where it sits, so the same
+                                corpus is found on every machine. The parent is the
+                                TOKENIZER
                                 (bpe_<256+merges>_<8 chars of the merges' blob hash>), so
                                 two vocabularies coexist instead of evicting each
                                 other, and no stage appears in the path: tokens depend on
@@ -222,7 +226,7 @@ COT_DIR = dataset_dir("zetagpt-grpo-cot_gsm8k")             # chain-of-thought /
 COT_GSM8K_DIR = COT_DIR                                    # {train,test}_<batch>.json
 COT_COUNTDOWN_DIR = dataset_dir("zetagpt-cot-countdown-game-20k")
 DISTILL_DIR = HH_DIR        # distillation generates from the same prompts stage 8 rolls out on
-CACHE_DIR = os.path.join(ROOT, "cache")                    # cache/tokens/bpe_<256+merges>_<fp>/<mirror>.tokens
+CACHE_DIR = os.path.join(ROOT, "cache")                    # cache/tokens/bpe_<256+merges>_<fp>/<corpus>/
 CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints")         # checkpoints/<stage>/checkpoint_*.pt
 OUTPUT_DIR = os.path.join(ROOT, "outputs")                  # everything a run produces
 PLOT_DIR = os.path.join(OUTPUT_DIR, "plots")               # outputs/plots/<stage>/<figure>.pdf
