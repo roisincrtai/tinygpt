@@ -229,7 +229,32 @@ def spec_zetagpt(args, device, dtype, log):
         log(f"[context] zetagpt skipped: no tokenizer at {config.BPE_PATH} (run stage 3)")
         return None
     tok = BPETokenizer.load(config.BPE_PATH)
-    ck = torch.load(path, map_location="cpu")
+    # A CHECKPOINT THAT WILL NOT LOAD IS A SKIPPED MODEL, not a dead run. Every baseline is
+    # already treated that way and there is no reason ours should be the one that takes the
+    # evaluation down -- least of all when the likeliest cause is a TRAINING RUN STILL WRITING
+    # IT, which is a matter of waiting rather than of anything being wrong.
+    try:
+        ck = torch.load(path, map_location="cpu")
+    except Exception as e:                                        # noqa: BLE001
+        size = os.path.getsize(path) if os.path.isfile(path) else 0
+        import time
+        age = time.time() - os.path.getmtime(path) if size else 0
+        log(f"[context] zetagpt skipped: {os.path.relpath(path, config.ROOT)} would not load")
+        log(f"[context]   {type(e).__name__}: {str(e).splitlines()[0]}")
+        log(f"[context]   {size / 2**30:.2f} GiB, last written {age / 60:.1f} minutes ago")
+        if age < 600:
+            log(f"[context]   THAT IS RECENT. A pretraining run writes this file every "
+                f"--checkpoint_every_steps; the write is atomic (helpers._atomic_torch_save "
+                f"renames a temporary over it), so a complete file is always there -- but a "
+                f"copy taken while the rename lands can still be short. Try again, or")
+        log(f"[context]   evaluate a copy, which a live trainer cannot touch:")
+        log(f"[context]       cp {os.path.relpath(path, config.ROOT)} /tmp/eval.pt")
+        log(f"[context]       python evals/eval_pretrain_context_length.py "
+            f"--checkpoint /tmp/eval.pt")
+        log(f"[context]   If a copy fails the same way the file itself is damaged; "
+            f"checkpoints/pretrain/ keeps only the newest, so the run must be resumed from "
+            f"its history.")
+        return None
     saved = ck.get("model_cfg") or dict(config.MODEL)
     cfg = {k: v for k, v in saved.items() if k != "vocab_size"}
     cfg.setdefault("pe", "ssm")
