@@ -99,7 +99,7 @@ import random
 import torch
 
 import default_config as config
-from helpers import corpus_files, resolve_device, progress
+from helpers import corpus_files, model_name, resolve_device, progress
 from model import ZetaGPT
 from model.ssm import collect_stats, layer_stats
 from tokenizer import BPETokenizer
@@ -201,7 +201,10 @@ def spec_zetagpt(args, device, dtype, log):
     log(f"[extrapolation] ZetaGPT: {os.path.relpath(path, config.ROOT)} "
         f"step {ck.get('step')}/{ck.get('total')}  pe={cfg.get('pe')}  vocab={len(tok):,}")
     return {
-        "name": f"ZetaGPT ({cfg.get('n_layer')}L-{cfg.get('n_embd')}d, pe={cfg.get('pe')})",
+        # THE SCHEME'S NAME (helpers.model_name), not its dimensions: this project files every
+        # checkpoint, history and figure under `zetagpt-s`, and a figure that says `24L-512d`
+        # is naming the same object a second way.
+        "name": f"{model_name(cfg)} (pe={cfg.get('pe')})",
         "key": "zetagpt", "cfg": cfg, "checkpoint": os.path.relpath(path, config.ROOT),
         "step": ck.get("step"), "total": ck.get("total"),
         "encode": lambda t: tok(t, add_special_tokens=False)["input_ids"],

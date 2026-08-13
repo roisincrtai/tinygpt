@@ -245,6 +245,11 @@ perplexity, which is per token and therefore per vocabulary.
 
 ## Niche among compact language models
 
+Every row here that exists on the Hub is **measured**, not cited —
+`python evals/eval_pretrain_context_length.py` scores all of them on the same targets, in bits
+per byte, and draws them on one axis. (*Baby GPT* is nanoGPT's character-level demo, trained
+per-reader rather than published, so there is nothing to fetch.)
+
 | Model | Params | Architecture | Positional encoding | Pretrain context |
 |---|---|---|---|---|
 | TinyStories-1M | 3.7M | Transformer | Learned | 512 |

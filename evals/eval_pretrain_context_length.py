@@ -9,12 +9,12 @@ and does it still work past the length it was trained at?
 
     outputs/plots/evaluation/pretrain_context_generalization.pdf
     outputs/eval/pretrain_context_generalization.json
-    cache/evals/context_length/<model>.json                      # measured points, for resume
+    cache/evals/eval_context_length/<model>.json                      # measured points, for resume
 
 IT RESUMES, and it is built to. Attention materialises a (heads x T x T) matrix, so this sweep
 is GUARANTEED to end in an allocation failure at some length -- that is what the last point of
 each curve IS, not a fault -- and reaching it takes hours. Every measured point is written to
-cache/evals/context_length/ the moment it exists, and a second run continues from there. The
+cache/evals/eval_context_length/ the moment it exists, and a second run continues from there. The
 cache key is the checkpoint's NAME and step, the corpus's NAME, the probe grids and the
 sampling settings: no path, no device, no timestamp, so two machines agree on what a cached
 point means. Change any of them and the file is discarded rather than merged into.
@@ -45,18 +45,22 @@ is it by these exact bytes.
                          here and zero under exact match, and the graded number is the one that
                          still means something at 133M.
 
-EVERY FIGURE IS BITS PER BYTE OVER AN IDENTICAL SPAN OF CHARACTERS. The models compared here
-have four different tokenizers, and perplexity is per TOKEN: a tokenizer that cuts text into
-fewer, longer pieces reports a lower perplexity for identical predictions. Bits per byte
-divides that out -- the same sentence is the same number of bytes to everyone -- and it is the
-only unit in which these four rows may be plotted on one axis.
+THE COMPARISON SET IS THE README'S TABLE -- every compact model in it that exists on the Hub,
+smallest first: TinyStories 1M/8M/33M, Pythia-70M, GPT-2 small, SmolLM2-135M, Gemma 3 270M,
+Qwen3-0.6B-Base, Qwen2.5-0.5B, TinyLlama v1.1. So the table stops being a literature survey
+and becomes a measurement.
 
-WHAT THE COMPARISON MODELS ARE FOR. GPT-2 has a learned absolute position table of 1,024 rows
-and there is no row 1,025: past it the model cannot be evaluated at all, and that wall is the
-point. TinyLlama and Qwen2.5 use RoPE, trained at 2,048 and 32,768; they run past their
-training length and degrade instead of stopping. ZetaGPT refers to no position index anywhere,
-so the sweep continues until memory rather than architecture ends it. Three ways of answering
-the same question, on one axis.
+EVERY FIGURE IS BITS PER BYTE OVER AN IDENTICAL SPAN OF CHARACTERS. Those models have as many
+tokenizers between them, and perplexity is per TOKEN: a vocabulary that cuts text into fewer,
+longer pieces reports a lower perplexity for identical predictions. Bits per byte divides that
+out -- the same sentence is the same number of bytes to everyone -- and it is the only unit in
+which these rows may share an axis.
+
+THREE ANSWERS TO ONE QUESTION, which is why the set is worth its cost. A LEARNED POSITION TABLE
+IS A WALL: GPT-2 has 1,024 rows and no row 1,025, so past it the model cannot be evaluated at
+all, and the sweep reports that rather than a bad number. RoPE IS A SLOPE: the rotary models
+run past their training length and degrade. ZetaGPT refers to no position index anywhere, so
+its sweep ends where memory ends and not where the architecture does.
 
 Nothing here is fetched by this script except the comparison weights, through transformers'
 own cache (config.MODEL_DIR). A model that cannot be loaded is SKIPPED AND REPORTED, never
@@ -80,23 +84,52 @@ import torch
 
 import default_config as config
 from helpers.kv_cache import Cache as KVCache
-from helpers.utils import progress
+from helpers.utils import model_name, progress
 from model import ZetaGPT
 from tokenizer import BPETokenizer
 
-# The comparison set. Base checkpoints only -- an instruct model would be a different
-# experiment, and a chat model's likelihoods are shaped by a template that is not present here.
+# THE COMPARISON SET IS THE README'S TABLE, every row of it that exists on the Hub -- so the
+# table stops being a literature survey and becomes a measurement. SMALLEST FIRST, because the
+# cheap rows then land in the figure within minutes and a run stopped early still compares
+# something.
+#
+# BASE CHECKPOINTS ONLY. An instruct model is a different experiment, and a chat model's
+# likelihoods are shaped by a template that is not present here -- scoring raw prose against a
+# model tuned to expect a chat header measures the header.
+#
+# `Baby GPT (character)` is in the table and NOT here: it is nanoGPT's character-level demo,
+# trained per-reader rather than published, so there is nothing to fetch. Gemma 3 is gated on
+# the Hub and will be skipped with a report unless `huggingface-cli login` has been run --
+# which is exactly what a skipped baseline is for.
 BASELINES = {
-    "gpt2": "gpt2",                                   # 124M, learned absolute, 1,024
-    "tinyllama": "TinyLlama/TinyLlama_v1.1",          # 1.1B, RoPE, 2,048
-    "qwen": "Qwen/Qwen2.5-0.5B",                      # 0.5B, RoPE, 32,768
+    "tinystories-1m": "roneneldan/TinyStories-1M",       # 3.7M,   learned,   512
+    "tinystories-8m": "roneneldan/TinyStories-8M",       # 19.7M,  learned,   512
+    "tinystories-33m": "roneneldan/TinyStories-33M",     # 68.5M,  learned,   512
+    "pythia-70m": "EleutherAI/pythia-70m",               # 70.4M,  RoPE,      2,048
+    "gpt2": "gpt2",                                      # 124M,   learned,   1,024
+    "smollm2-135m": "HuggingFaceTB/SmolLM2-135M",        # 134.5M, RoPE,      8,192
+    "gemma3-270m": "google/gemma-3-270m",                # 268.1M, RoPE,      32,768
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B-Base",                # 0.6B,   RoPE,      32,768
+    "qwen": "Qwen/Qwen2.5-0.5B",                         # 0.5B,   RoPE,      32,768
+    "tinyllama": "TinyLlama/TinyLlama_v1.1",             # 1.1B,   RoPE,      2,048
 }
 OUT_PDF = os.path.join(config.PLOT_DIR, "evaluation", "pretrain_context_generalization.pdf")
 OUT_JSON = os.path.join(config.OUTPUT_DIR, "eval", "pretrain_context_generalization.json")
 
 BLUE, ORANGE, GREEN, GREY = "#3b6ea5", "#d1701c", "#2e7d5b", "#8a8a8a"
-COLOURS = {"zetagpt": BLUE, "gpt2": GREY, "tinyllama": ORANGE, "qwen": GREEN}
-CACHE_DIR = os.path.join(config.CACHE_DIR, "evals", "context_length")
+
+
+def colour_of(key, i, n):
+    """ZetaGPT in blue and drawn heavier; the baselines spread along a colormap in the order
+    they are run, which is smallest first -- so the legend reads as a size ladder rather than
+    as an arbitrary set. Eleven lines need a scale, not eleven remembered names."""
+    if key == "zetagpt":
+        return BLUE
+    import matplotlib.pyplot as plt
+    return plt.get_cmap("cividis")(0.08 + 0.78 * (i / max(n - 1, 1)))
+
+
+CACHE_DIR = os.path.join(config.CACHE_DIR, "evals", "eval_context_length")
 
 # WHAT AN ALLOCATOR SAYS WHEN IT CANNOT ALLOCATE, on each backend. There is no common exception
 # type and no common message: CUDA raises OutOfMemoryError and says "out of memory", MPS raises
@@ -150,9 +183,13 @@ def spec_zetagpt(args, device, dtype, log):
     model.load_state_dict(ck["model"])
     return _finish({
         "key": "zetagpt",
-        "name": f"ZetaGPT {cfg.get('n_layer')}L-{cfg.get('n_embd')}d (NoPE)"
-                if cfg.get("pe", "ssm") == "ssm" else
-                f"ZetaGPT {cfg.get('n_layer')}L-{cfg.get('n_embd')}d (pe={cfg.get('pe')})",
+        # THE SCHEME'S NAME, not its dimensions. `24L-512d` is a description of a model, and
+        # this project already has a NAME for that model -- zetagpt-s -- derived from
+        # default_config.SCHEMES by helpers.model_name, which is also what every checkpoint,
+        # history and figure is filed under. Two vocabularies for one object is one too many,
+        # and the dimensions are in the startup table for anyone who wants them.
+        "name": f"{model_name(cfg)}"
+                + ("" if cfg.get("pe", "ssm") == "ssm" else f" (pe={cfg.get('pe')})"),
         "encode": lambda t: tok(t, add_special_tokens=False)["input_ids"],
         # MAX_POS = 0 MEANS "NO ARCHITECTURAL LIMIT", which is the claim under test and not a
         # missing value: there is no position table to run out of and no rotary base to
@@ -193,7 +230,7 @@ def spec_hf(key, repo, device, dtype, log):
     learned = str(getattr(c, "model_type", "")).startswith("gpt2")
     trunk = getattr(model, "transformer", None) or getattr(model, "model", None)
     return _finish({
-        "key": key, "name": f"{repo.split('/')[-1]}",
+        "key": key, "name": repo.split("/")[-1],
         "encode": lambda t: tk(t, add_special_tokens=False)["input_ids"],
         # A LEARNED TABLE IS A WALL; RoPE IS A SLOPE. GPT-2 cannot be run past its rows at all,
         # so max_pos is a hard stop; a rotary model runs and degrades, so its training length
@@ -344,6 +381,33 @@ def long_documents(data_dir, want_chars, log, limit=64):
     return docs
 
 
+def prefix_ids(spec, text, want, chars_per_token=4.5):
+    """The LAST `want` token ids of `text`, tokenising ONLY AS MUCH TEXT AS THAT NEEDS.
+
+    THIS IS WHY THERE IS NO PRE-TOKENISATION PASS. Every model here has its own tokenizer, so
+    nothing can be shared between them, and tokenising a whole 130,000-character document to
+    use the last 512 tokens of it is ten minutes of work thrown away -- which is exactly what
+    the first version did, at 74 seconds a document before a single forward pass had run.
+
+    A token is about 4.5 characters, so `want` tokens need about 4.5 x want characters. The
+    estimate is checked rather than trusted: if the slice came out short, the window is doubled
+    and the slice retaken, until it is long enough or the document is used up. Overshooting
+    costs a little tokenising; undershooting would silently measure a shorter context than the
+    x axis claims, which is the failure worth spending a retry to avoid.
+
+    Taking the last N CHARACTERS and then cutting to the last N TOKENS leaves the left edge on
+    whatever boundary the merges land on -- but the ids are cut from the left anyway, so that
+    edge is arbitrary in both cases and nothing is lost by not seeing the whole document."""
+    if want <= 0:
+        return []
+    take = min(len(text), int(want * chars_per_token) + 64)
+    while True:
+        ids = spec["encode"](text[len(text) - take:])
+        if len(ids) >= want or take >= len(text):
+            return ids[-want:]
+        take = min(len(text), take * 2)
+
+
 def probe_context_curve(spec, docs, args, device, log, live, cache, out):
     """The FIXED target span at CONTEXT LENGTHS OF 512, 1k, 2k, ... 32k TOKENS.
 
@@ -371,27 +435,15 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
     and a result that exists only in memory until the end is a result an interruption throws
     away."""
     tail = args.target_chars
-    # tokenised ONCE per document, not once per length: the same ids are re-cut for every L,
-    # and re-encoding 130k characters seven times is minutes spent on an answer already held
-    encoded = []
-    # AND THIS LOOP REPORTS TOO. It is a byte-level BPE over eight documents of ~130,000
-    # characters -- tens of seconds before the first forward pass, with nothing on screen to
-    # say the run had started.
-    chosen = docs[:args.documents]
-    for d in progress(chosen, desc=f"[context] {spec['key']} tokenising documents",
-                      total=len(chosen)):
-        if len(d) <= tail:
-            continue
-        cut = len(d) - tail
-        encoded.append((spec["encode"](d[:cut]), spec["encode"](d[cut:]),
-                        len(d[cut:].encode("utf-8"))))
-    if encoded:
-        log(f"[context] {spec['key']:<10} {len(encoded)} documents tokenised, "
-            f"longest prefix {max(len(p) for p, _, _ in encoded):,} tokens, "
-            f"target {len(encoded[0][1]):,} tokens / {encoded[0][2]:,} bytes")
-    if not encoded:
+    chosen = [d for d in docs[:args.documents] if len(d) > tail]
+    if not chosen:
         log(f"[context] {spec['key']:<10} curve  no document longer than the target span")
         return out
+    # THE TARGET IS TOKENISED ONCE -- it is the same 2,000 characters at every context length,
+    # and it is small. Nothing else is tokenised in advance.
+    spans = [(spec["encode"](d[len(d) - tail:]), len(d[len(d) - tail:].encode("utf-8")))
+             for d in progress(chosen, desc=f"[context] {spec['key']} target spans",
+                               total=len(chosen))]
 
     for L in args.context_lengths:
         hit = cache.get(f"curve:{L}")
@@ -404,16 +456,17 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
             continue
         nats = 0.0
         nbytes = n_tok = n_cor = ctx = n_ok = 0
-        docs_bar = progress(list(enumerate(encoded, 1)),
-                            desc=f"[context] {spec['key']} ctx {L:,}", total=len(encoded))
-        for i_doc, (pre_ids, span_ids, span_bytes) in docs_bar:
+        docs_bar = progress(list(enumerate(chosen, 1)),
+                            desc=f"[context] {spec['key']} ctx {L:,}", total=len(chosen))
+        for i_doc, d in docs_bar:
+            span_ids, span_bytes = spans[i_doc - 1]
             room = L - len(span_ids)
             if room < 0:                       # the target alone is longer than this context
                 continue
-            n, t, c, T, ok = score_ids(spec, pre_ids[-room:] if room else [], span_ids,
-                                       device, args.chunk_tokens,
+            pre_ids = prefix_ids(spec, d[:len(d) - tail], room)
+            n, t, c, T, ok = score_ids(spec, pre_ids, span_ids, device, args.chunk_tokens,
                                        desc=f"[context] {spec['key']} ctx {L:,} "
-                                            f"doc {i_doc}/{len(encoded)}")
+                                            f"doc {i_doc}/{len(chosen)}")
             if not ok:
                 n_ok = 0
                 break
@@ -585,28 +638,32 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False, marker="o
     is the TARGET -- the same span of text is being predicted in every case -- and the x
     positions differ only because the tokenizers do."""
     drew = False
-    for m in models:
+    n = len(models)
+    for i, m in enumerate(models):
         pts = [(r.get("context_length") or r["ctx_tokens"], r[field])
                for r in m["curve"] if r.get(field) is not None]
         if not pts:
             continue
-        c = COLOURS.get(m["key"], GREY)
-        ax.plot(*zip(*pts), marker, color=c, lw=1.5, ms=3.4, label=m["name"])
+        c, own = colour_of(m["key"], i, n), m["key"] == "zetagpt"
+        ax.plot(*zip(*pts), marker, color=c, lw=2.4 if own else 1.2,
+                ms=4.6 if own else 3.0, zorder=3 if own else 2, label=m["name"])
         drew = True
         # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
         # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
         if any(r.get(field) is None for r in m["curve"]):
             ax.plot(pts[-1][0], pts[-1][1], "x", color=c, ms=8, mew=1.8)
-        # the training length of each model, where it falls inside the plotted range
-        if m.get("train_len"):
-            ax.axvline(m["train_len"], color=c, lw=0.7, ls=":", alpha=0.45)
+        # ONLY ZETAGPT'S TRAINING LENGTH IS DRAWN. Eleven dotted verticals is a grid, not a
+        # reading; the one that matters is where OUR model stops having been trained and
+        # starts extrapolating, and each baseline's own length is in the legend table.
+        if own and m.get("train_len"):
+            ax.axvline(m["train_len"], color=c, lw=0.9, ls=":", alpha=0.6)
     ax.set_xscale("log", base=2)
     if logy:
         ax.set_yscale("log")
     ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize=9.5)
     if drew:
-        ax.legend(fontsize=6.5)
+        ax.legend(fontsize=5.6, ncol=2, loc="best")
 
 
 def figure(res, out_path):
@@ -638,28 +695,32 @@ def figure(res, out_path):
                  "4. token accuracy", marker="v-")
 
     # ---- row 2: the two synthetic probes ----------------------------------------------- #
-    for m in models:
+    for i, m in enumerate(models):
         pts = [(r["filler_words"], r["gain"]) for r in m["copy"] if r.get("gain") is not None]
         if pts:
-            ax[4].plot(*zip(*pts), "s-", color=COLOURS.get(m["key"], GREY), lw=1.5, ms=3.4,
-                       label=m["name"])
+            own = m["key"] == "zetagpt"
+            ax[4].plot(*zip(*pts), "s-", color=colour_of(m["key"], i, len(models)),
+                       lw=2.4 if own else 1.2, ms=4.6 if own else 3.0,
+                       zorder=3 if own else 2, label=m["name"])
     ax[4].axhline(0.0, color="k", lw=0.8, alpha=0.4)
     ax[4].set_xscale("log", base=2)
     ax[4].set_xlabel("filler words between the two copies")
     ax[4].set_ylabel("bits/byte saved on the second copy")
     ax[4].set_title("5. can it reach back?", loc="left", fontsize=9.5)
     if ax[4].get_legend_handles_labels()[0]:
-        ax[4].legend(fontsize=6.5)
+        ax[4].legend(fontsize=5.6, ncol=2, loc="best")
 
-    for m in models:
+    for i, m in enumerate(models):
         by_len = {}
         for r in m["passkey"]:
             if r.get("nats_per_key") is not None:
                 by_len.setdefault(r["filler_words"], []).append(r["nats_per_key"])
         pts = sorted((k, sum(v) / len(v)) for k, v in by_len.items())
         if pts:
-            ax[5].plot(*zip(*pts), "^-", color=COLOURS.get(m["key"], GREY), lw=1.5, ms=4.0,
-                       label=m["name"])
+            own = m["key"] == "zetagpt"
+            ax[5].plot(*zip(*pts), "^-", color=colour_of(m["key"], i, len(models)),
+                       lw=2.4 if own else 1.2, ms=4.6 if own else 3.0,
+                       zorder=3 if own else 2, label=m["name"])
     ax[5].axhline(math.log(1e5), color="k", lw=0.8, ls=":", alpha=0.6)
     ax[5].text(0.02, math.log(1e5), " uniform guess", va="bottom", fontsize=7,
                transform=ax[5].get_yaxis_transform())
@@ -668,7 +729,7 @@ def figure(res, out_path):
     ax[5].set_ylabel("nats to name the key  (lower is better)")
     ax[5].set_title("6. can it retrieve a fact?", loc="left", fontsize=9.5)
     if ax[5].get_legend_handles_labels()[0]:
-        ax[5].legend(fontsize=6.5)
+        ax[5].legend(fontsize=5.6, ncol=2, loc="best")
 
     # NO SUPTITLE. The panels carry their own titles and a figure that goes into a paper is
     # captioned there; a banner across the top is duplication in the document and noise in the
@@ -697,7 +758,7 @@ def figure(res, out_path):
 class Cache:
     """Measured points, on disk, so a crashed sweep resumes instead of starting again.
 
-        cache/evals/context_length/<model>.json
+        cache/evals/eval_context_length/<model>.json
 
     THIS SWEEP ENDS IN AN ALLOCATION FAILURE BY DESIGN -- attention is quadratic in T, so every
     curve runs until the machine says no -- and it is hours long. Recomputing the first five
