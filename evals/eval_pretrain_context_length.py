@@ -130,13 +130,34 @@ from tokenizer import BPETokenizer
 # cache and in the README's table; they are not drawn, and they are not measured again.
 HIDDEN = ("tinystories-1m", "tinystories-8m", "tinystories-33m")
 
+# A BASELINE IS STRONG HERE IF IT CONTESTS THE CLAIM, which means two things: it must read
+# English web text well enough for its curve to MOVE, and its positional scheme must be one
+# somebody would defend. Sorted by that second axis, the set covers all three:
+#
+#   learned absolute table   gpt2 -- a wall at 1,024, and what interpolating it costs
+#   RoPE                     pythia 70m and 160m, SmolLM2, Qwen, Gemma, TinyLlama
+#   ALiBi                    bloom-560m -- THE SCHEME DESIGNED TO EXTRAPOLATE
+#
+# ALiBi IS THE ONE THAT MATTERS. Beating a learned table past its rows is arithmetic, and
+# beating RoPE past its base is well documented; ALiBi biases attention by distance precisely
+# so that a model trained at n keeps working past n, and it is the only rival that claims what
+# ZetaGPT claims. BLOOM is multilingual, so its LEVEL on English is inflated -- but this figure
+# compares SLOPES past a training window, and a level offset does not touch a slope.
+#
+# pythia-160m is the exact size match for zetagpt-s AND the same family as pythia-70m, so data,
+# tokenizer and recipe are held constant across a size step -- the cleanest RoPE control there
+# is. SmolLM2-360M is the strongest sub-500M model published, trained on 4T tokens at a native
+# 8,192: the baseline that is not supposed to be caught.
 BASELINES = {
     "pythia-70m": "EleutherAI/pythia-70m",               # 70.4M,  RoPE,      2,048
     "gpt2": "gpt2",                                      # 124M,   learned,   1,024
+    "pythia-160m": "EleutherAI/pythia-160m",             # 162M,   RoPE,      2,048
     "smollm2-135m": "HuggingFaceTB/SmolLM2-135M",        # 134.5M, RoPE,      8,192
     "gemma3-270m": "google/gemma-3-270m",                # 268.1M, RoPE,      32,768
-    "qwen3-0.6b": "Qwen/Qwen3-0.6B-Base",                # 0.6B,   RoPE,      32,768
+    "smollm2-360m": "HuggingFaceTB/SmolLM2-360M",        # 362M,   RoPE,      8,192
     "qwen": "Qwen/Qwen2.5-0.5B",                         # 0.5B,   RoPE,      32,768
+    "bloom-560m": "bigscience/bloom-560m",               # 559M,   ALiBi,     2,048
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B-Base",                # 0.6B,   RoPE,      32,768
     "tinyllama": "TinyLlama/TinyLlama_v1.1",             # 1.1B,   RoPE,      2,048
 }
 # THE NATIVE CONTEXT WINDOW OF EACH BASELINE -- where its circle goes. Normally this comes off
@@ -144,8 +165,9 @@ BASELINES = {
 # from a bucket written before that used instead of having no circle at all. It is the same
 # number the README's table gives.
 NATIVE_CONTEXT = {
-    "pythia-70m": 2048, "gpt2": 1024, "smollm2-135m": 8192,
-    "gemma3-270m": 32768, "qwen3-0.6b": 32768, "qwen": 32768, "tinyllama": 2048,
+    "pythia-70m": 2048, "gpt2": 1024, "pythia-160m": 2048, "smollm2-135m": 8192,
+    "gemma3-270m": 32768, "smollm2-360m": 8192, "qwen": 32768, "bloom-560m": 2048,
+    "qwen3-0.6b": 32768, "tinyllama": 2048,
 }
 OUT_PDF = os.path.join(config.PLOT_DIR, "evaluation", "pretrain_context_generalization.pdf")
 OUT_JSON = os.path.join(config.OUTPUT_DIR, "eval", "pretrain_context_generalization.json")
