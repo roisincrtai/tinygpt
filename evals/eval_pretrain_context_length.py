@@ -4,10 +4,20 @@ and does it still work past the length it was trained at?
 
     python evals/eval_pretrain_context_length.py
     python evals/eval_pretrain_context_length.py --only zetagpt
+    python evals/eval_pretrain_context_length.py --no-resume     # measure everything again
     python evals/eval_pretrain_context_length.py --plot_only
 
     outputs/plots/evaluation/pretrain_context_generalization.pdf
     outputs/eval/pretrain_context_generalization.json
+    cache/evals/context_length/<model>.json                      # measured points, for resume
+
+IT RESUMES, and it is built to. Attention materialises a (heads x T x T) matrix, so this sweep
+is GUARANTEED to end in an allocation failure at some length -- that is what the last point of
+each curve IS, not a fault -- and reaching it takes hours. Every measured point is written to
+cache/evals/context_length/ the moment it exists, and a second run continues from there. The
+cache key is the checkpoint's NAME and step, the corpus's NAME, the probe grids and the
+sampling settings: no path, no device, no timestamp, so two machines agree on what a cached
+point means. Change any of them and the file is discarded rather than merged into.
 
 FOR BASE MODELS, WHICH MEANS EVERYTHING IS SCORED BY LIKELIHOOD AND NOTHING IS GENERATED. A
 pretrained model cannot be asked a question -- it has never been shown that answering is what
@@ -69,6 +79,7 @@ import random
 import torch
 
 import default_config as config
+from helpers.kv_cache import Cache as KVCache
 from helpers.utils import progress
 from model import ZetaGPT
 from tokenizer import BPETokenizer
@@ -85,6 +96,25 @@ OUT_JSON = os.path.join(config.OUTPUT_DIR, "eval", "pretrain_context_generalizat
 
 BLUE, ORANGE, GREEN, GREY = "#3b6ea5", "#d1701c", "#2e7d5b", "#8a8a8a"
 COLOURS = {"zetagpt": BLUE, "gpt2": GREY, "tinyllama": ORANGE, "qwen": GREEN}
+CACHE_DIR = os.path.join(config.CACHE_DIR, "evals", "context_length")
+
+# WHAT AN ALLOCATOR SAYS WHEN IT CANNOT ALLOCATE, on each backend. There is no common exception
+# type and no common message: CUDA raises OutOfMemoryError and says "out of memory", MPS raises
+# a plain RuntimeError and says "Invalid buffer size: 19.44 GiB", and the CPU allocator says
+# "can't allocate memory" or raises MemoryError outright.
+#
+# THIS LIST IS NOT COSMETIC. Attention materialises a (heads x T x T) matrix, so the sweep is
+# GUARANTEED to hit the ceiling at some length -- that is what the last point of every curve
+# IS. Failing to recognise the message turns the expected end of a curve into a traceback that
+# loses the whole run, which is exactly what happened at 27k tokens on MPS: 8 x 27k x 27k x 4
+# bytes is 19.44 GiB, reported in words this did not know.
+_ALLOC_MSGS = ("out of memory", "invalid buffer size", "can't allocate", "cannot allocate",
+               "failed to allocate", "not enough memory", "insufficient memory",
+               "mps backend out of memory")
+
+
+def is_alloc_error(e):
+    return isinstance(e, MemoryError) or any(m in str(e).lower() for m in _ALLOC_MSGS)
 
 
 # --------------------------------------------------------------------------- #
@@ -131,7 +161,14 @@ def spec_zetagpt(args, device, dtype, log):
         "step": ck.get("step"), "total": ck.get("total"),
         "checkpoint": os.path.relpath(path, config.ROOT),
         "positional": "none (state space recurrence)",
-        "hidden": lambda ids: model.hidden(input_ids=ids), "head": model.head,
+        # ONE CHUNK OF TOKENS, ATTENDING TO EVERYTHING ALREADY CACHED. helpers.kv_cache.Cache
+        # carries four tensors per layer -- attention's keys and values, and the state space
+        # module's convolution window and recurrence state -- because a block is SSM ->
+        # attention -> FFN and the recurrence would otherwise be re-run over the whole prefix.
+        "new_state": lambda: KVCache(len(model.blocks)),
+        "forward_chunk": lambda x, st: (
+            model.head(model.hidden_states(input_ids=x, cache=st)),
+            st),
     }, model, log)
 
 
@@ -164,9 +201,11 @@ def spec_hf(key, repo, device, dtype, log):
         "max_pos": n_pos if learned else 0, "train_len": n_pos or 2048,
         "step": None, "total": None, "checkpoint": repo,
         "positional": "learned absolute table" if learned else "RoPE",
-        "hidden": ((lambda ids: trunk(input_ids=ids).last_hidden_state)
-                   if trunk is not None else None),
-        "head": getattr(model, "lm_head", None),
+        # transformers' OWN incremental path: past_key_values in, past_key_values out. Same
+        # reason as above -- the attention matrix becomes (chunk x T) instead of (T x T).
+        "new_state": lambda: None,
+        "forward_chunk": lambda x, st: (lambda o: (o.logits, o.past_key_values))(
+            model(input_ids=x, past_key_values=st, use_cache=True)),
     }, model, log)
 
 
@@ -174,66 +213,77 @@ def spec_hf(key, repo, device, dtype, log):
 # scoring: nats over an exact span, and the bytes that span covers
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def score_span(spec, prefix, span, device, chunk=2048):
-    """Everything measurable about `span` given `prefix`, in one forward pass.
+def score_ids(spec, pid, sid, device, chunk):
+    """Score `sid` given `pid`, FEEDING THE SEQUENCE THROUGH THE MODEL'S KV CACHE IN CHUNKS.
 
-    Returns (nats, bytes, n_tokens, n_correct, ctx_tokens, ok):
+    THIS IS WHAT MAKES 32k REACHABLE. A single forward over T tokens materialises attention as
+    (heads x T x T): at T = 27,000 and 8 heads that is 19.44 GiB, which is the allocation that
+    ended the first run. Fed `chunk` tokens at a time with the keys and values of everything
+    before them already in the cache, the matrix is (heads x chunk x T) instead -- at chunk 512
+    and T = 32,768, 0.5 GiB. LINEAR IN T RATHER THAN QUADRATIC, for identical arithmetic: each
+    position still attends to the whole prefix, it is simply not asked to do so all at once.
 
-        nats        -log P(span | prefix), summed over the span's tokens
-        bytes       what the span occupies as utf-8 -- the cross-tokenizer denominator
-        n_tokens    how many tokens THIS model spent on it -- the per-token denominator
-        n_correct   how many of those the argmax got right -- next-token accuracy
-        ctx_tokens  the length of the whole sequence, which is the x-axis of every curve
-        ok          False when the model refuses the length (a learned position table with no
-                    row for it, or an allocation that will not fit) -- a fact to plot, not an
-                    error
+    The result is exactly the single-pass result. Causal attention means a position's output
+    depends only on positions at or before it, so splitting the sequence changes what is
+    resident, never what is computed.
 
-    FOUR MEASURES FROM ONE PASS, because the forward is the entire cost and computing
-    perplexity, bits per byte and accuracy from separate runs would triple it for numbers that
-    are three views of the same logits.
+    Returns (nats, tokens, correct, T, ok)."""
+    T = len(pid) + len(sid)
+    if spec["max_pos"] and T > spec["max_pos"]:
+        return None, len(sid), 0, T, False
+    ids_all = pid + sid
+    n_pre = len(pid)
+    state = spec["new_state"]()
+    total, correct = 0.0, 0
+    try:
+        for a in range(0, T, chunk):
+            b = min(a + chunk, T)
+            x = torch.tensor([ids_all[a:b]], device=device)
+            logits, state = spec["forward_chunk"](x, state)
+            # positions lo..hi-1 of THIS chunk have a next token AND lie in the span
+            lo, hi = max(n_pre - 1, a), min(b, T - 1)
+            if lo >= hi:
+                del logits
+                continue
+            lg = logits[:, lo - a:hi - a].float()
+            tgt = torch.tensor([ids_all[lo + 1:hi + 1]], device=device)
+            total += float(-lg.log_softmax(-1).gather(-1, tgt.unsqueeze(-1)).sum())
+            correct += int((lg.argmax(-1) == tgt).sum())
+            del lg, tgt, logits
+    except (RuntimeError, MemoryError) as e:
+        # RUNNING OUT OF MEMORY IS THE EXPECTED END OF A CURVE, not a failure of the run: even
+        # chunked, the cache itself grows with T. Anything that is NOT an allocation failure is
+        # a real bug and is re-raised.
+        if not is_alloc_error(e):
+            raise
+        empty_cache()
+        return None, len(sid), 0, T, False
+    return total, len(sid), correct, T, True
+
+
+def empty_cache():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+@torch.no_grad()
+def score_span(spec, prefix, span, device, chunk=512):
+    """score_ids, for callers that hold text rather than ids.
 
     THE PREFIX AND THE SPAN ARE TOKENISED SEPARATELY and their ids concatenated. Tokenising the
     join would let a merge straddle the boundary, and then the tokens being scored would differ
     from one model to the next by more than the tokenizer -- the span itself would have moved.
-    Encoding them apart costs one merge at the seam and buys a span that is exactly the same
-    text for every model, which is the only way four vocabularies land on one axis."""
+
+    Returns (nats, bytes, n_tokens, n_correct, ctx_tokens, ok)."""
     nb = len(span.encode("utf-8"))
-    pid = spec["encode"](prefix) if prefix else []
     sid = spec["encode"](span)
     if not sid:
-        return 0.0, 0, 0, 0, len(pid), False
-    if spec["max_pos"] and len(pid) + len(sid) > spec["max_pos"]:
-        return None, nb, len(sid), 0, len(pid) + len(sid), False
-    ids = torch.tensor([pid + sid], device=device)
-    n_pre, T = len(pid), ids.shape[1]
-    total, correct = 0.0, 0
-    try:
-        if spec["hidden"] is not None and spec["head"] is not None:
-            h = spec["hidden"](ids)
-            # the vocabulary projection in slices along time, so no (T x vocab) tensor is ever
-            # alive -- at 32k and a 150k vocabulary that tensor alone is 19 GiB in fp32
-            for a in range(max(n_pre - 1, 0), T - 1, chunk):
-                b = min(a + chunk, T - 1)
-                lg = spec["head"](h[:, a:b]).float()
-                tgt = ids[:, a + 1:b + 1]
-                total += float(-lg.log_softmax(-1).gather(-1, tgt.unsqueeze(-1)).sum())
-                correct += int((lg.argmax(-1) == tgt).sum())
-                del lg, tgt
-            del h
-        else:
-            lg = spec["model"](input_ids=ids).logits[:, :-1].float()
-            a = max(n_pre - 1, 0)
-            tgt = ids[:, a + 1:]
-            total = float(-lg[:, a:].log_softmax(-1).gather(-1, tgt.unsqueeze(-1)).sum())
-            correct = int((lg[:, a:].argmax(-1) == tgt).sum())
-            del lg, tgt
-    except (torch.cuda.OutOfMemoryError if torch.cuda.is_available() else RuntimeError) as e:
-        if "out of memory" not in str(e).lower():
-            raise
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return None, nb, len(sid), 0, T, False
-    return total, nb, len(sid), correct, T, True
+        return 0.0, 0, 0, 0, 0, False
+    pid = spec["encode"](prefix) if prefix else []
+    n, t, c, T, ok = score_ids(spec, pid, sid, device, chunk)
+    return n, nb, t, c, T, ok
 
 
 def bpb(nats, nbytes):
@@ -280,8 +330,14 @@ def long_documents(data_dir, want_chars, log, limit=64):
     return docs
 
 
-def probe_context_curve(spec, docs, args, device, log, live):
-    """The FIXED target span, given 2^k characters of its own document in front of it.
+def probe_context_curve(spec, docs, args, device, log, live, cache):
+    """The FIXED target span at CONTEXT LENGTHS OF 512, 1k, 2k, ... 32k TOKENS.
+
+    THE X AXIS IS EXACTLY 2^n FOR EVERY MODEL. The document is tokenised once per model, the
+    target is a fixed span of CHARACTERS -- the same text for everyone -- and the prefix is then
+    truncated BY TOKEN ID to whatever leaves the total at L. Truncating ids rather than
+    characters is what makes the length exact: a character budget lands on a different token
+    count in each of four vocabularies, and the curves would not share an x value anywhere.
 
     FOUR CURVES OUT OF ONE SWEEP, because they are four readings of the same logits and they
     fail in different ways:
@@ -297,39 +353,60 @@ def probe_context_curve(spec, docs, args, device, log, live):
     falls is the model extracting something from text it did not have before, and a curve that
     flattens is the model having stopped reading.
 
-    THE PDF IS REWRITTEN AFTER EVERY POINT. A sweep over four models and six lengths is hours,
-    and a result that exists only in memory until the end is a result that a killed process
-    throws away."""
+    THE PDF IS REWRITTEN AFTER EVERY POINT, and every point is cached. A sweep to 32k is hours,
+    and a result that exists only in memory until the end is a result an interruption throws
+    away."""
     out = []
     tail = args.target_chars
-    for pre_chars in args.prefix_chars:
-        if pre_chars + tail > len(docs[0]):
-            break
-        nats = nbytes = 0.0
-        n_tok = n_cor = ctx = n_ok = 0
-        for d in docs[:args.documents]:
-            if pre_chars + tail > len(d):
+    # tokenised ONCE per document, not once per length: the same ids are re-cut for every L,
+    # and re-encoding 130k characters seven times is minutes spent on an answer already held
+    encoded = []
+    for d in docs[:args.documents]:
+        if len(d) <= tail:
+            continue
+        cut = len(d) - tail
+        encoded.append((spec["encode"](d[:cut]), spec["encode"](d[cut:]),
+                        len(d[cut:].encode("utf-8"))))
+    if not encoded:
+        log(f"[context] {spec['key']:<10} curve  no document longer than the target span")
+        return out
+
+    for L in args.context_lengths:
+        hit = cache.get(f"curve:{L}")
+        if hit is not None:
+            out.append(hit)
+            log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   bpb {hit['bpb']:.4f}   "
+                f"ppl {hit['ppl']:8.2f}   nats/tok {hit['nats_per_token']:.4f}   "
+                f"acc {hit['acc']:.4f}   (cached)")
+            live()
+            continue
+        nats = 0.0
+        nbytes = n_tok = n_cor = ctx = n_ok = 0
+        for pre_ids, span_ids, span_bytes in encoded:
+            room = L - len(span_ids)
+            if room < 0:                       # the target alone is longer than this context
                 continue
-            cut = len(d) - tail
-            prefix, span = d[max(cut - pre_chars, 0):cut], d[cut:]
-            n, b, t, c, T, ok = score_span(spec, prefix, span, device)
+            n, t, c, T, ok = score_ids(spec, pre_ids[-room:] if room else [], span_ids,
+                                       device, args.chunk_tokens)
             if not ok:
+                n_ok = 0
                 break
-            nats += n; nbytes += b; n_tok += t; n_cor += c; ctx += T; n_ok += 1
+            nats += n; nbytes += span_bytes; n_tok += t; n_cor += c; ctx += T; n_ok += 1
         npt = (nats / n_tok) if n_ok and n_tok else None
-        rec = {"prefix_chars": pre_chars, "documents": n_ok,
-               "ctx_tokens": round(ctx / n_ok) if n_ok else None,
+        rec = {"context_length": L, "documents": n_ok,
+               "ctx_tokens": round(ctx / n_ok) if n_ok else L,
                "bpb": bpb(nats, nbytes) if n_ok else None,
                "nats_per_token": npt,
                "ppl": math.exp(npt) if npt is not None else None,
                "acc": (n_cor / n_tok) if n_ok and n_tok else None}
         out.append(rec)
-        log(f"[context] {spec['key']:<10} curve  prefix {pre_chars:>7,} chars  "
-            + (f"ctx {rec['ctx_tokens']:>7,} tok   bpb {rec['bpb']:.4f}   "
-               f"ppl {rec['ppl']:8.2f}   nats/tok {rec['nats_per_token']:.4f}   "
-               f"acc {rec['acc']:.4f}   ({n_ok} docs)"
-               if rec["bpb"] is not None else "unreachable"))
-        live()                                   # the figure, now, not at the end
+        log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   "
+            + (f"bpb {rec['bpb']:.4f}   ppl {rec['ppl']:8.2f}   "
+               f"nats/tok {rec['nats_per_token']:.4f}   acc {rec['acc']:.4f}   "
+               f"({n_ok} docs)" if rec["bpb"] is not None else "unreachable"))
+        if rec["bpb"] is not None:
+            cache.put(f"curve:{L}", rec)
+        live()
         if rec["bpb"] is None:
             break
     return out
@@ -347,7 +424,7 @@ def _filler_words(rng, n):
     return " ".join(rng.choice(bank) for _ in range(n))
 
 
-def probe_copy(spec, args, device, log, live):
+def probe_copy(spec, args, device, log, live, cache):
     """A passage, d words of filler, then THE SAME PASSAGE. Bits per byte on each copy.
 
     THE SECOND COPY IS FREE INFORMATION. A model that can reach back over the filler pays
@@ -360,6 +437,14 @@ def probe_copy(spec, args, device, log, live):
     ends of it."""
     out = []
     for dist in args.copy_distances:
+        hit = cache.get(f"copy:{dist}")
+        if hit is not None:
+            out.append(hit)
+            log(f"[context] {spec['key']:<10} copy   filler {dist:>7,} words  "
+                f"1st {hit['bpb_first']:.3f} -> 2nd {hit['bpb_second']:.3f} bpb   "
+                f"gain {hit['gain']:+.3f}   (cached)")
+            live()
+            continue
         first_n = first_b = second_n = second_b = 0.0
         reached = 0
         for trial in range(args.trials):
@@ -381,6 +466,8 @@ def probe_copy(spec, args, device, log, live):
         log(f"[context] {spec['key']:<10} copy   filler {dist:>7,} words  "
             + (f"1st {rec['bpb_first']:.3f} -> 2nd {rec['bpb_second']:.3f} bpb   "
                f"gain {rec['gain']:+.3f}" if rec["gain"] is not None else "unreachable"))
+        if rec["gain"] is not None:
+            cache.put(f"copy:{dist}", rec)
         live()
         if rec["gain"] is None:
             break
@@ -390,7 +477,7 @@ def probe_copy(spec, args, device, log, live):
 # --------------------------------------------------------------------------- #
 # probe 3 -- passkey, scored as a likelihood
 # --------------------------------------------------------------------------- #
-def probe_passkey(spec, args, device, log, live):
+def probe_passkey(spec, args, device, log, live, cache):
     """A five-digit key at a known depth, scored as -log P(the digits | everything before).
 
     NEVER GENERATED, NEVER EXACT-MATCHED. A 133M model that puts a third of its mass on the
@@ -400,6 +487,14 @@ def probe_passkey(spec, args, device, log, live):
     out = []
     for total in args.passkey_lengths:
         for depth in args.passkey_depths:
+            pid = f"key:{total}:{depth:.2f}"
+            hit = cache.get(pid)
+            if hit is not None:
+                out.append(hit)
+                log(f"[context] {spec['key']:<10} key    filler {total:>7,} words  depth "
+                    f"{depth:.2f}  {hit['nats_per_key']:.2f} nats/key   (cached)")
+                live()
+                continue
             nats = nbytes = 0.0
             reached = 0
             for trial in range(args.trials):
@@ -424,6 +519,8 @@ def probe_passkey(spec, args, device, log, live):
                 f"{depth:.2f}  "
                 + (f"{rec['nats_per_key']:.2f} nats/key (random = 11.51)"
                    if rec["nats_per_key"] is not None else "unreachable"))
+            if rec["nats_per_key"] is not None:
+                cache.put(pid, rec)
             live()
     return out
 
@@ -441,8 +538,8 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False, marker="o
     positions differ only because the tokenizers do."""
     drew = False
     for m in models:
-        pts = [(r["ctx_tokens"], r[field]) for r in m["curve"]
-               if r.get(field) is not None and r.get("ctx_tokens")]
+        pts = [(r.get("context_length") or r["ctx_tokens"], r[field])
+               for r in m["curve"] if r.get(field) is not None]
         if not pts:
             continue
         c = COLOURS.get(m["key"], GREY)
@@ -525,9 +622,9 @@ def figure(res, out_path):
     if ax[5].get_legend_handles_labels()[0]:
         ax[5].legend(fontsize=6.5)
 
-    done = res.get("progress", "")
-    fig.suptitle("Context generalization of PRETRAINED models -- likelihood only, nothing "
-                 "generated" + (f"   [{done}]" if done else ""), y=1.0, fontsize=10)
+    # NO SUPTITLE. The panels carry their own titles and a figure that goes into a paper is
+    # captioned there; a banner across the top is duplication in the document and noise in the
+    # figure. The progress note lives in the log, where a progress note belongs.
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     # ATOMIC. The figure is rewritten after every measured point, so a reader may well have it
@@ -547,6 +644,87 @@ def figure(res, out_path):
         plt.close(fig)
     os.replace(tmp, out_path)
     return out_path
+
+
+class Cache:
+    """Measured points, on disk, so a crashed sweep resumes instead of starting again.
+
+        cache/evals/context_length/<model>.json
+
+    THIS SWEEP ENDS IN AN ALLOCATION FAILURE BY DESIGN -- attention is quadratic in T, so every
+    curve runs until the machine says no -- and it is hours long. Recomputing the first five
+    points to reach the sixth, every time, is the whole cost of the run spent on arithmetic
+    already done.
+
+    THE SIGNATURE IS MACHINE-INDEPENDENT, and deliberately: the checkpoint's NAME and step, the
+    corpus's NAME, the probe grids and the sampling settings -- never a path, never a device,
+    never a time. Two machines with the same checkpoint and the same corpus must agree on what
+    a cached point means, or the cache is a source of wrong numbers rather than fast ones. Any
+    change to it discards the file rather than merging into it.
+
+    ONLY SUCCESSFUL POINTS ARE KEPT. An allocation failure is a fact about THIS MACHINE, and
+    writing it into a signature that claims to be machine-independent would tell a larger card
+    that 27k tokens is unreachable because a laptop could not do it. Failures are re-tried on
+    every run; that costs one forward pass, which is the point at which it fails anyway."""
+
+    def __init__(self, key, signature, log, enabled=True):
+        self.path = os.path.join(CACHE_DIR, f"{key}.json")
+        self.sig, self.log, self.enabled, self.points = signature, log, enabled, {}
+        if not enabled:
+            if os.path.isfile(self.path):
+                log(f"[context] {key}: --no-resume, ignoring {len(self._read()[1]):,} "
+                    f"cached points")
+            return
+        old_sig, pts = self._read()
+        if old_sig is None:
+            return
+        if old_sig != signature:
+            differ = [k for k in signature if old_sig.get(k) != signature.get(k)]
+            log(f"[context] {key}: cache discarded, {', '.join(differ) or 'signature'} changed")
+            return
+        self.points = pts
+        if pts:
+            log(f"[context] {key}: resuming, {len(pts):,} points already measured")
+
+    def _read(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+            return d.get("signature"), d.get("points", {})
+        except (OSError, ValueError):
+            return None, {}
+
+    def get(self, pid):
+        return self.points.get(pid) if self.enabled else None
+
+    def put(self, pid, rec):
+        """Written THE MOMENT the point is measured, atomically. A cache flushed at the end
+        would be empty in exactly the case it exists for."""
+        self.points[pid] = rec
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = self.path + ".part"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"signature": self.sig, "points": self.points}, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
+
+
+def cache_signature(spec, args, corpus):
+    """What a cached point depends on. NO PATH, NO DEVICE, NO TIME -- see Cache."""
+    return {
+        "model": spec["key"],
+        "checkpoint": os.path.basename(str(spec["checkpoint"]).rstrip("/")),
+        "step": spec.get("step"),
+        "corpus": os.path.basename(str(corpus).rstrip("/")),
+        "target_chars": args.target_chars, "documents": args.documents,
+        "trials": args.trials, "copy_words": args.copy_words,
+        "seed": args.seed, "dtype": args.dtype,
+        "context_lengths": list(args.context_lengths),
+        "copy_distances": list(args.copy_distances),
+        "passkey_lengths": list(args.passkey_lengths),
+        "passkey_depths": list(args.passkey_depths),
+    }
 
 
 class Live:
@@ -597,7 +775,7 @@ def summarise(res, log):
             ("  parameters", f"{m['params'] / 1e6:.1f}M"),
             ("  trained at", f"{m['train_len']:,} tokens"),
             ("  best bpb / at", f"{min(r['bpb'] for r in curve):.4f} at "
-                                f"{max(r['prefix_chars'] for r in curve):,} chars"
+                                f"{max(r.get('context_length') or 0 for r in curve):,} tokens"
                                 if curve else "-"),
             ("  furthest copy", f"{far:,} filler words still worth over 0.05 bpb"),
             ("  best key", f"{min(keys):.2f} nats (uniform = 11.51)" if keys else "-"),
@@ -621,7 +799,11 @@ def parse_args():
                         "documents caps the sweep and says so")
     p.add_argument("--documents", type=int, default=8, help="documents averaged in probe 1")
     p.add_argument("--target_chars", type=int, default=2000,
-                   help="the fixed target span every prefix length is scored on")
+                   help="the fixed target span every context length is scored on")
+    p.add_argument("--chunk_tokens", type=int, default=512,
+                   help="tokens per forward pass through the KV cache; attention is "
+                        "(heads x chunk x T), so this and not the context length is what "
+                        "bounds memory. Lower it if 32k still will not fit")
     p.add_argument("--trials", type=int, default=4, help="repeats per synthetic point")
     p.add_argument("--copy_words", type=int, default=48, help="length of the copied passage")
     p.add_argument("--base", type=int, default=0, help="ZetaGPT's training length; 0 = the "
@@ -632,8 +814,19 @@ def parse_args():
     p.add_argument("--out", default=OUT_PDF)
     p.add_argument("--json", default=OUT_JSON)
     p.add_argument("--plot_only", action="store_true", help="redraw from the saved json")
+    # RESUME IS THE DEFAULT, because this sweep ends in an allocation failure by design and is
+    # hours long: the normal case is a second run, and the normal thing for it to do is to
+    # continue. --no-resume is how a measurement is repeated from nothing.
+    p.add_argument("--resume", dest="resume", action="store_true", default=True,
+                   help=f"reuse points already measured, from {os.path.relpath(CACHE_DIR, config.ROOT)}/ (default)")
+    p.add_argument("--no-resume", "--no_resume", dest="resume", action="store_false",
+                   help="measure every point again, ignoring the cache")
     a = p.parse_args()
-    a.prefix_chars = [0, 512, 2048, 8192, 32768, 131072]
+    # CONTEXT LENGTHS ARE POWERS OF TWO IN TOKENS, so every model is measured at the same x
+    # and the doubling is legible on a log axis. 32,768 is reachable only because the sequence
+    # is fed through the KV cache in chunks (score_ids); a single pass at that length is a
+    # 19 GiB attention matrix.
+    a.context_lengths = [512, 1024, 2048, 4096, 8192, 16384, 32768]
     a.copy_distances = [16, 64, 256, 1024, 4096, 16384]
     a.passkey_lengths = [64, 256, 1024, 4096, 16384]
     a.passkey_depths = [0.1, 0.5, 0.9]
@@ -670,7 +863,8 @@ def main():
 
     data_dir = args.data_dir or config.PRETRAIN_CORPUS.get(
         config.PRETRAIN["model_scheme"], config.PRETRAIN_DIR)
-    docs = long_documents(data_dir, max(args.prefix_chars) + args.target_chars, log)
+    # a token is ~4 characters, so the longest context wants roughly 4x its tokens in text
+    docs = long_documents(data_dir, max(args.context_lengths) * 4 + args.target_chars, log)
 
     # THE RESULT OBJECT EXISTS BEFORE THE FIRST MEASUREMENT, and every model's row is appended
     # to it as soon as that model starts -- so the figure shows a model in progress rather than
@@ -689,10 +883,13 @@ def main():
         m["curve"], m["copy"], m["passkey"] = [], [], []
         res["models"].append(m)
         tag = f"{spec['key']} ({i}/{len(specs)})"
+        cache = Cache(spec["key"], cache_signature(spec, args, data_dir), log,
+                      enabled=args.resume)
         m["curve"] = probe_context_curve(spec, docs, args, device, log,
-                                         lambda: live(f"{tag}: context curve"))
-        m["copy"] = probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"))
-        m["passkey"] = probe_passkey(spec, args, device, log, lambda: live(f"{tag}: passkey"))
+                                         lambda: live(f"{tag}: context curve"), cache)
+        m["copy"] = probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"), cache)
+        m["passkey"] = probe_passkey(spec, args, device, log,
+                                     lambda: live(f"{tag}: passkey"), cache)
         spec["model"] = None                       # let the weights go before the next model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
