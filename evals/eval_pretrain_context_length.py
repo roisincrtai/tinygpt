@@ -11,7 +11,7 @@ and does it still work past the length it was trained at?
     outputs/eval/pretrain_context_generalization.json
     cache/evals/eval_context_length/<model>.json                      # measured points, for resume
 
-MEMORY IS BUDGETED, NOT HOPED FOR. --vram_budget (20 GiB) is what the whole thing may occupy:
+MEMORY IS BUDGETED, NOT HOPED FOR. --max_vram (20 GiB) is what the whole thing may occupy:
 weights, the KV cache, and the pass in flight. The sequence goes through the cache in chunks,
 and the CHUNK IS SOLVED FOR THE BUDGET AT EACH LENGTH -- smaller at 32k than at 512, because by
 then the cache has taken the room. A length whose cache ALONE exceeds the budget is reported
@@ -279,7 +279,7 @@ def spec_zetagpt(args, device, dtype, log):
         # MAX_POS = 0 MEANS "NO ARCHITECTURAL LIMIT", which is the claim under test and not a
         # missing value: there is no position table to run out of and no rotary base to
         # extrapolate, so the only ceiling is the memory of the machine.
-        "max_pos": 0, "train_len": args.base or int(cfg.get("block_size", 512)),
+        "max_pos": 0, "train_len": int(cfg.get("block_size", 512)),
         "step": ck.get("step"), "total": ck.get("total"),
         "checkpoint": os.path.relpath(path, config.ROOT),
         "positional": "none (state space recurrence)",
@@ -442,8 +442,8 @@ def spec_hf(key, repo, device, dtype, log, args):
         # NOTHING IS REFUSED FOR ITS LENGTH. A learned table is stretched by `ensure` when a
         # longer sequence arrives and a rotary model needs nothing, so the only things that can
         # end a curve are MEMORY and the CORPUS -- both of which are facts about the run rather
-        # than limits this script imposed. --no-extend_positions puts the wall back, for a run
-        # that wants to see where a table would have stopped.
+        # than limits this script imposed. There is no switch to put the wall back: refusing a
+        # length would be measuring this script rather than the model.
         #
         # TRAIN_LEN IS THE NATIVE WINDOW AND STAYS THERE. Stretching a table does not train a
         # model; reporting "trained at 32,768" of a model trained at 2,048 would put the
@@ -815,12 +815,12 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
             # same way at 512; drawing a curve that stops here would say the model cannot
             # handle long contexts, which is not what was measured. Nothing is recorded.
             log(f"[context] {spec['key']:<10} curve  SKIPPED: the model does not fit "
-                f"{args.vram_budget:g} GiB at any length -- raise --vram_budget or use "
+                f"{args.max_vram:g} GiB at any length -- raise --max_vram or use "
                 f"--dtype bf16")
             break
         if chunk <= 0:
             log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   the KV cache for this "
-                f"LENGTH exceeds {args.vram_budget:g} GiB -- a limit of the length, not of "
+                f"LENGTH exceeds {args.max_vram:g} GiB -- a limit of the length, not of "
                 f"the chunk")
             live()
             break
@@ -1382,7 +1382,7 @@ def cache_signature(spec, args, corpus):
     went for the copy and passkey grids.
 
     NOR IS ANYTHING THAT ONLY AFFECTS HOW THE NUMBER IS COMPUTED. --chunk_tokens and
-    --vram_budget decide how much is resident during a forward pass; they do not change the
+    --max_vram decide how much is resident during a forward pass; they do not change the
     logits, so a cache must survive a change to either. Wiping hours of measurement because the
     memory budget moved is exactly the failure this cache exists to prevent.
 
@@ -1467,75 +1467,70 @@ def summarise(res, log):
 
 
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# THE SETTINGS. NOT ARGUMENTS.
+#
+# There are two flags: --checkpoint and --no-resume. Everything else that governs this
+# benchmark is a CONSTANT, here, where it is read once and cannot be varied per invocation.
+#
+# A knob is a promise that a number is a choice, and every one of these is not: the context
+# lengths are what the sweep IS, the target span and the document count are what makes two runs
+# comparable, the chunk and the budget are how the arithmetic is made to fit and change no
+# result. Exposing them invites a figure produced under settings nobody recorded, which is the
+# one thing a benchmark must never allow -- and it lets the cache's signature drift for reasons
+# that have nothing to do with the models.
+# --------------------------------------------------------------------------- #
+CORPUS_DIR = config.dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")
+# Its held-out split, and no other corpus: this is the only downloaded corpus that holds
+# anything back, and scoring a model on text it was trained on measures memorisation.
+
+# CONTEXT LENGTHS ARE POWERS OF TWO IN TOKENS, so every model is measured at the same x and the
+# doubling is legible on a log axis.
+CONTEXT_LENGTHS = [512, 1024, 2048, 4096, 8192, 16384, 32768]
+COPY_DISTANCES = [16, 64, 256, 1024, 4096, 16384]
+PASSKEY_LENGTHS = [64, 256, 1024, 4096, 16384]
+PASSKEY_DEPTHS = [0.1, 0.5, 0.9]
+
+DOCUMENTS = 8              # averaged per context length
+TARGET_CHARS = 2000        # the fixed span every context length is scored on
+TRIALS = 4                 # repeats per synthetic point
+COPY_WORDS = 48            # length of the copied passage
+CHUNK_TOKENS = 512         # upper bound on tokens per forward pass; the chunk is planned
+DTYPE = "fp32"             # the eval reports likelihoods; nothing here is trained
+SEED = 0
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="does a pretrained model use, and generalise, a long context")
     p.add_argument("--checkpoint", default=os.path.join(
-        config.CHECKPOINT_DIR, "pretrain", "checkpoint_zetagpt-s_ssm_pretrain.pt"))
-    p.add_argument("--only", action="append",
-                   choices=["zetagpt"] + list(BASELINES),
-                   help="evaluate just this model; repeatable. Default: all four")
-    # WIKITEXT-103's VALIDATION SPLIT BY DEFAULT, and not the pretraining corpus, because it is
-    # the only downloaded corpus that HOLDS ANYTHING OUT. Scoring a model on its own training
-    # text measures memorisation; that a held-out set comes from a different distribution than
-    # FineWeb-Edu is a feature here rather than a flaw, since the claim under test is about
-    # length rather than about domain.
-    p.add_argument("--data_dir",
-                   default=config.dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
-                   help="corpus for probe 1; only its HELD-OUT files are read "
-                        "(validation/test/eval by name) and a corpus with none is refused. "
-                        "Nothing is concatenated, so short documents cap the sweep and say so")
-    p.add_argument("--documents", type=int, default=8, help="documents averaged in probe 1")
-    p.add_argument("--target_chars", type=int, default=2000,
-                   help="the fixed target span every context length is scored on")
-    p.add_argument("--chunk_tokens", type=int, default=512,
-                   help="UPPER BOUND on tokens per forward pass; the actual chunk is planned "
-                        "per context length to fit --vram_budget, and is smaller at 32k than "
-                        "at 512 because the KV cache has taken the room")
-    # FORCE A LEARNED TABLE PAST ITS ROWS rather than stopping the curve there. 0 refuses, as
-    # before; a number stretches the table to that many rows by interpolation and the model is
-    # relabelled in the figure, because it is no longer the published one. The comparison this
-    # buys is the interesting one: ZetaGPT needs no such operation at any length.
-    p.add_argument("--extend_positions", dest="extend_positions", action="store_true",
-                   default=True,
-                   help="grow a learned position table to whatever length is asked for, so no "
-                        "model is refused for its own window (default)")
-    p.add_argument("--no-extend_positions", "--no_extend_positions", dest="extend_positions",
-                   action="store_false",
-                   help="leave learned tables alone and let the curve stop at the wall")
-    p.add_argument("--vram_budget", type=float, default=20.0, metavar="GiB",
-                   help="what the whole thing may occupy: weights + KV cache + the pass in "
-                        "flight. The chunk is solved for this, and a length whose CACHE ALONE "
-                        "exceeds it is reported unreachable before anything is allocated "
-                        "(default: 20)")
-    p.add_argument("--trials", type=int, default=4, help="repeats per synthetic point")
-    p.add_argument("--copy_words", type=int, default=48, help="length of the copied passage")
-    p.add_argument("--base", type=int, default=0, help="ZetaGPT's training length; 0 = the "
-                                                       "checkpoint's own block_size")
-    p.add_argument("--gpu", default="auto")
-    p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16", "fp16"])
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out", default=OUT_PDF)
-    p.add_argument("--json", default=OUT_JSON)
-    p.add_argument("--plot_only", action="store_true", help="redraw from the saved json")
-    # RESUME IS THE DEFAULT, because this sweep ends in an allocation failure by design and is
-    # hours long: the normal case is a second run, and the normal thing for it to do is to
-    # continue. --no-resume is how a measurement is repeated from nothing.
-    p.add_argument("--resume", dest="resume", action="store_true", default=True,
-                   help=f"reuse points already measured, from {os.path.relpath(CACHE_DIR, config.ROOT)}/ (default)")
+        config.CHECKPOINT_DIR, "pretrain", "checkpoint_zetagpt-s_ssm_pretrain.pt"),
+        help="the ZetaGPT checkpoint to measure")
+    # RESUME IS THE DEFAULT, because this sweep is hours long and the normal case is a second
+    # run. --no-resume re-measures every point; nothing on disk is deleted either way.
     p.add_argument("--no-resume", "--no_resume", dest="resume", action="store_false",
-                   help="measure every point again, ignoring the cache")
+                   default=True,
+                   help=f"measure every point again instead of reusing "
+                        f"{os.path.relpath(CACHE_DIR, config.ROOT)}/")
+    p.add_argument("--gpu", default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    p.add_argument("--max_vram", type=float, default=20.0, metavar="GiB",
+                   help="what the whole thing may occupy: weights + KV cache + the pass in "
+                        "flight. The chunk per forward pass is solved for this, and a length "
+                        "whose KV CACHE ALONE exceeds it is reported before anything is "
+                        "allocated (default: 20)")
     a = p.parse_args()
-    # CONTEXT LENGTHS ARE POWERS OF TWO IN TOKENS, so every model is measured at the same x
-    # and the doubling is legible on a log axis. 32,768 is reachable only because the sequence
-    # is fed through the KV cache in chunks (score_ids); a single pass at that length is a
-    # 19 GiB attention matrix.
-    a.context_lengths = [512, 1024, 2048, 4096, 8192, 16384, 32768]
-    a._budget_bytes = int(a.vram_budget * 2 ** 30)
+    # the settings, attached so the probes read one object
+    a.data_dir, a.documents, a.target_chars = CORPUS_DIR, DOCUMENTS, TARGET_CHARS
+    a.trials, a.copy_words, a.seed = TRIALS, COPY_WORDS, SEED
+    a.chunk_tokens, a.dtype = CHUNK_TOKENS, DTYPE
+    a.extend_positions = True         # not a flag: a length is never refused, ever
+    a.out, a.json = OUT_PDF, OUT_JSON
+    a.context_lengths = list(CONTEXT_LENGTHS)
+    a.copy_distances = list(COPY_DISTANCES)
+    a.passkey_lengths = list(PASSKEY_LENGTHS)
+    a.passkey_depths = list(PASSKEY_DEPTHS)
+    a._budget_bytes = int(a.max_vram * 2 ** 30)
     a._itemsize = {"fp32": 4, "bf16": 2, "fp16": 2}[a.dtype]
-    a.copy_distances = [16, 64, 256, 1024, 4096, 16384]
-    a.passkey_lengths = [64, 256, 1024, 4096, 16384]
-    a.passkey_depths = [0.1, 0.5, 0.9]
     return a
 
 
@@ -1543,21 +1538,12 @@ def main():
     args = parse_args()
     def log(m): print(m, flush=True)
 
-    if args.plot_only:
-        if not os.path.isfile(args.json):
-            raise SystemExit(f"--plot_only: no results at {args.json}")
-        with open(args.json, "r", encoding="utf-8") as fh:
-            res = json.load(fh)
-        summarise(res, log)
-        log(f"[context] [figure] {figure(res, args.out)}")
-        return
-
     from helpers import resolve_device
     device = resolve_device(args.gpu)
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[args.dtype]
     log(f"[context] device={device} dtype={args.dtype} seed={args.seed}")
 
-    want = list(args.only) if args.only else ["zetagpt"] + list(BASELINES)
+    want = ["zetagpt"] + list(BASELINES)
     data_dir = args.data_dir
     # WHAT IS ALREADY ON DISK, FIRST. Rows are rebuilt from the cache before a single model is
     # loaded, so the figure carries every measurement ever taken under these settings -- and a
