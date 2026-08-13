@@ -237,6 +237,83 @@ def build_from_checkpoint(sd, cfg, args, device, ck=None):
     return model, tok, args.max_len or m_cfg["block_size"]
 
 
+def summarise(model, tok, ck, cfg, path, device, max_len, args, log):
+    """The loaded model, as a table, BEFORE the first prompt.
+
+    WHAT IS ANSWERED HERE is the question every confusing chat session ends up asking: which
+    model is this, actually. A checkpoint's filename carries its configuration, but a filename
+    is not read carefully at midnight, and the two mistakes that waste an evening -- talking to
+    the pretrain checkpoint while believing it is the aligned one, and a vocabulary that does
+    not match the weights -- are both invisible in the output. They are both in this table.
+
+    EVERYTHING IS READ FROM WHAT WAS LOADED, never from default_config: the architecture comes
+    from the checkpoint's own model_cfg, the parameter counts from the built modules, the
+    vocabulary from the tokenizer that came with the weights. A summary that described the
+    configuration file rather than the object in memory would agree with itself while being
+    wrong about the model."""
+    import helpers                       # HERE, not at the top: helpers.common imports this
+    rows, cfg = [], dict(cfg or {})      # module, so a module-level import closes the cycle
+    rel = os.path.relpath(path, config.ROOT) if path else "(none: untrained)"
+    rows.append(("checkpoint", rel))
+    if path and os.path.isfile(path):
+        # BYTES, not helpers.human -- that formats COUNTS, and a 2.1 GiB file rendered as
+        # "2.15B" reads as two billion of something rather than as gigabytes.
+        b = os.path.getsize(path)
+        rows.append(("size on disk", next(f"{b / d:.2f} {u}" for u, d in
+                                          (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10),
+                                           ("B", 1)) if b >= d or d == 1)))
+    if ck:
+        step, total = ck.get("step"), ck.get("total")
+        if step is not None:
+            rows.append(("trained to", f"step {step:,}" + (f" of {total:,}" if total else "")
+                         + ("  (finished)" if ck.get("done") else "  (unfinished)")))
+        if ck.get("eval"):
+            rows.append(("recorded eval", str(ck["eval"])))
+    rows.append(("", ""))
+
+    n_par = sum(p.numel() for p in model.parameters())
+    emb = getattr(model, "tok", None)
+    n_emb = emb.weight.numel() if emb is not None and hasattr(emb, "weight") else 0
+    tied = (emb is not None and getattr(model, "head", None) is not None
+            and emb.weight is model.head.weight)
+    if cfg:
+        d, h = cfg.get("n_embd", 0), cfg.get("n_head", 0)
+        rows += [
+            ("layers", helpers.count(cfg.get("n_layer", len(getattr(model, "blocks", []))))),
+            ("heads", helpers.count(h)),
+            ("d_model", helpers.count(d)),
+            ("head dim", helpers.count(d // h if h else 0)),
+            ("ffn", f"{cfg.get('ffn_factor', 4)}x  ({d * cfg.get('ffn_factor', 4):,})"),
+            ("gated attention", "yes" if cfg.get("gated_attn", True) else "no"),
+            # THE HEADLINE OF THE WHOLE PROJECT, so it is stated rather than implied by the
+            # absence of a row: pe="ssm" is the state space module carrying order, pe="rope"
+            # the ablation that puts rotary positions back into attention.
+            ("positional encoding",
+             "NONE -- order comes from the state space module (NoPE)"
+             if cfg.get("pe", "ssm") == "ssm" else f"{cfg.get('pe')} (ablation)"),
+            ("context window", f"{cfg.get('block_size', max_len):,} tokens"),
+        ]
+    else:
+        rows.append(("architecture", f"{type(model).__name__} (no model_cfg in the checkpoint)"))
+    rows.append(("", ""))
+    rows += [
+        ("parameters", f"{helpers.human(n_par)}  ({n_par:,})"),
+        ("  embedding", f"{helpers.human(n_emb)}" + ("  (tied to the head)" if tied else "")),
+        ("  everything else", helpers.human(n_par - n_emb)),
+        ("vocabulary", helpers.count(len(tok)) if tok is not None else "?"),
+        ("tokenizer", "from the checkpoint" if (ck or {}).get("bpe")
+                      else f"fallback: {os.path.relpath(config.BPE_PATH, config.ROOT)}"),
+        ("", ""),
+        ("device", str(device)),
+        ("dtype", str(next(model.parameters()).dtype).replace("torch.", "")),
+        ("sampling", f"temperature {args.temperature}, top_k {args.top_k or 'off'}, "
+                     f"top_p {args.top_p}"),
+        ("reply length", f"unbounded -- stops at <|endoftext|> or at the {max_len:,}-token "
+                         f"window"),
+    ]
+    helpers.table("loaded model", rows, out=log)
+
+
 def decode(tok, ids):
     if hasattr(tok, "decode"):                    # BPE / HF tokenizer
         return tok.decode(ids, skip_special_tokens=True)
@@ -418,10 +495,12 @@ def main():
         history.append((text, answer))
         return answer
 
-    C.info(f"[chat] ckpt={args.checkpoint or '(base)'}  device={device}  template={tmpl}  "
-           f"(temp={args.temperature} top_k={args.top_k} top_p={args.top_p})")
-    C.info(f"[chat] window {max_len:,} tokens; a reply stops at <|endoftext|> or at the window, "
-           f"and nowhere else")
+    print()
+    summarise(model, tok, ck, cfg, args.checkpoint, device, max_len, args,
+              log=lambda m: print(f"{C.INFO}{m}{C.OFF}", flush=True))
+    C.info(f"[chat] prompt template: {tmpl}"
+           + ("   (\\n\\nHuman: ... \\n\\nAssistant: -- what stage 6 trains on)"
+              if tmpl == "hh" else ""))
     if args.prompt:
         print(f"\n{C.YOU}You:   {args.prompt}{C.OFF}", flush=True)
         reply(args.prompt)                     # prints itself, token by token
