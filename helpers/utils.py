@@ -694,7 +694,8 @@ def fp32_state(model):
             for k, v in model.state_dict().items()}
 
 
-def save_ckpt(ckdir, stage, model, opt, step, total, gens, evald=None, extra=None):
+def save_ckpt(ckdir, stage, model, opt, step, total, gens, evald=None, extra=None,
+              ctx_window=0):
     os.makedirs(stage_dir(ckdir, stage), exist_ok=True)
     _atomic_torch_save({"model": fp32_state(model),
                 # THE ARCHITECTURE TRAVELS WITH THE WEIGHTS. Reading it back beats trusting
@@ -707,6 +708,14 @@ def save_ckpt(ckdir, stage, model, opt, step, total, gens, evald=None, extra=Non
                 "bpe": _bpe_blob(),
                 "opt": opt.state_dict() if opt is not None else None,
                 "step": step, "total": total, "done": step >= total,
+                # THE CONTEXT WINDOW THIS STEP WAS TRAINED AT. The schedule divides the budget
+                # evenly among its windows, so its boundaries move when the budget does, and a
+                # resumed run could otherwise land in a SHORTER window than the one it had
+                # reached -- un-learning a context that cost tens of thousands of steps to
+                # acquire. Recorded here, it becomes a floor the schedule may never go below
+                # (helpers.lm.context_floor / ratchet). 0 for the stages that have no
+                # schedule, which is what those stages pass and what old checkpoints lack.
+                "ctx_window": int(ctx_window or 0),
                 "gens": [g.get_state() for g in gens], "eval": evald,
                 # The explicit generators cover data order and corruption, but DROPOUT draws
                 # from the global RNG, so a resumed run saw a different dropout stream from an

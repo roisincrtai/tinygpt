@@ -53,6 +53,18 @@ through — `zetagpt-m` is `[1024, 2048, 4096, 8192, 16384]` — and each window
 step budget, shortest first. The batch is sized at the longest window and scales up as the
 window shortens, so tokens per step stay constant across the whole run.
 
+**The window only ever goes up.** Each checkpoint records the window it was written at, and on
+resume that becomes a floor the schedule may not fall below. This matters because the segment
+boundaries are a function of the budget: a run 82,875 steps into 168,317 is training at 2,048,
+and simply raising the budget to 400,000 moves the boundaries out far enough that the same step
+falls back into the 1,024 segment. Without the floor the model would be asked to give up a
+context it spent tens of thousands of steps acquiring, and a longer budget — asked for to get
+*more* long-context training — would buy less of it. With the floor, the segments that would
+have gone backwards are lifted to the window already reached, with their batch rescaled to hold
+tokens per step constant, and the run says so in its log. Checkpoints written before the field
+existed are covered too: the budget they were saved under is in the checkpoint, and the
+schedule is a pure function of it, so the window at that step is recoverable exactly.
+
 ### Mix-Precision Training
 
 **bfloat16 activations, fp32 weights and fp32 optimiser state.** Every stage, on by default

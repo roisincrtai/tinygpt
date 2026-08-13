@@ -325,7 +325,16 @@ def spec_zetagpt(args, device, dtype, log):
         # MAX_POS = 0 MEANS "NO ARCHITECTURAL LIMIT", which is the claim under test and not a
         # missing value: there is no position table to run out of and no rotary base to
         # extrapolate, so the only ceiling is the memory of the machine.
-        "max_pos": 0, "train_len": args.base or int(cfg.get("block_size", 512)),
+        # THE WINDOW IT HAS ACTUALLY TRAINED AT, which is what the circle on the curve means.
+        # `block_size` is the LONGEST window of the scheme's schedule -- where the run will
+        # end, not where it is -- so a checkpoint 82,875 steps into a schedule that is still
+        # at 2,048 was being drawn as though it had trained at 8,192, and every point beyond
+        # 2,048 was being counted as inside the training window when it is extrapolation.
+        # save_ckpt records the scheduled window now; older checkpoints have no such field and
+        # fall back to what was assumed before.
+        "max_pos": 0,
+        "train_len": (args.base or int(ck.get("ctx_window", 0) or 0)
+                      or int(cfg.get("block_size", 512))),
         "step": ck.get("step"), "total": ck.get("total"),
         "checkpoint": os.path.relpath(path, config.ROOT),
         # nope/ssa: no positional encoding, and the state-space-attention block that is why

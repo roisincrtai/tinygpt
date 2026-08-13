@@ -100,8 +100,12 @@ def lm_loss(model, ids, attn, rmask, chunk=0):
     return (-(lp * rm).sum(-1) / denom).mean(), correct, rm.sum().clamp(min=1).float()
 
 
-def context_schedule(args, steps, docs, log, stage):
-    """The (start, stop, context, batch) segments this run will train through.
+def context_plan_for(args, steps, docs):
+    """The (start, stop, context, batch, micro_batch) segments for a budget of `steps`.
+
+    A PURE FUNCTION OF THE BUDGET, and silent, so it can be asked what the schedule WOULD have
+    been for some other budget -- which is how a resumed run recovers the window it was last
+    training at when the budget has since changed. `context_schedule` is this plus the log line.
 
     ONE WINDOW UNLESS ALL THREE CONDITIONS HOLD: the corpus is a packed stream (a list of
     records cannot be re-cut to an arbitrary length), the scheme declares a schedule, and the
@@ -126,13 +130,101 @@ def context_schedule(args, steps, docs, log, stage):
     if len(wins) < 2:
         return one
     # The batch in force belongs to the LONGEST window, which is what it was sized against.
-    plan = config.context_plan(wins, steps, int(args.batch),
+    return config.context_plan(wins, steps, int(args.batch),
                                config.SCHEME_MICRO_TOKENS.get(scheme, 0)
                                if not getattr(args, "micro_batch", 0) else 0)
-    log(f"{stage}: context schedule {' -> '.join(f'{w:,}' for w in wins)} "
-        f"over {steps:,} steps, {steps // len(wins):,} steps each, "
-        f"batch {plan[0][3]} -> {plan[-1][3]} so tokens per step stay constant")
+
+
+def context_schedule(args, steps, docs, log, stage):
+    """`context_plan_for`, announced."""
+    plan = context_plan_for(args, steps, docs)
+    if len(plan) > 1:
+        log(f"{stage}: context schedule "
+            f"{' -> '.join(f'{w:,}' for _, _, w, _, _ in plan)} "
+            f"over {steps:,} steps, {steps // len(plan):,} steps each, "
+            f"batch {plan[0][3]} -> {plan[-1][3]} so tokens per step stay constant")
     return plan
+
+
+def context_floor(args, docs, ck, start):
+    """THE WINDOW THE RUN HAS ALREADY REACHED, which the schedule may never fall below.
+
+    The schedule divides the budget evenly among its windows, so the boundaries are a function
+    of the budget -- and RAISING the budget pushes them later. A run 82,875 steps into a
+    168,317-step budget is at 8,192; extend that budget to 250,000 and step 82,875 falls back
+    into the 2,048 segment. The model would then be asked to un-learn a context it has spent
+    tens of thousands of steps acquiring, its state-space memory horizon and its attention
+    both retuned downwards, and the extension -- meant to buy MORE long-context training --
+    would cost some of what was already bought. Hence the ratchet: the window only ever goes
+    up.
+
+    Two sources, and the larger wins:
+
+      * `ctx_window` in the checkpoint, which save_ckpt now records at every save. This is the
+        authoritative one: it is what the run was actually training at.
+      * the window the OLD budget's schedule puts at this step -- `ck["total"]` is the budget
+        the checkpoint was written under, and the plan is a pure function of it. This
+        reconstructs the floor exactly for checkpoints written before `ctx_window` existed,
+        so a run already in flight is protected without having to be restarted to gain the
+        protection.
+    """
+    if not ck:
+        return 0
+    floor = int(ck.get("ctx_window", 0) or 0)
+    old_total = int(ck.get("total", 0) or 0)
+    if old_total > 0:
+        old = context_plan_for(args, old_total, docs)
+        for a, b, w, _, _ in old:
+            if a <= start < b:
+                floor = max(floor, int(w))
+                break
+    return floor
+
+
+def ratchet(plan, seg, start, floor, args, log, stage):
+    """`plan` with every segment from `seg` onwards raised to at least `floor`.
+
+    The batch and micro-batch are recomputed by exactly the rules context_plan uses -- batch x
+    context constant, so a step stays the same unit of work, and micro_tokens // context
+    sequences per forward pass -- rather than being scaled out of the numbers already in the
+    plan, which would compound the rounding those numbers already carry.
+
+    Segments already at or above the floor are left untouched, so when nothing has changed
+    this returns the plan unaltered and a resumed run is the run it was."""
+    import default_config as config
+    if floor <= 0 or seg >= len(plan):
+        return plan
+    scheme = getattr(args, "model_scheme", "") or config.PRETRAIN["model_scheme"]
+    longest = max(w for _, _, w, _, _ in plan)
+    micro_tokens = (config.SCHEME_MICRO_TOKENS.get(scheme, 0)
+                    if not getattr(args, "micro_batch", 0) else 0)
+    out, lifted = list(plan), []
+    for i in range(seg, len(plan)):
+        a, b, w, _, _ = plan[i]
+        if w >= floor:
+            continue
+        batch = max(1, round(int(args.batch) * longest / int(floor)))
+        micro = min(batch, max(1, int(micro_tokens) // int(floor))) if micro_tokens else 0
+        out[i] = (a, b, int(floor), batch, micro)
+        # reported from the RESUME POINT, not from the segment's own start: the run begins
+        # inside the first lifted segment, and steps before it are finished and unaffected
+        lifted.append((w, max(a, int(start)), b))
+    if lifted:
+        # NEVER SILENTLY. This changes what the run trains on, so it is stated in full: what
+        # was in the plan, what it was raised to, and over which steps.
+        log(f"{stage}: CONTEXT RATCHET -- this run has already reached {floor:,} tokens, so "
+            f"{len(lifted)} segment(s) of the recomputed schedule that would have gone BACK "
+            f"below it were raised to {floor:,}:")
+        for w, a, b in lifted:
+            log(f"{stage}:   steps {a:,}-{b - 1:,}: {w:,} -> {floor:,}")
+        log(f"{stage}: the window is monotone; a longer budget buys more training at the "
+            f"context reached, never a return to a shorter one.")
+    else:
+        # Said even when it does nothing, because "the ratchet is armed and the schedule was
+        # already sound" and "the ratchet never ran" look identical in a log that stays quiet.
+        log(f"{stage}: context ratchet floor {floor:,} tokens (reached already); the "
+            f"remaining schedule is at or above it, unchanged")
+    return out
 
 
 def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, lr=None,
@@ -216,6 +308,12 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
     seg = 0
     while seg + 1 < len(plan) and start >= plan[seg][1]:
         seg += 1
+    # THE RATCHET. The segment boundaries move when the budget does, so a resumed run can land
+    # in a segment SHORTER than the one it was training in. It never may: the window is
+    # monotone across the whole life of a checkpoint, and a larger budget buys more training at
+    # the context already reached rather than a return to a smaller one. Applied after `seg` is
+    # found, so the boundaries -- and therefore which segment the run is in -- are untouched.
+    plan = ratchet(plan, seg, start, context_floor(args, docs, ck, start), args, log, stage)
     # CHUNKED LOSS. 0 evaluates the vocabulary projection over the whole sequence at once, which
     # is what every stage did before long contexts existed and is still right at 512. Above that
     # the three vocabulary-sized tensors dominate the step, so the projection is sliced.
@@ -295,7 +393,10 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
             bar.set_postfix(loss=f"{loss.item():.3f}", ppl=f"{loss.exp().item():.1f}",
                             acc=f"{acc:.3f}", gnorm=f"{float(gnorm):.2f}")
         if (step + 1) % args.checkpoint_every_steps == 0:
-            save_ckpt(ckdir, stage, model, opt, step + 1, steps, [g])
+            # THE WINDOW GOES IN THE CHECKPOINT. It is the one thing about the schedule that
+            # cannot be recovered from the weights, and without it a resume has to guess --
+            # see context_floor.
+            save_ckpt(ckdir, stage, model, opt, step + 1, steps, [g], ctx_window=cur_ctx)
             save_hist(ckdir, stage, hist)
         # --plot_every_steps is a TRAINER flag, so it governs every stage that trains, this one
         # included: same flag, same cadence, same figure writer as the preference stages.
@@ -308,7 +409,9 @@ def train(model, enc, docs, ckdir, args, log, monitor, stage=STAGE, steps=None, 
         if preview and every > 0 and (step + 1) % every == 0:
             preview(model, stage, step + 1)
     model.eval()
-    save_ckpt(ckdir, stage, model, opt, steps, steps, [g])
+    # the LAST segment's window: what the finished model was trained at, and the floor any
+    # later extension of this run must respect
+    save_ckpt(ckdir, stage, model, opt, steps, steps, [g], ctx_window=plan[-1][2])
     save_hist(ckdir, stage, hist)
     last = hist[-1] if hist else {}
     log(f"{stage} done: loss={last.get('loss', float('nan')):.4f} "
