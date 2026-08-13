@@ -1157,10 +1157,27 @@ class Cache:
         old_sig, pts = self._read()
         if old_sig is None:
             return
-        if old_sig != signature:
-            differ = [k for k in signature if old_sig.get(k) != signature.get(k)]
-            log(f"[context] {key}: cache discarded, {', '.join(differ) or 'signature'} changed")
+        # COMPARED ON THE KEYS THE CURRENT SIGNATURE DECLARES, and on nothing else. A stored
+        # signature that also carries keys this version no longer uses is still a match: those
+        # keys were dropped BECAUSE they were found not to affect a measurement, so insisting
+        # they be absent would throw away hours of correct results to enforce a detail of the
+        # file format.
+        #
+        # THIS IS NOT HYPOTHETICAL. `name` was removed from the signature precisely so that
+        # relabelling a model would stop discarding its points -- and a whole-dict comparison
+        # then discarded every cache on disk for having the key the fix had just removed. The
+        # narrowing was right and the comparison was wrong.
+        #
+        # A key the current signature has and the file LACKS is still a discard: its old value
+        # is unknown, so the points cannot be vouched for.
+        differ = [k for k, v in signature.items() if old_sig.get(k) != v]
+        if differ:
+            log(f"[context] {key}: cache discarded, {', '.join(differ)} changed")
             return
+        extra = [k for k in old_sig if k not in signature]
+        if extra:
+            log(f"[context] {key}: cache written by an older version "
+                f"({', '.join(sorted(extra))} no longer part of the key) -- kept")
         self.points = pts
         if pts:
             log(f"[context] {key}: resuming, {len(pts):,} points already measured")
