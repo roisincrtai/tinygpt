@@ -221,42 +221,38 @@ MODEL.n_layer=6"` any other architectural value.
 
 ## Shannon's limit entropy
 
-Shannon's 1951 estimate of the entropy of written English was **0.6–1.3 bits/char**.
+Shannon's 1951 estimate of the entropy of written English was 0.6–1.3 bits/char, which in the
+unit this project reports is **0.42–0.90 nats/char**.
 
-A training loss is in nats per *token*, so it reaches that scale in two steps — divide by
-`ln 2` for bits, then by how many characters a token spells:
-
-```
-bits/token = loss / ln 2
-bits/char  = bits/token / (characters per token)
-```
-
-At a loss of 2.3, with a byte-level BPE averaging 4.2 characters per token on English:
+A training loss is already in **nats per token** — no conversion at all, it is the loss. To
+reach the scale Shannon measured, divide by how many bytes a token spells:
 
 ```
-2.3 / 0.6931  = 3.318 bits/token
-3.318 / 4.2   = 0.79  bits/char
+nats/token = the loss itself
+nats/byte  = loss / (bytes per token)
 ```
 
-Characters per token is the only assumption, and it is measurable rather than assumed: divide
-the bytes of the validation split by the tokens it encodes to.
-
-**This project reports nats per byte, not bits.** The loss is already in nats, so the byte
-count is the whole conversion and `ln 2` never enters:
+At a loss of 2.3, with a byte-level BPE averaging 4.2 bytes per token on English:
 
 ```
-nats/byte = loss / (bytes per token)
+2.3 nats/token
+2.3 / 4.2 = 0.55 nats/byte
 ```
 
-Like bits per byte it is comparable across models with different tokenizers — unlike
-perplexity, which is per token and therefore per vocabulary — and it is in the unit the
-objective is written in, so a figure and a training log never disagree. Shannon's 0.6–1.3
-bits/char is quoted above in his own unit; multiply by `ln 2` for nats.
+— inside Shannon's range, which for ASCII English is the same range in nats/char, one byte
+being one character.
+
+Bytes per token is the only assumption, and it is measurable rather than assumed: divide the
+bytes of the validation split by the tokens it encodes to. **Nats per byte is the one figure
+comparable across models with different tokenizers** — unlike perplexity, which is per token
+and therefore per vocabulary — and it is in the unit the objective is written in, so a figure
+and a training log never disagree. Nothing here is reported in bits; multiply by 1/`ln 2` if
+you need them.
 
 ## Niche among compact language models
 
 Every row here that exists on the Hub is **measured**, not cited —
-`python evals/eval_pretrain_context_length.py` scores all of them on the same targets, in bits
+`python evals/eval_pretrain_context_length.py` scores all of them on the same targets, in nats
 per byte, and draws them on one axis. (*Baby GPT* is nanoGPT's character-level demo, trained
 per-reader rather than published, so there is nothing to fetch.)
 

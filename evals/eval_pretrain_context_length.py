@@ -874,16 +874,14 @@ def figure(res, out_path):
     # ---- row 1: four readings of the same sweep, against context length ---------------- #
     # DOTTED VERTICALS ARE TRAINING LENGTHS. Everything to the right of a model's own line is
     # extrapolation, which is the whole question, and it has to be visible without arithmetic.
-    _curve_panel(ax[0], models, "npb", "context length (tokens)",
-                 "nats per byte on the fixed target",
-                 "1. nats/byte -- the cross-model unit", logy=True)
+    _curve_panel(ax[0], models, "npb", "context length (tokens)", "nats / byte",
+                 "average encoding length per byte (nats / byte)", logy=True)
     _curve_panel(ax[1], models, "ppl", "context length (tokens)", "perplexity",
-                 "2. perplexity (per tokenizer: shape, not level)", logy=True, marker="s-")
+                 "perplexity", logy=True, marker="s-")
     _curve_panel(ax[2], models, "nats_per_token", "context length (tokens)", "nats / token",
-                 "3. nats per token", marker="d-")
-    _curve_panel(ax[3], models, "acc", "context length (tokens)",
-                 "next-token accuracy on the target",
-                 "4. token accuracy", marker="v-")
+                 "average encoding length per token", marker="d-")
+    _curve_panel(ax[3], models, "acc", "context length (tokens)", "accuracy",
+                 "next-token prediction accuracy", marker="v-")
 
     # ---- row 2: the two synthetic probes ----------------------------------------------- #
     for i, m in enumerate(models):
@@ -896,8 +894,8 @@ def figure(res, out_path):
     ax[4].axhline(0.0, color="k", lw=0.8, alpha=0.4)
     ax[4].set_xscale("log", base=2)
     ax[4].set_xlabel("filler words between the two copies")
-    ax[4].set_ylabel("nats/byte saved on the second copy")
-    ax[4].set_title("5. can it reach back?", loc="left", fontsize=9.5)
+    ax[4].set_ylabel("nats / byte saved on the second copy")
+    ax[4].set_title("encoding length saved by a repeated passage", loc="left", fontsize=9.5)
     if ax[4].get_legend_handles_labels()[0]:
         ax[4].legend(fontsize=5.6, ncol=2, loc="best")
 
@@ -917,8 +915,8 @@ def figure(res, out_path):
                transform=ax[5].get_yaxis_transform())
     ax[5].set_xscale("log", base=2)
     ax[5].set_xlabel("filler words around the key")
-    ax[5].set_ylabel("nats to name the key  (lower is better)")
-    ax[5].set_title("6. can it retrieve a fact?", loc="left", fontsize=9.5)
+    ax[5].set_ylabel("nats to name the key")
+    ax[5].set_title("encoding length of a buried key", loc="left", fontsize=9.5)
     if ax[5].get_legend_handles_labels()[0]:
         ax[5].legend(fontsize=5.6, ncol=2, loc="best")
 
