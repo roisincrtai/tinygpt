@@ -105,6 +105,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import argparse
+import gc
 import json
 import math
 import random
@@ -1943,16 +1944,16 @@ def main():
     # model that cannot be loaded at all keeps the curve it earned earlier.
     seeded = cached_models(args, data_dir, log)
 
-    specs = []
-    for key in want:
-        s = (spec_zetagpt(args, device, dtype, log) if key == "zetagpt"
-             else spec_hf(key, BASELINES[key], device, dtype, log, args))
-        if s is not None:
-            specs.append(s)
-    if not specs and not seeded:
-        raise SystemExit("[context] no model could be loaded and nothing is cached")
-    if not specs:
-        log("[context] no model could be loaded; redrawing what is cached and stopping")
+    # ONE MODEL IS RESIDENT AT A TIME. This used to build every spec here, before measuring
+    # any of them, so eleven models -- TinyLlama's 1.1B among them -- sat in memory at once
+    # while the first was being measured, for no reason: the probes take one model, finish
+    # with it, and never look at it again. The loop below loads each as it reaches it.
+    #
+    # Nothing about the ORDER or the results changes; what changes is the peak, from the sum
+    # of every model's weights to the largest single one.
+    def load(key):
+        return (spec_zetagpt(args, device, dtype, log) if key == "zetagpt"
+                else spec_hf(key, BASELINES[key], device, dtype, log, args))
     # a token is ~4 characters, so the longest context wants roughly 4x its tokens in text
     docs = long_documents(data_dir, max(args.context_lengths) * 4 + args.target_chars, log)
 
@@ -1970,8 +1971,13 @@ def main():
     live("redrawn from the cache")             # the pdf is correct before anything is measured
     log(f"[context] writing {os.path.relpath(args.out, config.ROOT)} after every point")
 
-    for i, spec in enumerate(specs, 1):
-        log(f"\n[context] === {spec['name']}  ({i}/{len(specs)}) ===")
+    loaded = 0
+    for i, key in enumerate(want, 1):
+        spec = load(key)                       # loaded HERE, measured, and dropped below
+        if spec is None:
+            continue                           # already said why; the cached row still draws
+        loaded += 1
+        log(f"\n[context] === {spec['name']}  ({i}/{len(want)}) ===")
         m = {k: spec[k] for k in ("key", "name", "params", "train_len", "max_pos",
                                   "positional", "checkpoint", "step", "total")}
         m["name"] = label_for(m["key"], m["name"], m.get("params"),
@@ -1982,7 +1988,7 @@ def main():
             res["models"].append(m)
         else:
             res["models"][at] = m
-        tag = f"{spec['key']} ({i}/{len(specs)})"
+        tag = f"{spec['key']} ({i}/{len(want)})"
         cache = Cache(spec["key"], cache_signature(spec, args, data_dir), log,
                       enabled=args.resume)
         # WHAT THE FIGURE NEEDS TO REDRAW THIS ROW WITHOUT THE MODEL, stored beside its points.
@@ -1999,11 +2005,25 @@ def main():
         probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"), cache, m["copy"])
         probe_passkey(spec, args, device, log, lambda: live(f"{tag}: passkey"), cache,
                       m["passkey"])
-        spec["model"] = None                       # let the weights go before the next model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # AND NOW ACTUALLY LET IT GO. `spec["model"] = None` did not: forward_chunk,
+        # hidden_chunk and ensure are closures over the local `model` in spec_zetagpt /
+        # spec_hf, and a closure holds its cell however the dict is edited. The weights stayed
+        # alive behind those three lambdas for the whole run. Dropping the callables drops the
+        # cells, and the collection is forced rather than left to a later allocation -- CUDA
+        # memory is not returned by empty_cache() until Python has released the tensors, so
+        # the order of these three lines is the point of them.
+        spec["model"] = None
+        for k in ("forward_chunk", "hidden_chunk", "ensure", "new_state", "encode"):
+            spec.pop(k, None)
+        del spec
+        gc.collect()
+        empty_cache()
         live(f"{tag} complete")
 
+    if not loaded and not seeded:
+        raise SystemExit("[context] no model could be loaded and nothing is cached")
+    if not loaded:
+        log("[context] no model could be loaded; the figure is what was already cached")
     live("complete")
     log(f"\n[context] [json] {os.path.relpath(args.json, config.ROOT)}")
     summarise(res, log)
