@@ -11,9 +11,13 @@ and does it still work past the length it was trained at?
     outputs/eval/pretrain_context_generalization.json
     cache/evals/eval_context_length/<model>.json                      # measured points, for resume
 
-IT RESUMES, and it is built to. Attention materialises a (heads x T x T) matrix, so this sweep
-is GUARANTEED to end in an allocation failure at some length -- that is what the last point of
-each curve IS, not a fault -- and reaching it takes hours. Every measured point is written to
+MEMORY IS BUDGETED, NOT HOPED FOR. --vram_budget (20 GiB) is what the whole thing may occupy:
+weights, the KV cache, and the pass in flight. The sequence goes through the cache in chunks,
+and the CHUNK IS SOLVED FOR THE BUDGET AT EACH LENGTH -- smaller at 64k than at 512, because by
+then the cache has taken the room. A length whose cache ALONE exceeds the budget is reported
+unreachable before anything is allocated, rather than after the allocator says so.
+
+IT RESUMES, and it is built to: the sweep runs to 64k and takes hours. Every measured point is written to
 cache/evals/eval_context_length/ the moment it exists, and a second run continues from there. The
 cache key is the checkpoint's NAME and step, the corpus's NAME, the probe grids and the
 sampling settings: no path, no device, no timestamp, so two machines agree on what a cached
@@ -26,7 +30,7 @@ InfiniteBench, RULER's QA half) measures instruction tuning and reports the abse
 the absence of context. The three probes here ask only what a language model is: how surprised
 is it by these exact bytes.
 
-    1. CONTEXT CURVE     the same target span, preceded by 512, 1k, 2k ... 32k TOKENS of its
+    1. CONTEXT CURVE     the same target span, preceded by 512, 1k, 2k ... 64k TOKENS of its
                          own document. If the curve keeps falling, the model is USING the extra
                          context; if it flattens at 512 while being fed 8,192, it merely
                          ACCEPTS it. This is the whole distinction, and one number cannot make
@@ -216,6 +220,9 @@ def spec_zetagpt(args, device, dtype, log):
         # carries four tensors per layer -- attention's keys and values, and the state space
         # module's convolution window and recurrence state -- because a block is SSM ->
         # attention -> FFN and the recurrence would otherwise be re-run over the whole prefix.
+        "shape": {"n_layer": int(cfg["n_layer"]), "n_head": int(cfg["n_head"]),
+                  # no grouped-query attention here: every head keeps its own K and V
+                  "kv_per_token": 2 * int(cfg["n_embd"]), "vocab": len(tok)},
         "new_state": lambda: KVCache(len(model.blocks)),
         "forward_chunk": lambda x, st: (
             model.head(model.hidden_states(input_ids=x, cache=st)),
@@ -254,6 +261,20 @@ def spec_hf(key, repo, device, dtype, log):
         "positional": "learned absolute table" if learned else "RoPE",
         # transformers' OWN incremental path: past_key_values in, past_key_values out. Same
         # reason as above -- the attention matrix becomes (chunk x T) instead of (T x T).
+        "shape": {
+            "n_layer": int(getattr(c, "num_hidden_layers", None) or getattr(c, "n_layer", 12)),
+            "n_head": int(getattr(c, "num_attention_heads", None) or getattr(c, "n_head", 12)),
+            # GROUPED-QUERY ATTENTION MAKES THE CACHE SMALLER THAN THE HEAD COUNT SUGGESTS:
+            # Qwen2.5-0.5B has 14 query heads and 2 key/value heads, so its cache is a seventh
+            # of what num_attention_heads would imply. Reading num_key_value_heads is the
+            # difference between a usable estimate and a seven-fold overestimate.
+            "kv_per_token": 2 * int(getattr(c, "num_key_value_heads", None)
+                                    or getattr(c, "num_attention_heads", None)
+                                    or getattr(c, "n_head", 12))
+            * int((getattr(c, "hidden_size", None) or getattr(c, "n_embd", 768))
+                  // max(int(getattr(c, "num_attention_heads", None)
+                             or getattr(c, "n_head", 12)), 1)),
+            "vocab": int(getattr(c, "vocab_size", 50257))},
         "new_state": lambda: None,
         "forward_chunk": lambda x, st: (lambda o: (o.logits, o.past_key_values))(
             model(input_ids=x, past_key_values=st, use_cache=True)),
@@ -263,6 +284,47 @@ def spec_hf(key, repo, device, dtype, log):
 # --------------------------------------------------------------------------- #
 # scoring: nats over an exact span, and the bytes that span covers
 # --------------------------------------------------------------------------- #
+def plan_chunk(spec, T, budget_bytes, itemsize, cap, log=None):
+    """How many tokens may go through one forward pass, so that the whole thing fits `budget`.
+
+    THE CHUNK IS NOT A CONSTANT, because what it has to fit is not. Three things are resident
+    while a chunk is scored, and only the first two grow with the CONTEXT:
+
+        weights            n parameters x itemsize                  fixed
+        the KV cache       2 x layers x T x d_kv x itemsize         LINEAR IN T, and unavoidable
+        the chunk itself   heads x chunk x T x itemsize (scores)    linear in BOTH
+                           + chunk x vocab x 4        (logits)
+
+    So the budget left for a pass shrinks as T grows, and a chunk of 512 that is comfortable at
+    8k is eight times too large at 64k. Solving for the chunk:
+
+        chunk = (budget - weights - cache) / (2 x heads x T x itemsize + 4 x vocab)
+
+    with the 2 because the scores and their softmax are alive together. THE CACHE IS THE HARD
+    FLOOR: at 64k it is gigabytes on its own, and when it alone exceeds the budget no chunk
+    size helps -- 0 is returned and the length is reported unreachable BEFORE anything is
+    allocated, rather than after the allocator says so.
+
+    Returns 0 when the length cannot be done at all."""
+    sh = spec.get("shape") or {}
+    n_layer = sh.get("n_layer", 12)
+    n_head = sh.get("n_head", 12)
+    kv_tok = sh.get("kv_per_token", 2 * 768)
+    vocab = sh.get("vocab", 50257)
+    weights = spec.get("params", 0) * itemsize
+    cache = n_layer * T * kv_tok * itemsize
+    per_token = 2 * n_head * T * itemsize + 4 * vocab
+    room = budget_bytes - weights - cache
+    chunk = int(room // max(per_token, 1))
+    if log is not None:
+        log(f"[context] {spec['key']:<10} plan   T={T:,}  weights {weights / 2**30:.2f} + "
+            f"cache {cache / 2**30:.2f} GiB, {room / 2**30:.2f} left -> chunk "
+            f"{max(min(chunk, cap), 0) if chunk > 0 else 0}"
+            + ("  (does not fit: the cache alone exceeds the budget)" if chunk <= 0 else
+               f", pass ~{min(chunk, cap) * per_token / 2**30:.2f} GiB"))
+    return max(min(chunk, cap), 0)
+
+
 @torch.no_grad()
 def score_ids(spec, pid, sid, device, chunk, desc=""):
     """Score `sid` given `pid`, FEEDING THE SEQUENCE THROUGH THE MODEL'S KV CACHE IN CHUNKS.
@@ -282,6 +344,17 @@ def score_ids(spec, pid, sid, device, chunk, desc=""):
     T = len(pid) + len(sid)
     if spec["max_pos"] and T > spec["max_pos"]:
         return None, len(sid), 0, T, False
+    # THE CHUNK IS PLANNED FOR THIS LENGTH, not carried over from a shorter one. `chunk` may
+    # arrive as a plan already made (the context curve makes one per length and logs it) or as
+    # a cap to plan under.
+    if isinstance(chunk, tuple):
+        chunk, budget, itemsize = chunk
+    else:
+        budget, itemsize = 0, 4
+    if budget:
+        chunk = plan_chunk(spec, T, budget, itemsize, chunk)
+        if chunk <= 0:
+            return None, len(sid), 0, T, False
     ids_all = pid + sid
     n_pre = len(pid)
     state = spec["new_state"]()
@@ -495,6 +568,15 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
                 f"acc {hit['acc']:.4f}   (cached)")
             live()
             continue
+        chunk = plan_chunk(spec, L, args._budget_bytes, args._itemsize,
+                           args.chunk_tokens, log)
+        if chunk <= 0:
+            out.append({"context_length": L, "documents": 0, "ctx_tokens": L, "bpb": None,
+                        "nats_per_token": None, "ppl": None, "acc": None})
+            log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   will not fit "
+                f"{args.vram_budget:g} GiB -- the KV cache alone is larger")
+            live()
+            break
         nats = 0.0
         nbytes = n_tok = n_cor = ctx = n_ok = short = 0
         docs_bar = progress(list(enumerate(chosen, 1)),
@@ -512,7 +594,7 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
             if len(pre_ids) < room:
                 short += 1
                 continue
-            n, t, c, T, ok = score_ids(spec, pre_ids, span_ids, device, args.chunk_tokens,
+            n, t, c, T, ok = score_ids(spec, pre_ids, span_ids, device, chunk,
                                        desc=f"[context] {spec['key']} ctx {L:,} "
                                             f"doc {i_doc}/{len(chosen)}")
             if not ok:
@@ -589,9 +671,11 @@ def probe_copy(spec, args, device, log, live, cache, out):
             filler = _filler_words(rng, dist)
             tag = f"[context] {spec['key']} copy filler {dist:,} trial {trial + 1}"
             n1, b1, _, _, _, ok1 = score_span(spec, "", passage, device,
-                                              args.chunk_tokens, desc=tag + " (1st copy)")
+                                              (args.chunk_tokens, args._budget_bytes,
+                                               args._itemsize), desc=tag + " (1st copy)")
             n2, b2, _, _, _, ok2 = score_span(spec, passage + " " + filler + " ", passage,
-                                              device, args.chunk_tokens,
+                                              device, (args.chunk_tokens,
+                                              args._budget_bytes, args._itemsize),
                                               desc=tag + " (2nd copy)")
             if not (ok1 and ok2):
                 break
@@ -651,7 +735,8 @@ def probe_passkey(spec, args, device, log, live, cache, out):
                         + _filler_words(rng, total - before)
                         + " The pass key is")
                 n, b, _, _, _, ok = score_span(
-                    spec, text, f" {key}", device, args.chunk_tokens,
+                    spec, text, f" {key}", device,
+                    (args.chunk_tokens, args._budget_bytes, args._itemsize),
                     desc=f"[context] {spec['key']} key {total:,} @ {depth:.2f} "
                          f"trial {trial + 1}")
                 if not ok:
@@ -881,6 +966,7 @@ def cache_signature(spec, args, corpus):
         "trials": args.trials, "copy_words": args.copy_words,
         "seed": args.seed, "dtype": args.dtype,
         "context_lengths": list(args.context_lengths),
+        "chunk_tokens": args.chunk_tokens, "vram_budget": args.vram_budget,
         "copy_distances": list(args.copy_distances),
         "passkey_lengths": list(args.passkey_lengths),
         "passkey_depths": list(args.passkey_depths),
@@ -967,9 +1053,14 @@ def parse_args():
     p.add_argument("--target_chars", type=int, default=2000,
                    help="the fixed target span every context length is scored on")
     p.add_argument("--chunk_tokens", type=int, default=512,
-                   help="tokens per forward pass through the KV cache; attention is "
-                        "(heads x chunk x T), so this and not the context length is what "
-                        "bounds memory. Lower it if 32k still will not fit")
+                   help="UPPER BOUND on tokens per forward pass; the actual chunk is planned "
+                        "per context length to fit --vram_budget, and is smaller at 64k than "
+                        "at 512 because the KV cache has taken the room")
+    p.add_argument("--vram_budget", type=float, default=20.0, metavar="GiB",
+                   help="what the whole thing may occupy: weights + KV cache + the pass in "
+                        "flight. The chunk is solved for this, and a length whose CACHE ALONE "
+                        "exceeds it is reported unreachable before anything is allocated "
+                        "(default: 20)")
     p.add_argument("--trials", type=int, default=4, help="repeats per synthetic point")
     p.add_argument("--copy_words", type=int, default=48, help="length of the copied passage")
     p.add_argument("--base", type=int, default=0, help="ZetaGPT's training length; 0 = the "
@@ -992,7 +1083,9 @@ def parse_args():
     # and the doubling is legible on a log axis. 32,768 is reachable only because the sequence
     # is fed through the KV cache in chunks (score_ids); a single pass at that length is a
     # 19 GiB attention matrix.
-    a.context_lengths = [512, 1024, 2048, 4096, 8192, 16384, 32768]
+    a.context_lengths = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+    a._budget_bytes = int(a.vram_budget * 2 ** 30)
+    a._itemsize = {"fp32": 4, "bf16": 2, "fp16": 2}[a.dtype]
     a.copy_distances = [16, 64, 256, 1024, 4096, 16384]
     a.passkey_lengths = [64, 256, 1024, 4096, 16384]
     a.passkey_depths = [0.1, 0.5, 0.9]
