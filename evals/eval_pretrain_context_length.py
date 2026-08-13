@@ -429,6 +429,9 @@ def spec_hf(key, repo, device, dtype, log, args):
         once per doubling rather than once per point."""
         if not grows or T <= state["rows"]:
             return
+        # NO CAP. A cap is a limit this script would be imposing on an autoregressive model,
+        # which has none of its own; the table grows to the next power of two past whatever is
+        # asked for, and the only thing that can stop a curve is memory or the corpus.
         want = 1 << max(T - 1, 1).bit_length()
         state["rows"] = max(state["rows"], extend_positions(model, want, log) or state["rows"])
     trunk = getattr(model, "transformer", None) or getattr(model, "model", None)
@@ -439,7 +442,7 @@ def spec_hf(key, repo, device, dtype, log, args):
         # NOTHING IS REFUSED FOR ITS LENGTH. A learned table is stretched by `ensure` when a
         # longer sequence arrives and a rotary model needs nothing, so the only things that can
         # end a curve are MEMORY and the CORPUS -- both of which are facts about the run rather
-        # than limits this script imposed. --extend_positions 0 puts the wall back, for a run
+        # than limits this script imposed. --no-extend_positions puts the wall back, for a run
         # that wants to see where a table would have stopped.
         #
         # TRAIN_LEN IS THE NATIVE WINDOW AND STAYS THERE. Stretching a table does not train a
@@ -447,11 +450,14 @@ def spec_hf(key, repo, device, dtype, log, args):
         # extrapolation marker in the wrong place and hide the entire finding.
         "max_pos": 0 if grows else (n_pos if learned else 0),
         "train_len": native or 2048, "ensure": ensure,
-        # WHAT THE MODEL SAYS ABOUT ITSELF, kept even for the rotary ones. It is not enforced
-        # there -- running past it is the measurement -- but it is what tells a failure beyond
-        # this length apart from a failure inside it, which is the difference between a fact to
-        # plot and a bug to raise. See score_ids.
-        "declared_max": n_pos,
+        # A SECOND TRUNCATION, AND THE LAST ONE. score_ids treats a forward that raises BEYOND
+        # this length as the model refusing it -- a fact to plot -- and re-raises the same
+        # error inside it as the bug it is. Held at the ORIGINAL 2,048 it went stale the moment
+        # the table grew: a genuine failure at 8,192 was then swallowed as "past its declared
+        # 2,048" and the curve stopped there, on a model that had just been given 8,192 rows.
+        # A model that grows declares NOTHING, so any failure is either memory (reported) or a
+        # bug (raised), and neither is quietly turned into a shorter curve.
+        "declared_max": 0 if grows else n_pos,
         "step": None, "total": None, "checkpoint": repo,
         "positional": "learned absolute table" if learned else "RoPE",
         # transformers' OWN incremental path: past_key_values in, past_key_values out. Same
@@ -1033,6 +1039,21 @@ def split_at(pts, x0):
     return within, [within[-1]] + beyond
 
 
+def ring_at(pts, x0):
+    """The point on the curve at x0, interpolated if need be -- or None if x0 is off the curve.
+
+    Unlike split_at this does not care whether the boundary divides the data. A model whose
+    training length equals its LAST measured length still has a training length, and the ring
+    is how the panel says so."""
+    pts = sorted(pts)
+    if not pts or not x0 or x0 < pts[0][0] or x0 > pts[-1][0]:
+        return None
+    for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
+        if xa <= x0 <= xb:
+            return (x0, ya if xa == xb else ya + (yb - ya) * (x0 - xa) / (xb - xa))
+    return pts[-1] if x0 == pts[-1][0] else None
+
+
 def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
     """One metric of probe 1 against CONTEXT LENGTH IN TOKENS.
 
@@ -1054,13 +1075,17 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
         if beyond:
             ax.plot(*zip(*beyond), linestyle=BEYOND,
                     **({**st, "label": m["name"]} if not within else st))
-        # THE TRAINING LENGTH, RINGED. A hollow marker in the model's own colour, on the point
-        # where the curve changes meaning: the last length it was trained for, and the first at
-        # which it is extrapolating.
-        if within and beyond:
-            ax.plot([within[-1][0]], [within[-1][1]], marker="o", markersize=9.5,
-                    markerfacecolor="none", markeredgecolor=st["color"], markeredgewidth=1.5,
-                    linestyle="none", zorder=st["zorder"] + 1)
+        # EVERY MODEL GETS ITS RING, at ITS OWN training length. This was drawn only when the
+        # curve had points on BOTH sides of the boundary, so a model whose training length is
+        # the last measured length -- Qwen and Gemma 3 at 32,768, the very models the sweep was
+        # extended to reach -- got no ring at all, and the panel silently stopped marking the
+        # thing it exists to mark. The ring is a property of the model, not of whether the
+        # sweep happened to pass it.
+        ring = ring_at(pts, m.get("train_len"))
+        if ring:
+            ax.plot([ring[0]], [ring[1]], marker="o", markersize=9.5, markerfacecolor="none",
+                    markeredgecolor=st["color"], markeredgewidth=1.5, linestyle="none",
+                    zorder=st["zorder"] + 1)
         drew = True
         # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
         # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
@@ -1075,16 +1100,10 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
     ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize=9.5)
     if drew:
-        # THREE PROXY ENTRIES, so the convention is stated in the figure rather than in a
-        # caption somebody may not have. They carry no data and are drawn in grey.
-        from matplotlib.lines import Line2D
-        h, l = ax.get_legend_handles_labels()
-        h += [Line2D([], [], color="0.35", linestyle=SOLID),
-              Line2D([], [], color="0.35", linestyle=BEYOND),
-              Line2D([], [], color="0.35", marker="o", markerfacecolor="none", markersize=8,
-                     linestyle="none")]
-        l += ["within trained context", "beyond it (extrapolating)", "training length"]
-        ax.legend(h, l, fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
+        # MODEL NAMES ONLY. The solid/dashed/ring convention belongs in the caption, not in the
+        # legend: three grey rows explaining notation crowd out the eleven rows a reader is
+        # actually looking for.
+        ax.legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
 
 
 def figure(res, out_path):
@@ -1477,10 +1496,13 @@ def parse_args():
     # before; a number stretches the table to that many rows by interpolation and the model is
     # relabelled in the figure, because it is no longer the published one. The comparison this
     # buys is the interesting one: ZetaGPT needs no such operation at any length.
-    p.add_argument("--extend_positions", type=int, default=32768, metavar="ROWS",
-                   help="interpolate a learned position table up to this many rows so the model "
-                        "can be measured past its native window; 0 = stop the curve at the wall "
-                        "(default: 32768, the longest context in the sweep)")
+    p.add_argument("--extend_positions", dest="extend_positions", action="store_true",
+                   default=True,
+                   help="grow a learned position table to whatever length is asked for, so no "
+                        "model is refused for its own window (default)")
+    p.add_argument("--no-extend_positions", "--no_extend_positions", dest="extend_positions",
+                   action="store_false",
+                   help="leave learned tables alone and let the curve stop at the wall")
     p.add_argument("--vram_budget", type=float, default=20.0, metavar="GiB",
                    help="what the whole thing may occupy: weights + KV cache + the pass in "
                         "flight. The chunk is solved for this, and a length whose CACHE ALONE "
