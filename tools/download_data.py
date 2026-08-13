@@ -23,12 +23,25 @@ WHAT IS DOWNLOADED is listed in default_config.DATASETS, one entry per dataset, 
 the source repository and what it is for. The two larger schemes ship with NO pretraining
 corpus and nothing here provides one; point PRETRAIN_DIR at your own.
 
-The fetch itself is `huggingface_hub.snapshot_download`, which is resumable, verifies file
-hashes, and skips what is already present -- so an interrupted download is continued by
-re-running this, not restarted. The repository's own layout is preserved verbatim under the
-target directory, with ONE exception: a dataset carrying `files_per_subdir` has its oversized
-directories split into part_NNNN/ afterwards. See shard() for why, and note that it changes
-where files sit, never which files exist.
+HOW THE FETCH RESUMES, and why it is done the long way round. `snapshot_download` resumes
+through THE SHARED CACHE and only through it: a blob is keyed by its hash, a partial transfer
+is an `.incomplete` beside it, and a second run continues that same file. Handed `local_dir=`
+instead, recent versions write each attempt to a UNIQUELY NAMED temporary file, so nothing is
+ever continued -- an interrupted 17 GB fetch starts again from zero and leaves its partial
+behind. That is not a hypothesis: this project accumulated 24 orphaned `.incomplete` files,
+19 GB of them, three per shard, one per interruption, for a dataset that had not landed a
+single visible file.
+
+So the download goes to `data/.hf_cache/` and the snapshot is then HARD-LINKED into
+data/download/<name>/. A hard link costs no space -- the cache and the dataset directory are
+deliberately on one filesystem so that it cannot silently become a copy -- and it leaves real
+files rather than symlinks for the corpus scanner to follow. Deleting the cache afterwards is
+safe: the links keep the data alive.
+
+The repository's own layout is preserved verbatim under the target directory, with ONE
+exception: a dataset carrying `files_per_subdir` has its oversized directories split into
+part_NNNN/ afterwards. See shard() for why, and note that it changes where files sit, never
+which files exist.
 """
 import argparse
 import json
@@ -40,6 +53,81 @@ import default_config as config
 
 def target(name):
     return config.dataset_dir(name)
+
+
+# THE SHARED CACHE, ON THE SAME FILESYSTEM AS THE DATASETS. Beside data/download/ rather than in
+# ~/.cache, for one reason: the snapshot is hard-linked into the dataset directory afterwards,
+# and a hard link cannot cross a filesystem. Under $HOME it would silently degrade to a copy on
+# any machine whose data lives on a separate mount -- which is every cluster -- and a 17 GB
+# corpus would occupy 34 GB with nothing in the log to say why.
+HF_CACHE = os.path.join(os.path.dirname(os.path.normpath(config.DOWNLOAD_DIR)), ".hf_cache")
+
+
+def stale_staging(name):
+    """(files, bytes) of the DEAD `.incomplete` staging a local_dir download left behind.
+
+    These are unusable by anything: they are named with a per-attempt random suffix, so the
+    library that wrote them will not continue them either, and this tool no longer downloads
+    that way. Reported rather than deleted -- gigabytes are not removed on a tool's own
+    initiative -- with the command to remove them printed beside the number."""
+    root = os.path.join(target(name), ".cache", "huggingface", "download")
+    n = total = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            if not f.endswith(".incomplete"):
+                continue
+            n += 1
+            try:
+                total += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+    return n, total
+
+
+def _link(src, dst):
+    """One file from the snapshot into the dataset tree: hard link, else symlink, else copy.
+
+    HARD LINK FIRST because it is free and indistinguishable from a real file afterwards --
+    which matters, since the corpus scanner opens these and a broken symlink is a corpus that
+    reads as empty. os.link follows the snapshot's own symlink into the blob, so what is linked
+    is the data and not the pointer."""
+    if os.path.exists(dst):
+        return "kept"
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        os.link(os.path.realpath(src), dst)
+        return "linked"
+    except OSError:
+        pass
+    try:
+        os.symlink(os.path.realpath(src), dst)
+        return "symlinked"
+    except OSError:
+        shutil.copy2(src, dst)
+        return "copied"
+
+
+def materialise(snapshot, dest, log):
+    """The cache snapshot -> the dataset directory. Returns how many files arrived, by method."""
+    try:
+        from tqdm import tqdm
+    except ImportError:                                            # noqa: BLE001
+        tqdm = None
+    files = []
+    for dirpath, dirs, names in os.walk(snapshot):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        files += [os.path.join(dirpath, f) for f in names if not f.startswith(".")]
+    how = {}
+    it = tqdm(files, desc="[download] linking into place", unit="file") if tqdm else files
+    for src in it:
+        rel = os.path.relpath(src, snapshot)
+        k = _link(src, os.path.join(dest, rel))
+        how[k] = how.get(k, 0) + 1
+    if tqdm and hasattr(it, "close"):
+        it.close()
+    log(f"[download]   {len(files):,} files into place ("
+        + ", ".join(f"{v:,} {k}" for k, v in sorted(how.items())) + ")")
+    return len(files)
 
 
 def _size(n):
@@ -269,7 +357,16 @@ def fetch(name, force, log):
 
     if is_present(name) and not force:
         log(f"[download] {name}: incomplete -- {why}")
-        log(f"[download] {name}: resuming; snapshot_download skips whatever already matches")
+        log(f"[download] {name}: resuming from {os.path.relpath(HF_CACHE, config.ROOT)}")
+    # DEAD STAGING FROM THE OLD local_dir FETCH. Reported here, once, with its size and the
+    # command that removes it -- it is never continued by anything and never will be.
+    n_dead, b_dead = stale_staging(name)
+    if n_dead:
+        log(f"[download] {name}: {n_dead:,} orphaned .incomplete files ({_size(b_dead)}) from "
+            f"the old local_dir fetch,")
+        log(f"[download]   which nothing resumes. Remove with:")
+        log(f"[download]   rm -rf {os.path.relpath(target(name), config.ROOT)}"
+            f"/.cache/huggingface/download")
     try:
         from huggingface_hub import snapshot_download
     except Exception as e:                                         # noqa: BLE001
@@ -279,22 +376,30 @@ def fetch(name, force, log):
             f"           {os.path.relpath(dest, config.ROOT)}") from e
 
     os.makedirs(dest, exist_ok=True)
+    os.makedirs(HF_CACHE, exist_ok=True)
     log(f"[download] {name}")
     log(f"[download]   from {spec['repo']}")
+    log(f"[download]   via  {os.path.relpath(HF_CACHE, config.ROOT)}  (resumable; hard-linked "
+        f"into place after)")
     log(f"[download]   into {os.path.relpath(dest, config.ROOT)}")
     log(f"[download]   {free_space(dest) / 2**30:.1f} GiB free on that filesystem")
     try:
-        snapshot_download(repo_id=spec["repo"], repo_type="dataset", local_dir=dest,
-                          resume_download=True)
+        # NO local_dir=. That is the whole fix: with local_dir the library writes each attempt
+        # to a uniquely named temporary file and resumes nothing, so an interrupted transfer
+        # restarts from zero and leaves its partial behind. Into the cache, a partial file is
+        # an .incomplete keyed by the blob's hash and the next run CONTINUES IT.
+        snapshot = snapshot_download(repo_id=spec["repo"], repo_type="dataset",
+                                     cache_dir=HF_CACHE)
     except Exception as e:                                         # noqa: BLE001
-        # Left partially fetched ON PURPOSE: snapshot_download resumes, so the right response
-        # to a failure is to run this again, and deleting the partial copy would throw away
-        # everything already transferred.
+        # Left partially fetched ON PURPOSE: the cache resumes, so the right response to a
+        # failure is to run this again, and deleting the partial would throw away everything
+        # already transferred.
         raise SystemExit(
             f"[download] {name} failed: {type(e).__name__}: {e}\n"
-            f"           Whatever transferred is kept at "
-            f"{os.path.relpath(dest, config.ROOT)};\n"
-            f"           re-run this command to resume.") from e
+            f"           Whatever transferred is kept in "
+            f"{os.path.relpath(HF_CACHE, config.ROOT)};\n"
+            f"           re-run this command to resume from there.") from e
+    materialise(snapshot, dest, log)
     log(f"[download] {name}: transferred, {size_on_disk(name) / 2**30:.1f} GiB")
     # THE MARKER IS WRITTEN THE MOMENT THE FETCH RETURNS, before sharding moves anything. If
     # the process dies during sharding the marker is stale, is_complete() sees the counts still
