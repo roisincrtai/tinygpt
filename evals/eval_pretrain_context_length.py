@@ -161,8 +161,13 @@ PALETTE = [
     "#5A5A5A",             # graphite
 ]
 MARKERS = ["s", "^", "v", "D", "P", "X", "<", ">", "*", "h"]
-DASHES = [(4, 1.6), (1.4, 1.4), (5, 1.4, 1.2, 1.4), (3, 1.2), (6, 1.6, 1.2, 1.6),
-          (2.4, 1.2), (4, 1.2, 1.2, 1.2), (1.8, 1.8), (5, 2), (3, 1.2, 1.2, 1.2)]
+
+# THE LINE STYLE IS NOT IDENTITY, IT IS MEANING. Solid up to a model's own training length,
+# dashed past it, and a ring on the boundary. Every curve then says where it stops being
+# interpolation and starts being extrapolation, without the reader holding eleven training
+# lengths in mind or counting dotted verticals. Identity is carried by colour and marker, which
+# is enough for eleven lines and leaves the dashes free to mean something.
+SOLID, BEYOND = "-", (0, (4.5, 1.8))
 
 
 def style_of(key, i):
@@ -172,11 +177,10 @@ def style_of(key, i):
     cycle. Three channels rather than one means the figure survives a colourblind reader, a
     greyscale printer, and two lines that happen to cross."""
     if key == "zetagpt":
-        return {"color": OWN, "marker": "o", "linestyle": "-", "lw": 2.6, "ms": 5.0,
-                "zorder": 5, "markeredgecolor": "white", "markeredgewidth": 0.6}
+        return {"color": OWN, "marker": "o", "lw": 2.6, "ms": 5.0, "zorder": 5,
+                "markeredgecolor": "white", "markeredgewidth": 0.6}
     j = i % len(PALETTE)
-    return {"color": PALETTE[j], "marker": MARKERS[j], "linestyle": (0, DASHES[j]),
-            "lw": 1.3, "ms": 3.4, "zorder": 2}
+    return {"color": PALETTE[j], "marker": MARKERS[j], "lw": 1.3, "ms": 3.4, "zorder": 2}
 
 
 CACHE_DIR = os.path.join(config.CACHE_DIR, "evals", "eval_context_length")
@@ -965,6 +969,26 @@ def probe_passkey(spec, args, device, log, live, cache, out):
 # --------------------------------------------------------------------------- #
 # the figure
 # --------------------------------------------------------------------------- #
+def split_at(pts, x0):
+    """A polyline cut at x0 into (within, beyond), SHARING an interpolated point at the cut.
+
+    Sharing the boundary point is what keeps the line continuous: drawn as two polylines a gap
+    would open at exactly the length the reader is being asked to look at. Where x0 falls
+    between two measured points the y there is interpolated."""
+    pts = sorted(pts)
+    if not pts or not x0 or x0 <= pts[0][0]:
+        return [], pts
+    if x0 >= pts[-1][0]:
+        return pts, []
+    within = [q for q in pts if q[0] <= x0]
+    beyond = [q for q in pts if q[0] > x0]
+    if within[-1][0] != x0:
+        (xa, ya), (xb, yb) = within[-1], beyond[0]
+        y0 = ya + (yb - ya) * (x0 - xa) / (xb - xa)
+        within, beyond = within + [(x0, y0)], [(x0, y0)] + beyond
+    return within, beyond
+
+
 def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
     """One metric of probe 1 against CONTEXT LENGTH IN TOKENS.
 
@@ -981,26 +1005,43 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
         if not pts:
             continue
         st = style_of(m["key"], i)
-        own = m["key"] == "zetagpt"
-        ax.plot(*zip(*pts), label=m["name"], **st)
+        within, beyond = split_at(pts, m.get("train_len"))
+        if within:
+            ax.plot(*zip(*within), linestyle=SOLID, label=m["name"], **st)
+        if beyond:
+            ax.plot(*zip(*beyond), linestyle=BEYOND,
+                    **({**st, "label": m["name"]} if not within else st))
+        # THE TRAINING LENGTH, RINGED. A hollow marker in the model's own colour, on the point
+        # where the curve changes meaning: the last length it was trained for, and the first at
+        # which it is extrapolating.
+        if within and beyond:
+            ax.plot([within[-1][0]], [within[-1][1]], marker="o", markersize=9.5,
+                    markerfacecolor="none", markeredgecolor=st["color"], markeredgewidth=1.5,
+                    linestyle="none", zorder=st["zorder"] + 1)
         drew = True
         # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
         # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
         if any(r.get(field) is None for r in m["curve"]):
             ax.plot(pts[-1][0], pts[-1][1], "x", color=st["color"], ms=8, mew=1.8,
                     zorder=st["zorder"] + 1)
-        # ONLY ZETAGPT'S TRAINING LENGTH IS DRAWN. Eleven dotted verticals is a grid, not a
-        # reading; the one that matters is where OUR model stops having been trained and
-        # starts extrapolating, and each baseline's own length is in the legend table.
-        if own and m.get("train_len"):
-            ax.axvline(m["train_len"], color=st["color"], lw=0.9, ls=":", alpha=0.6)
+        # NO VERTICAL RULES. Each curve carries its own boundary as a ring, so eleven of them
+        # would repeat what the lines already say and turn the panel into a grid.
     ax.set_xscale("log", base=2)
     if logy:
         ax.set_yscale("log")
     ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize=9.5)
     if drew:
-        ax.legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
+        # THREE PROXY ENTRIES, so the convention is stated in the figure rather than in a
+        # caption somebody may not have. They carry no data and are drawn in grey.
+        from matplotlib.lines import Line2D
+        h, l = ax.get_legend_handles_labels()
+        h += [Line2D([], [], color="0.35", linestyle=SOLID),
+              Line2D([], [], color="0.35", linestyle=BEYOND),
+              Line2D([], [], color="0.35", marker="o", markerfacecolor="none", markersize=8,
+                     linestyle="none")]
+        l += ["within trained context", "beyond it (extrapolating)", "training length"]
+        ax.legend(h, l, fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
 
 
 def figure(res, out_path):
