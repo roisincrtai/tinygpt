@@ -105,6 +105,13 @@ DATASET="${DATASET:-hh}"
 # the 169M model on S's 2B-token subset, silently, whatever PRETRAIN_CORPUS said. One value
 # pinned across every scheme is the same fault MAX_LEN had. Set a path here only to override
 # the ladder deliberately, for your own corpus.
+# A COMMA-SEPARATED LIST, not one directory:
+#     PRETRAIN_DIR="data/download/my-corpus,data/download/zetagpt-tiny_pretrain-corpus_wikitext103"
+# Each is tokenised into its own stream under its own signature and none is merged with any
+# other, so adding one costs only that one -- every stream already built is found in the cache
+# and reused byte for byte. The mixture is by token count: a 2B-token corpus beside a 100M one
+# is sampled 95/5. Adding a corpus therefore does not disturb, and does not restart, a run
+# that is already under way.
 PRETRAIN_DIR="${PRETRAIN_DIR:-}"
 
 # INSTRUCTION-TUNING TREE, shared by stages 6, 7, 8 and 10 and by distillation. Its layout is

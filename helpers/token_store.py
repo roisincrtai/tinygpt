@@ -391,6 +391,82 @@ class TokenStream:
                 f"{len(self.shards)} shard(s), memory-mapped) in {self.n_docs:,} documents")
 
 
+class MultiStream:
+    """Several TokenStreams read as ONE corpus, without being merged on disk.
+
+    A CORPUS KEEPS ITS OWN STREAM, ITS OWN SIGNATURE AND ITS OWN CACHE. That is the whole point:
+    adding a second corpus to a training run must not touch the first one's tokens. Merging them
+    into a single stream would change the signature of the result, discard the shards already
+    built, and re-tokenise hours of text to arrive at the same tokens in a different file --
+    which for a run already half-way through its budget is not a data change but a restart.
+
+    Instead each corpus is built and cached exactly as if it were alone, and this reads across
+    them. Add a corpus tomorrow and only the new one is tokenised; remove it and the other's
+    cache is still there, still current, still keyed by the same signature it always had.
+
+    SEQUENCES ARE DRAWN IN PROPORTION TO TOKENS, which is what concatenating the corpora would
+    have given: a corpus of 4 GiB contributes twenty times as often as one of 0.2 GiB. The
+    mixture is therefore a fact about the data on disk rather than a weighting somebody chose,
+    and it is reproducible -- the draw uses the caller's generator, so a resumed run continues
+    the same sequence of batches.
+
+    The batch is shuffled after assembly so it is not ordered by corpus: gradients are averaged
+    over a batch, and a batch whose first half is one corpus and second half another is fine for
+    the mean but reads as a bug in any per-example diagnostic."""
+
+    def __init__(self, streams, names=()):
+        self.streams = list(streams)
+        self.names = list(names) or [f"corpus {i + 1}" for i in range(len(self.streams))]
+        self.n_tokens = sum(s.n_tokens for s in self.streams)
+        self.n_docs = sum(s.n_docs for s in self.streams)
+        self.eos = self.streams[0].eos
+        self.dtype = self.streams[0].dtype
+        self.nbytes = sum(s.nbytes for s in self.streams)
+
+    def __len__(self):
+        return self.n_docs
+
+    def doc(self, i):
+        """Document `i` as a list of ids, the corpora laid end to end in their listed order.
+
+        A TokenStream has this and the sample previews use it (helpers.common.corpus_prompts
+        tests for `doc` and `n_docs` together), so a corpus that had `n_docs` but no `doc`
+        would take the branch meant for a list of records and fail on a type that is not a
+        sequence. Nothing here reads a corpus by index during training -- batches are drawn,
+        not indexed -- so this exists for the previews and for anything else that reasonably
+        expects a corpus to be enumerable."""
+        j = i
+        for s in self.streams:
+            if j < s.n_docs:
+                return s.doc(j)
+            j -= s.n_docs
+        raise IndexError(f"document {i:,} past the end of {self.n_docs:,} documents")
+
+    def batch(self, batch, seq_len, generator=None, device=None):
+        """One training batch, drawn across the corpora. Same contract as TokenStream.batch."""
+        import torch
+        w = torch.tensor([float(s.n_tokens) for s in self.streams], dtype=torch.double)
+        pick = torch.multinomial(w / w.sum(), batch, replacement=True, generator=generator)
+        parts = []
+        for k, s in enumerate(self.streams):
+            n = int((pick == k).sum())
+            if n:
+                parts.append(s.batch(n, seq_len, generator=generator, device=None)[0])
+        ids = parts[0] if len(parts) == 1 else torch.cat(parts)
+        ids = ids[torch.randperm(ids.shape[0], generator=generator)]
+        if device is not None:
+            ids = ids.to(device)
+        ones = torch.ones_like(ids)
+        return ids, ones, ones
+
+    def describe(self):
+        share = [f"{n} {s.n_tokens / max(self.n_tokens, 1):.1%}"
+                 for n, s in zip(self.names, self.streams)]
+        return (f"{self.n_tokens:,} tokens across {len(self.streams)} corpora "
+                f"({', '.join(share)}) in {self.n_docs:,} documents, each memory-mapped from "
+                f"its own cache")
+
+
 def open_if_current(path, sig):
     """The stream at the stem `path` when it is complete and its signature matches."""
     idx = _read_index(path)

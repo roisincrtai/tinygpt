@@ -15,7 +15,8 @@ def main():
     corpus, n_files, n_tok = pretrain.load_corpus(ctx["tok"], args.pretrain_dir, ctx["log"],
                                                      args.batch, args.max_len)
     if not corpus:
-        ctx["log"](f"no corpus files under {args.pretrain_dir}: nothing to pretrain")
+        ctx["log"](f"no corpus files under {', '.join(args.pretrain_dir)}: "
+                   f"nothing to pretrain")
         return
     pretrain.run(ctx, corpus)
 

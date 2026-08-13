@@ -141,11 +141,25 @@ def dataset_dir(name):
 # NOTE that the schemes therefore differ in CORPUS as well as in depth and width, so no pair of
 # them is a controlled comparison of architecture alone. Point two schemes at one corpus with
 # PRETRAIN_DIR (or --pretrain_dir) when that is what you mean to measure.
+#
+# EACH SCHEME TAKES A LIST, and each corpus in it keeps its OWN token stream, its own signature
+# and its own cache directory. Nothing is merged on disk, so adding a corpus tokenises only the
+# corpus added: the streams already built are untouched, still current, still keyed by the
+# signature they always had. That is what makes it safe to extend the corpus of a run that is
+# already half-way through its budget -- the data it has been reading does not move.
+#
+# Sequences are drawn in proportion to TOKENS (token_store.MultiStream), which is what
+# concatenating the corpora would have given, so the mixture is a fact about what is on disk
+# rather than a weight somebody chose. WikiText-103 is ~105M tokens against FineWeb-Edu's ~2B,
+# so it is a few per cent of what -s sees -- clean encyclopedic prose beside filtered web text.
 PRETRAIN_CORPUS = {
-    "zetagpt-tiny": dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
-    "zetagpt-s": dataset_dir("zetagpt-pretrain_fineweb-edu-2BT"),
-    "zetagpt-m": dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
-    "zetagpt-l": dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
+    "zetagpt-tiny": [dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")],
+    "zetagpt-s": [dataset_dir("zetagpt-pretrain_fineweb-edu-2BT"),
+                  dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")],
+    "zetagpt-m": [dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
+                  dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")],
+    "zetagpt-l": [dataset_dir("zetagpt-pretrain_fineweb-edu-10BT"),
+                  dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")],
 }
 
 # The instruction dataset's own layout, which is FLAT: alpaca_gpt4/ and rlhf_hh/ sit directly
@@ -155,7 +169,8 @@ PRETRAIN_CORPUS = {
 #         alpaca_gpt4/alpaca_gpt4_<batch>.json           RLHF rollout prompts
 #         rlhf_hh/{helpful,harmless}_{train,test}/*.json preference pairs
 INSTRUCT_DIR = dataset_dir("zetagpt-rlhf-instruction_following")
-PRETRAIN_DIR = PRETRAIN_CORPUS["zetagpt-s"]                # scanned recursively
+PRETRAIN_DIR = PRETRAIN_CORPUS["zetagpt-s"][0]             # the FIRST of -s's corpora,
+                                                           # for the few readers that want one
 INSTRUCTION_DIR = INSTRUCT_DIR                             # no nesting; kept as a name
 ALPACA_DIR = os.path.join(INSTRUCT_DIR, "alpaca_gpt4")     # alpaca_gpt4_<batch>.json
 HH_DIR = os.path.join(INSTRUCT_DIR, "rlhf_hh")             # {helpful,harmless}_{train,test}/
@@ -1008,8 +1023,10 @@ SHELL_DEFAULTS = {
     "VAL_FRAC": TRAIN["val_frac"],
     "BETA": TRAIN["beta"],
     "MODEL_SCHEME": PRETRAIN["model_scheme"],
-    "PRETRAIN_DIR": os.path.relpath(PRETRAIN_CORPUS[PRETRAIN["model_scheme"]], ROOT)
-                    if PRETRAIN_CORPUS[PRETRAIN["model_scheme"]] else "(unset for this scheme)",
+    # a comma-separated list, which is what config.sh's PRETRAIN_DIR now carries
+    "PRETRAIN_DIR": ",".join(os.path.relpath(d, ROOT)
+                             for d in PRETRAIN_CORPUS[PRETRAIN["model_scheme"]])
+                    or "(unset for this scheme)",
     "INSTRUCT_DIR": os.path.relpath(INSTRUCT_DIR, ROOT),
     "SFT_DIR": os.path.relpath(SFT_DIR, ROOT),
     # 0 means "the scheme's own", so report the number that ends up in force

@@ -189,7 +189,9 @@ def parse_args(argv=None):
                     help="which configuration scheme to build: depth, width and the context "
                          "window it is pretrained at, from default_config.SCHEMES")
     ap.add_argument("--pretrain_dir", default="",
-                    help="pretraining corpus directory; empty = the scheme's own from "
+                    help="pretraining corpus directories, comma-separated; each is tokenised "
+                         "and cached on its own and they are mixed in proportion to their "
+                         "tokens. Empty = the scheme's own list from "
                          "default_config.PRETRAIN_CORPUS, which is set for every scheme. "
                          "Read locally: no stage downloads, see tools/download_data.py")
     ap.add_argument("--sft_dir", default="",
@@ -320,9 +322,15 @@ def parse_args(argv=None):
     # The pretraining corpus is per SCHEME: only zetagpt-s ships with one, so -m and -l resolve
     # to the empty string and the stage says so rather than scanning a directory that is not
     # there and reporting "0 files" as though that were a corpus.
-    if not args.pretrain_dir:
-        args.pretrain_dir = config.PRETRAIN_CORPUS.get(args.model_scheme, "")
-    args.pretrain_dir = os.path.abspath(args.pretrain_dir) if args.pretrain_dir else ""
+    # A LIST OF CORPORA, not one. Each keeps its own token stream and its own signature, so
+    # adding one tokenises only the one added and every stream already built is untouched --
+    # which is what lets a corpus be added to a run that is already under way. Comma-separated
+    # on the command line, because that is what a shell variable can carry.
+    if args.pretrain_dir:
+        dirs = [d.strip() for d in str(args.pretrain_dir).split(",") if d.strip()]
+    else:
+        dirs = list(config.PRETRAIN_CORPUS.get(args.model_scheme, []))
+    args.pretrain_dir = [os.path.abspath(d) for d in dirs]
 
     # THE BATCH BELONGS TO THE SCHEME, because what fits on a card is decided by the model's
     # width, its depth and its longest context window -- all three of which the scheme fixes.
@@ -525,7 +533,9 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
             exclude_dirs=config.PRETRAIN["exclude_dirs"],
             text_column=config.PRETRAIN["text_column"])
         helpers.table("BPE training corpus", [
-            ("pretrain dir", args.pretrain_dir or "(unset for this scheme)"),
+            ("pretrain corpora", ", ".join(os.path.relpath(d, config.ROOT)
+                                            for d in args.pretrain_dir)
+                                 or "(unset for this scheme)"),
             ("pretrain excluded", ", ".join(config.PRETRAIN["exclude_dirs"]) or "(none)"),
             ("pretrain corpus files", f"{n_pre:,}"),
             ("pretrain documents", f"{len(pre):,}"),

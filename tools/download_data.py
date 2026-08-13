@@ -267,10 +267,15 @@ def describe(log=print):
         log(f"  {'':<52} {'':<10} {spec['what']}")
     log("")
     log("  pretraining corpus per scheme")
-    for scheme, path in config.PRETRAIN_CORPUS.items():
-        shown = os.path.relpath(path, config.ROOT) if path else \
-            "(unset -- configure PRETRAIN_DIR for your own corpus)"
-        log(f"    {scheme:<12} {shown}")
+    for scheme, paths in config.PRETRAIN_CORPUS.items():
+        # A scheme reads SEVERAL corpora, each one standalone in the cache, so list them one
+        # per line rather than joining them into a path-shaped string nobody can parse.
+        paths = [p for p in (paths if isinstance(paths, (list, tuple)) else [paths]) if p]
+        if not paths:
+            log(f"    {scheme:<12} (unset -- configure PRETRAIN_DIR for your own corpus)")
+            continue
+        for i, path in enumerate(paths):
+            log(f"    {scheme if i == 0 else '':<12} {os.path.relpath(path, config.ROOT)}")
     log("-" * 96)
 
 

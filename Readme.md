@@ -167,10 +167,12 @@ SCHEMES = {
                          context_window=[256, 512]),   # trains at 256, then at 512
 }
 
-# ~line 144 -- which corpus this scheme trains on
+# ~line 144 -- which corpora this scheme trains on. A LIST: each corpus is tokenised
+# into its own stream under its own signature, nothing is merged on disk, and the
+# batch sampler mixes them in proportion to their token counts.
 PRETRAIN_CORPUS = {
     ...
-    "zetagpt-baby": dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
+    "zetagpt-baby": [dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103")],
 }
 
 # ~line 286 -- BATCH SIZE: how many SEQUENCES go through one step. Not a length.
@@ -330,6 +332,29 @@ DATASET=/path/to/my_preferences ./stage7_train_rlhf_reward.sh
 SFT_DIR=/path/to/my_demos       ./stage6_instruct_sft.sh
 PRETRAIN_DIR=/path/to/my_corpus ./stage5_pretrain.sh
 ```
+
+**Several pretraining corpora.** `PRETRAIN_DIR` takes a comma-separated list, and so does each
+entry of `PRETRAIN_CORPUS`; every scheme ships with WikiText-103 alongside its FineWeb-Edu
+subset.
+
+```bash
+PRETRAIN_DIR=data/download/my-corpus,data/download/zetagpt-tiny_pretrain-corpus_wikitext103 \
+    ./stage4_tokenize_data.sh && ./stage5_pretrain.sh
+```
+
+They are **never merged**. Each is tokenised alone, keyed by its own signature, into its own
+directory under `cache/tokens/`; they meet only in the batch sampler, which draws each sequence
+from one corpus with probability proportional to that corpus's token count — the mixture
+concatenation would have given, so it is a fact about what is on disk rather than a weight
+somebody chose. WikiText-103's ~105M tokens beside FineWeb-Edu's ~2B is a few per cent of what
+`zetagpt-s` sees: clean encyclopedic prose against filtered web text.
+
+The reason for keeping them apart is that **a corpus can be added to a run already in
+progress**. Add it to the list, re-run stage 4, and only the new corpus is tokenised: every
+stream already built is found by its unchanged signature and reused byte for byte, so the
+shards the training process is reading never move. Nothing restarts. Stage 4 only ever resumes
+— `--force` is the sole way to rebuild a stream, it is never forwarded by any script, and the
+trainers' `--no-resume` (which means "ignore the checkpoints") no longer implies it.
 
 Stage 6 reads three layouts, and says in its log which one it decided yours is: a **conversation
 mixture** (parquet or jsonl carrying a `messages` list of `{role, content}` turns), a

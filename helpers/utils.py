@@ -1652,6 +1652,47 @@ def load_token_corpus(stage, root, tok, max_words=200, exclude_dirs=(), log=prin
     return st, n_files, st.n_tokens
 
 
+def load_token_corpora(stage, roots, tok, max_words=200, exclude_dirs=(), log=print,
+                       extensions=None, text_column="text"):
+    """SEVERAL corpora as one: (stream, n_files, n_tokens).
+
+    EACH IS BUILT AND CACHED EXACTLY AS IF IT WERE ALONE, under its own signature, so adding a
+    corpus to a run tokenises only the new one and leaves every existing stream untouched --
+    same signature, same shards, same cache directory. Nothing is merged on disk, which is what
+    makes this safe to do to a run that is already half-way through its budget.
+
+    One corpus returns the plain TokenStream, so a single-corpus run behaves exactly as it did
+    and cannot be told apart from before. Several return a MultiStream, which reads across them
+    in proportion to their tokens.
+
+    A corpus with no files is REPORTED AND SKIPPED rather than fatal: a list is a list, and
+    losing the whole run because the fourth entry has not been downloaded yet would be the
+    wrong trade."""
+    roots = [r for r in (roots if isinstance(roots, (list, tuple)) else [roots]) if r]
+    streams, names, n_files, missing = [], [], 0, []
+    for root in roots:
+        if not os.path.isdir(root):
+            missing.append(root)
+            continue
+        st, n = build_token_stream(root, tok, max_words, exclude_dirs, log, extensions,
+                                   text_column, stage=stage)
+        if st is None:
+            missing.append(root)
+            continue
+        streams.append(st)
+        names.append(corpus_name(root))
+        n_files += n
+    for m in missing:
+        log(f"[corpus] skipped (nothing to read): {m}")
+    if not streams:
+        return None, 0, 0
+    if len(streams) == 1:
+        return streams[0], n_files, streams[0].n_tokens
+    multi = token_store.MultiStream(streams, names)
+    log(f"[corpus] {len(streams)} corpora as one: {multi.describe()}")
+    return multi, n_files, multi.n_tokens
+
+
 # --------------------------------------------------------------------------- #
 # preference pairs: the same idea for the preference batches
 # --------------------------------------------------------------------------- #

@@ -32,19 +32,38 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0):
     `corpus_dir` is passed in rather than read from the configuration, because it depends on
     the scheme being trained: tiny and -s ship with one, -m and -l do not. An empty path is
     refused outright instead of scanned -- a scan of nothing reports "0 files" and reads like
-    an empty corpus rather than like a missing setting."""
-    if not corpus_dir:
+    an empty corpus rather than like a missing setting.
+
+    IT IS A LIST. Several corpora train one model, and they stay SEPARATE all the way down:
+    one token stream each, one signature each, one cache directory each. Nothing is
+    concatenated on disk. Only the batch sampler sees them together, drawing each sequence
+    from one corpus with probability proportional to its token count, so the mixture is by
+    tokens and a document is never spliced across corpora. The consequence that matters: a
+    corpus can be ADDED to a scheme whose other corpora are already tokenised, and those
+    streams are found by their unchanged signatures and reused byte for byte. A run reading
+    them does not restart and does not re-tokenise; it simply has more to read."""
+    roots = [d for d in (corpus_dir if isinstance(corpus_dir, (list, tuple)) else [corpus_dir])
+             if d]
+    if not roots:
         raise SystemExit(
             "[pretrain] no pretraining corpus configured for this scheme.\n"
             "           Every scheme has one in default_config.PRETRAIN_CORPUS; fetch it with\n"
             "               ./stage1_download_data.sh\n"
             "           or set PRETRAIN_DIR in config.sh (--pretrain_dir) to your own.")
-    if not os.path.isdir(corpus_dir):
+    missing = [d for d in roots if not os.path.isdir(d)]
+    if missing and len(missing) == len(roots):
         raise SystemExit(
-            f"[pretrain] corpus directory does not exist: {corpus_dir}\n"
+            f"[pretrain] corpus director{'y does' if len(missing) == 1 else 'ies do'} not "
+            f"exist:\n" + "".join(f"             {d}\n" for d in missing) +
             f"           No stage downloads. Run:  python -m tools.download_data")
-    corpus, n_files, n_tok = helpers.load_token_corpus(
-        STAGE, corpus_dir, tok, config.PRETRAIN["max_words"],
+    for d in missing:
+        # SOME of them present is not a failure: a scheme may list a corpus this machine has
+        # not fetched. Say so loudly and train on what is here, rather than dying on a corpus
+        # that is optional -- but never pass over it in silence.
+        log(f"[pretrain] corpus directory missing, SKIPPED: {d}")
+    roots = [d for d in roots if os.path.isdir(d)]
+    corpus, n_files, n_tok = helpers.load_token_corpora(
+        STAGE, roots, tok, config.PRETRAIN["max_words"],
         exclude_dirs=config.PRETRAIN["exclude_dirs"], log=log,
         text_column=config.PRETRAIN["text_column"])
     if corpus:
@@ -55,13 +74,27 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0):
         # budget actually buys over THIS corpus, which is how a mismatch between the two gets
         # noticed at the start of a run rather than at the end.
         seen = config.PRETRAIN["steps"] * ctx_batch * ctx_len if ctx_batch else 0
-        rows = [
-            ("dataset", os.path.basename(corpus_dir.rstrip("/")) or corpus_dir),
-            ("directory", corpus_dir),
+        # EVERY CORPUS NAMED, with its own stream and its own share of the mixture. A single
+        # "dataset: x" line would hide the fact that two more were read, and the share is the
+        # number that decides what the model actually sees: sampling is proportional to
+        # tokens, so a 2 BT corpus beside a 100 MT one is a 95/5 mixture, not a 50/50 one.
+        # The names come from the STREAMS, not from `roots`: a listed corpus that had nothing
+        # to read was skipped and reported, and a table zipped against the requested list
+        # would then label every stream with the wrong corpus.
+        parts = getattr(corpus, "streams", [corpus])
+        names = getattr(corpus, "names", None) or [helpers.corpus_name(roots[0])]
+        rows = [("corpora", f"{len(parts)} standalone stream"
+                            f"{'' if len(parts) == 1 else 's, sampled by token count'}")]
+        for name, s in zip(names, parts):
+            share = 100.0 * s.n_tokens / max(n_tok, 1)
+            rows += [(name,
+                      f"{helpers.count(s.n_tokens)} tokens, {share:.1f}% of the mixture"),
+                     ("  token stream", s.path),
+                     ("  stream size", f"{s.nbytes / 1048576:.1f} MB {s.dtype}, "
+                                       f"memory-mapped (not loaded)"),
+                     ("  documents", helpers.count(len(s)))]
+        rows += [
             ("excluded subdirs", ", ".join(config.PRETRAIN["exclude_dirs"]) or "(none)"),
-            ("token stream", corpus.path),
-            ("stream size", f"{corpus.nbytes / 1048576:.1f} MB {corpus.dtype}, "
-                            f"memory-mapped (not loaded)"),
             ("corpus files", helpers.count(n_files)),
             ("documents", helpers.count(len(corpus))),
             ("words per document", f"~{config.PRETRAIN['max_words']}"),

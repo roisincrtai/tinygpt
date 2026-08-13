@@ -468,7 +468,12 @@ def load_pretrain_corpus(root, max_words=200, exclude_dirs=(), text_column="text
     # `from .utils import *`, which by definition skips underscore names.
     from helpers import corpus_files, bar
     from helpers.utils import _pack, corpus_bytes
-    files = corpus_files(root, exclude_dirs)
+    # ONE ROOT OR SEVERAL. The pretraining corpus is a list now, and the tokenizer must be
+    # built over ALL of it: a vocabulary trained on one corpus and used on another spends
+    # bytes where it should spend merges. Scanning is the only place the corpora are read
+    # together -- their TOKEN streams stay separate, each under its own signature.
+    roots = [r for r in (root if isinstance(root, (list, tuple)) else [root]) if r]
+    files = [f for r in roots for f in corpus_files(r, exclude_dirs)]
     docs = []
     # The bar is measured in BYTES OF TEXT, not in files. A corpus is three parquet shards
     # now, not thirty thousand text files, so a per-file bar sits at 0/3 for minutes; and a
