@@ -1320,6 +1320,17 @@ RUN_KEYS = ("corpus", "target_chars", "documents", "trials", "copy_words", "seed
             "unit")
 
 
+def clean_name(name):
+    """A model's name, with any parenthetical stripped.
+
+    THE CACHE ON DISK STILL CARRIES THE OLD ONE. Earlier runs wrote meta with
+    "gpt2 (positions interpolated)" in it, and a resumed run redraws its rows FROM that meta --
+    so removing the suffix where the name is built was not enough, and the legend kept showing
+    it. Every name is normalised on the way into a row, whether it came from a model loaded now
+    or from a bucket written weeks ago."""
+    return str(name).split(" (")[0].strip() or str(name)
+
+
 def rebuild_rows(points):
     """Cached points -> the (curve, copy, passkey) lists the figure reads, in x order."""
     curve, cp, pk = [], [], []
@@ -1370,6 +1381,7 @@ def cached_models(args, corpus, log):
                    "positional": "", "checkpoint": sig.get("checkpoint", ""),
                    "step": sig.get("step"), "total": None}
             row.update({k: v for k, v in (b.get("meta") or {}).items() if v is not None})
+            row["name"] = clean_name(row.get("name") or key)
             row["curve"], row["copy"], row["passkey"] = rebuild_rows(pts)
             out[key] = row
             break
@@ -1628,6 +1640,7 @@ def main():
         log(f"\n[context] === {spec['name']}  ({i}/{len(specs)}) ===")
         m = {k: spec[k] for k in ("key", "name", "params", "train_len", "max_pos",
                                   "positional", "checkpoint", "step", "total")}
+        m["name"] = clean_name(m["name"])
         m["curve"], m["copy"], m["passkey"] = [], [], []
         at = next((j for j, r in enumerate(res["models"]) if r["key"] == spec["key"]), None)
         if at is None:
