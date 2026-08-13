@@ -247,10 +247,16 @@ def spec_zetagpt(args, device, dtype, log):
                 f"--checkpoint_every_steps; the write is atomic (helpers._atomic_torch_save "
                 f"renames a temporary over it), so a complete file is always there -- but a "
                 f"copy taken while the rename lands can still be short. Try again, or")
-        log(f"[context]   evaluate a copy, which a live trainer cannot touch:")
-        log(f"[context]       cp {os.path.relpath(path, config.ROOT)} /tmp/eval.pt")
-        log(f"[context]       python evals/eval_pretrain_context_length.py "
-            f"--checkpoint /tmp/eval.pt")
+        # THE SNAPSHOT GOES IN THE PROJECT'S OWN CACHE, not in /tmp. cache/ is where this
+        # project puts everything it can rebuild -- it is on the same filesystem as the
+        # checkpoint, it survives a reboot, and it is covered by the same rules as the token
+        # streams and these very results. /tmp is a machine's business, not a run's.
+        snap = os.path.relpath(os.path.join(config.CACHE_DIR, "evals", "checkpoint_snapshot.pt"),
+                               config.ROOT)
+        log(f"[context]   evaluate a snapshot, which a live trainer cannot touch:")
+        log(f"[context]       mkdir -p {os.path.dirname(snap)} && "
+            f"cp {os.path.relpath(path, config.ROOT)} {snap}")
+        log(f"[context]       python evals/eval_pretrain_context_length.py --checkpoint {snap}")
         log(f"[context]   If a copy fails the same way the file itself is damaged; "
             f"checkpoints/pretrain/ keeps only the newest, so the run must be resumed from "
             f"its history.")
@@ -775,12 +781,12 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
     if not chosen:
         log(f"[context] {spec['key']:<10} curve  no document longer than the target span")
         return out
-    # THE TARGET IS TOKENISED ONCE -- it is the same 2,000 characters at every context length,
-    # and it is small. Nothing else is tokenised in advance.
-    spans = [(spec["encode"](d[len(d) - tail:]), len(d[len(d) - tail:].encode("utf-8")))
-             for d in progress(chosen, desc=f"[context] {spec['key']} target spans",
-                               total=len(chosen))]
-
+    # NOTHING IS TOKENISED IN ADVANCE, NOT EVEN THE TARGET. Every model here has its own
+    # vocabulary, so no ids can be shared between them and none are worth keeping: a token
+    # cache would be per-model, per-text, and correct only until a tokenizer changed under it.
+    # The target span is re-encoded where it is used, inside the loop, at a cost of two
+    # thousand characters -- and that is the whole of the rule, applied without exception so
+    # there is no second place for a stale id to come from.
     for L in args.context_lengths:
         hit = cache.get(f"curve:{L}")
         if hit is not None:
@@ -811,7 +817,10 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
         docs_bar = progress(list(enumerate(chosen, 1)),
                             desc=f"[context] {spec['key']} ctx {L:,}", total=len(chosen))
         for i_doc, d in docs_bar:
-            span_ids, span_bytes = spans[i_doc - 1]
+            # ON THE FLY, here, every time. See above: no ids are kept anywhere.
+            span_text = d[len(d) - tail:]
+            span_ids = spec["encode"](span_text)
+            span_bytes = len(span_text.encode("utf-8"))
             room = L - len(span_ids)
             if room < 0:                       # the target alone is longer than this context
                 continue
@@ -1223,13 +1232,23 @@ class Cache:
     def get(self, pid):
         return self.points.get(pid) if self.enabled else None
 
+    def describe(self, meta):
+        """What the FIGURE needs to draw this model, stored beside its points.
+
+        Without it a cached model can only be redrawn by loading its weights again, which is
+        absurd for a row whose numbers are already on disk -- and impossible for a model whose
+        checkpoint has since gone bad. Name, parameter count, training length and positional
+        scheme are a few hundred bytes and they make the cache self-sufficient."""
+        self.meta = dict(meta)
+
     def put(self, pid, rec):
         """Written THE MOMENT the point is measured, atomically, and MERGED rather than
         replacing: the file is re-read first, so buckets this run knows nothing about survive,
         and so does a bucket written by a run in another terminal."""
         self.points[pid] = rec
         buckets = self._read()
-        buckets[self.hash] = {"signature": self.sig, "points": self.points}
+        buckets[self.hash] = {"signature": self.sig, "meta": getattr(self, "meta", {}),
+                              "points": self.points}
         os.makedirs(CACHE_DIR, exist_ok=True)
         tmp = self.path + ".part"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -1257,6 +1276,74 @@ def _match(buckets, signature):
         return b, (f"cache written by an older version ({', '.join(sorted(extra))} no longer "
                    f"part of the key) -- kept" if extra else "")
     return None, ""
+
+
+# THE KEYS THAT BELONG TO THE RUN rather than to a model. A cached row can be redrawn without
+# loading the model at all, but only if it was measured under the same corpus and settings --
+# these are what that means, and the model's own keys (which checkpoint, which step) are
+# deliberately not among them because a row is being IDENTIFIED, not re-verified.
+RUN_KEYS = ("corpus", "target_chars", "documents", "trials", "copy_words", "seed", "dtype",
+            "unit")
+
+
+def rebuild_rows(points):
+    """Cached points -> the (curve, copy, passkey) lists the figure reads, in x order."""
+    curve, cp, pk = [], [], []
+    for pid, rec in points.items():
+        (curve if pid.startswith("curve:") else cp if pid.startswith("copy:") else pk).append(rec)
+    curve.sort(key=lambda r: r.get("context_length") or r.get("ctx_tokens") or 0)
+    cp.sort(key=lambda r: r.get("filler_words") or 0)
+    pk.sort(key=lambda r: (r.get("filler_words") or 0, r.get("depth") or 0))
+    return curve, cp, pk
+
+
+def cached_models(args, corpus, log):
+    """Every model with measurements on disk, as figure rows, WITHOUT LOADING A SINGLE WEIGHT.
+
+    THIS IS WHAT MAKES A RESUMED RUN DRAW THE WHOLE FIGURE. The rows used to be built only from
+    the models loaded THIS time, so a model skipped for any reason -- a checkpoint that would
+    not open, a baseline that would not download, or simply `--only zetagpt` -- vanished from
+    the pdf even though every one of its points was sitting in the cache. The figure then
+    silently showed less than had been measured, which is worse than showing nothing: it looks
+    like a finished comparison.
+
+    A bucket carries its own `meta` (name, parameters, training length, positional scheme), so
+    a row is redrawn from the cache alone -- including for a model whose checkpoint has since
+    become unreadable, which is exactly when it matters most."""
+    out = {}
+    if not os.path.isdir(CACHE_DIR):
+        return out
+    run = {k: v for k, v in cache_signature({"key": "", "checkpoint": "", "step": None},
+                                            args, corpus).items() if k in RUN_KEYS}
+    for fn in sorted(os.listdir(CACHE_DIR)):
+        if not fn.endswith(".json"):
+            continue
+        key = fn[:-len(".json")]
+        try:
+            with open(os.path.join(CACHE_DIR, fn), "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        buckets = d.get("buckets") or ({"flat": d} if "signature" in d else {})
+        for b in buckets.values():
+            sig = b.get("signature", {})
+            if any(sig.get(k) != v for k, v in run.items()):
+                continue
+            pts = b.get("points") or {}
+            if not pts:
+                continue
+            row = {"key": key, "name": key, "params": 0, "train_len": 0, "max_pos": 0,
+                   "positional": "", "checkpoint": sig.get("checkpoint", ""),
+                   "step": sig.get("step"), "total": None}
+            row.update({k: v for k, v in (b.get("meta") or {}).items() if v is not None})
+            row["curve"], row["copy"], row["passkey"] = rebuild_rows(pts)
+            out[key] = row
+            break
+    if out:
+        log(f"[context] redrawing {len(out)} model(s) from the cache: "
+            + ", ".join(f"{k} ({len(v['curve'])}+{len(v['copy'])}+{len(v['passkey'])} pts)"
+                        for k, v in out.items()))
+    return out
 
 
 def cache_signature(spec, args, corpus):
@@ -1443,27 +1530,37 @@ def main():
     log(f"[context] device={device} dtype={args.dtype} seed={args.seed}")
 
     want = list(args.only) if args.only else ["zetagpt"] + list(BASELINES)
+    data_dir = args.data_dir
+    # WHAT IS ALREADY ON DISK, FIRST. Rows are rebuilt from the cache before a single model is
+    # loaded, so the figure carries every measurement ever taken under these settings -- and a
+    # model that cannot be loaded at all keeps the curve it earned earlier.
+    seeded = cached_models(args, data_dir, log)
+
     specs = []
     for key in want:
         s = (spec_zetagpt(args, device, dtype, log) if key == "zetagpt"
              else spec_hf(key, BASELINES[key], device, dtype, log, args))
         if s is not None:
             specs.append(s)
+    if not specs and not seeded:
+        raise SystemExit("[context] no model could be loaded and nothing is cached")
     if not specs:
-        raise SystemExit("[context] no model could be loaded")
-
-    data_dir = args.data_dir
+        log("[context] no model could be loaded; redrawing what is cached and stopping")
     # a token is ~4 characters, so the longest context wants roughly 4x its tokens in text
     docs = long_documents(data_dir, max(args.context_lengths) * 4 + args.target_chars, log)
 
-    # THE RESULT OBJECT EXISTS BEFORE THE FIRST MEASUREMENT, and every model's row is appended
-    # to it as soon as that model starts -- so the figure shows a model in progress rather than
-    # appearing only once it is finished.
-    res = {"models": [], "corpus": os.path.relpath(data_dir, config.ROOT),
+    # THE RESULT OBJECT STARTS FROM THE CACHE, in the canonical size order, so the very first
+    # figure of a resumed run already carries everything measured before it. A model being
+    # measured now REPLACES its seeded row rather than adding a second one -- the probes replay
+    # their cached points into the fresh list, and two rows for one model would draw it twice.
+    order = ["zetagpt"] + list(BASELINES)
+    res = {"models": [seeded[k] for k in order if k in seeded],
+           "corpus": os.path.relpath(data_dir, config.ROOT),
            "target_chars": args.target_chars, "trials": args.trials,
            "copy_words": args.copy_words, "dtype": args.dtype, "seed": args.seed,
            "progress": "starting"}
     live = Live(res, args.json, args.out, log)
+    live("redrawn from the cache")             # the pdf is correct before anything is measured
     log(f"[context] writing {os.path.relpath(args.out, config.ROOT)} after every point")
 
     for i, spec in enumerate(specs, 1):
@@ -1471,10 +1568,17 @@ def main():
         m = {k: spec[k] for k in ("key", "name", "params", "train_len", "max_pos",
                                   "positional", "checkpoint", "step", "total")}
         m["curve"], m["copy"], m["passkey"] = [], [], []
-        res["models"].append(m)
+        at = next((j for j, r in enumerate(res["models"]) if r["key"] == spec["key"]), None)
+        if at is None:
+            res["models"].append(m)
+        else:
+            res["models"][at] = m
         tag = f"{spec['key']} ({i}/{len(specs)})"
         cache = Cache(spec["key"], cache_signature(spec, args, data_dir), log,
                       enabled=args.resume)
+        # WHAT THE FIGURE NEEDS TO REDRAW THIS ROW WITHOUT THE MODEL, stored beside its points.
+        cache.describe({k: m[k] for k in ("name", "params", "train_len", "max_pos",
+                                          "positional", "step", "total")})
         # THE PROBES APPEND TO THE VERY LISTS THE FIGURE READS. Assigning their return value
         # instead -- m["curve"] = probe_...(...) -- binds only when the probe RETURNS, so every
         # live() call inside it redrew a figure whose curve was still empty and the pdf gained

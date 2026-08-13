@@ -569,17 +569,12 @@ def bpe_from_ckpt(ck, fallback=None, log=print):
     from tokenizer.bpe import BPETokenizer          # here: helpers is imported by the tokenizer
     blob = (ck or {}).get("bpe")
     if blob:
-        import tempfile
-        fd, tmp = tempfile.mkstemp(suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(blob)
-            return BPETokenizer.load(tmp)
-        finally:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        # STRAIGHT FROM THE STRING. This wrote the blob to a SYSTEM TEMPORARY FILE and read it
+        # back, for a value already in memory -- a path outside the project, on a filesystem
+        # that may be small, read-only, or cleared under a long run, and one that no rule about
+        # where this project keeps its files covers. BPETokenizer.loads parses the JSON it was
+        # handed; the round trip through /tmp was never anything but the absence of that method.
+        return BPETokenizer.loads(blob, where="the tokenizer embedded in this checkpoint")
     if fallback and os.path.isfile(fallback):
         log(f"[bpe] this checkpoint carries no tokenizer; falling back to {fallback}. "
             f"It is the only candidate, not a verified match.")

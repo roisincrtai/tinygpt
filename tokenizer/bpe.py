@@ -580,9 +580,23 @@ class BPETokenizer:
 
     @classmethod
     def load(cls, path):
+        """The tokenizer written at `path`."""
+        with open(path, "r", encoding="utf-8") as fh:
+            return cls.loads(fh.read(), where=path)
+
+    @classmethod
+    def loads(cls, text, where="<string>"):
+        """The tokenizer in a JSON STRING, without going through a file.
+
+        A checkpoint carries its tokenizer as exactly this string, and the only way to load one
+        used to be to write it to a system temporary file and read it back -- a path outside
+        the project, on a filesystem that may be small, read-only or cleared under the run, for
+        a value that was already in memory. `where` names the source in any error, so a bad
+        blob inside a checkpoint is not reported as a bad file on disk."""
         # `merges` is the source of truth for encoding; `vocab` in the file is informational and
         # is rebuilt deterministically from the merges here.
-        d = json.load(open(path, "r", encoding="utf-8"))
+        d = json.loads(text)
+        path = where
         # A FILE WITHOUT `layout` PREDATES specials-last, and its ids mean something else: the
         # specials were 0..2 and every byte and merge sat three higher. Loading it under the
         # current layout would not fail -- it would silently return a tokenizer that decodes
