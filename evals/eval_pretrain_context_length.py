@@ -305,7 +305,19 @@ def plan_chunk(spec, T, budget_bytes, itemsize, cap, log=None):
     size helps -- 0 is returned and the length is reported unreachable BEFORE anything is
     allocated, rather than after the allocator says so.
 
-    Returns 0 when the length cannot be done at all."""
+    Returns (chunk, reason). `chunk` is 0 when nothing fits, and `reason` says WHICH THING RAN
+    OUT -- which matters because they are not the same finding:
+
+        "weights"   the model does not fit the budget AT ANY LENGTH. Nothing to do with
+                    context; it would fail identically at 512. Reported once and the model
+                    skipped, NOT drawn as a curve that ends early.
+        "cache"     the KV cache for THIS length exceeds what is left. A genuine limit of the
+                    length, and the point the curve should stop at.
+        ""          it fits.
+
+    CHUNKING IS A TECHNIQUE, NOT A CEILING. The chunk decides how much is resident during one
+    pass; it decides nothing about how long a context may be. Conflating the two would let a
+    budget too small for the WEIGHTS be drawn as a model that cannot handle long contexts."""
     sh = spec.get("shape") or {}
     n_layer = sh.get("n_layer", 12)
     n_head = sh.get("n_head", 12)
@@ -314,6 +326,12 @@ def plan_chunk(spec, T, budget_bytes, itemsize, cap, log=None):
     weights = spec.get("params", 0) * itemsize
     cache = n_layer * T * kv_tok * itemsize
     per_token = 2 * n_head * T * itemsize + 4 * vocab
+    if weights >= budget_bytes:
+        if log is not None:
+            log(f"[context] {spec['key']:<10} plan   weights alone are "
+                f"{weights / 2**30:.2f} GiB against a {budget_bytes / 2**30:.2f} GiB budget: "
+                f"this model does not fit AT ANY LENGTH")
+        return 0, "weights"
     room = budget_bytes - weights - cache
     chunk = int(room // max(per_token, 1))
     if log is not None:
@@ -322,7 +340,7 @@ def plan_chunk(spec, T, budget_bytes, itemsize, cap, log=None):
             f"{max(min(chunk, cap), 0) if chunk > 0 else 0}"
             + ("  (does not fit: the cache alone exceeds the budget)" if chunk <= 0 else
                f", pass ~{min(chunk, cap) * per_token / 2**30:.2f} GiB"))
-    return max(min(chunk, cap), 0)
+    return (max(min(chunk, cap), 0), "" if chunk > 0 else "cache")
 
 
 @torch.no_grad()
@@ -352,7 +370,7 @@ def score_ids(spec, pid, sid, device, chunk, desc=""):
     else:
         budget, itemsize = 0, 4
     if budget:
-        chunk = plan_chunk(spec, T, budget, itemsize, chunk)
+        chunk, _why = plan_chunk(spec, T, budget, itemsize, chunk)
         if chunk <= 0:
             return None, len(sid), 0, T, False
     ids_all = pid + sid
@@ -568,13 +586,20 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
                 f"acc {hit['acc']:.4f}   (cached)")
             live()
             continue
-        chunk = plan_chunk(spec, L, args._budget_bytes, args._itemsize,
-                           args.chunk_tokens, log)
+        chunk, why = plan_chunk(spec, L, args._budget_bytes, args._itemsize,
+                                args.chunk_tokens, log)
+        if why == "weights":
+            # NOT A CONTEXT FINDING. The model is too big for the budget and would fail the
+            # same way at 512; drawing a curve that stops here would say the model cannot
+            # handle long contexts, which is not what was measured. Nothing is recorded.
+            log(f"[context] {spec['key']:<10} curve  SKIPPED: the model does not fit "
+                f"{args.vram_budget:g} GiB at any length -- raise --vram_budget or use "
+                f"--dtype bf16")
+            break
         if chunk <= 0:
-            out.append({"context_length": L, "documents": 0, "ctx_tokens": L, "bpb": None,
-                        "nats_per_token": None, "ppl": None, "acc": None})
-            log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   will not fit "
-                f"{args.vram_budget:g} GiB -- the KV cache alone is larger")
+            log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   the KV cache for this "
+                f"LENGTH exceeds {args.vram_budget:g} GiB -- a limit of the length, not of "
+                f"the chunk")
             live()
             break
         nats = 0.0
