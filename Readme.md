@@ -307,6 +307,11 @@ Talk to a trained checkpoint:
 python chat.py                                # the most aligned checkpoint present
 ```
 
+It streams token by token, and it keeps the conversation: every prompt is the whole transcript
+so far, in the same `\n\nHuman: … \n\nAssistant:` form stage 6 trains on, so a follow-up like
+"and why?" is answerable. When the transcript outgrows the window the oldest turns are dropped
+and it says so. `reset` clears the conversation, `history` prints it with its token count.
+
 ## Citation
 
 ```bibtex

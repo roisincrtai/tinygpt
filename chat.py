@@ -213,7 +213,7 @@ def decode(tok, ids):
 
 @torch.no_grad()
 def generate(model, prompt_ids, device, max_new, temperature, top_k, top_p, eos_id, max_len,
-             desc=""):
+             desc="", on_token=None):
     """Autoregressive sampling, CACHED, and REPORTED while it runs.
 
     IT RECOMPUTED THE WHOLE PREFIX AT EVERY STEP -- O(n^2). That was tolerable while a preview
@@ -226,7 +226,15 @@ def generate(model, prompt_ids, device, max_new, temperature, top_k, top_p, eos_
     long generation shows progress and leaves no trace in the block afterwards -- which is what
     the surrounding preview needs: something to read, not a bar wedged between its lines. A
     generation that takes minutes with no output is indistinguishable from a hung process, and
-    this project's rule that every long-running loop reports is there for exactly that reason."""
+    this project's rule that every long-running loop reports is there for exactly that reason.
+
+    `on_token(ids)` IS THE OTHER WAY OF SATISFYING THAT RULE, for a reader rather than a log:
+    it is called after every accepted token with the ids generated SO FAR, and whatever it
+    returns is ignored. The whole list is passed rather than the one new id because a
+    byte-level BPE token is not a character -- a multi-byte character spans several tokens, and
+    an accented letter decoded one token at a time comes out as replacement characters. The
+    caller decodes the list and prints only what has grown, which is correct at every prefix.
+    Pass `on_token` OR `desc`, not both: a bar and a stream on one line fight for it."""
     from helpers.kv_cache import Cache
     from helpers.utils import progress
     cur, out = list(prompt_ids), []
@@ -270,6 +278,8 @@ def generate(model, prompt_ids, device, max_new, temperature, top_k, top_p, eos_
         if eos_id is not None and nxt == eos_id:
             break
         cur.append(nxt); out.append(nxt)
+        if on_token is not None:
+            on_token(out)
     if hasattr(steps, "close"):
         steps.close()
     return out
@@ -299,24 +309,78 @@ def main():
         else:
             tmpl = "none"
 
+    # THE CONVERSATION, not the last turn of it. `history` is [(you, model), ...] and every
+    # prompt is built from the WHOLE of it: a model asked "and why?" with only those two words
+    # for context has been given an unanswerable question, and answering it anyway is the
+    # failure that reads as the model being stupid rather than as the harness being wrong.
+    history = []
+
     def wrap(text):
+        """The full transcript, ending at the point the model is to continue from.
+
+        The markers are rlhf_hh's, which is not a detail: stage 6 trains on
+        "\\n\\nHuman: ... \\n\\nAssistant:", stage 7 scores it, stages 8 and 10 roll out from it.
+        Prompting here in any other shape would be asking the model a question in a format it
+        was trained out of. A template of "none" keeps the turns separated by blank lines,
+        which is the most a model with no instruction tuning can be given."""
         if tmpl == "chat":
-            return tok.apply_chat_template([{"role": "user", "content": text}],
-                                           tokenize=False, add_generation_prompt=True)
-        return TEMPLATES[tmpl].format(p=text)
+            msgs = []
+            for u, a in history:
+                msgs += [{"role": "user", "content": u}, {"role": "assistant", "content": a}]
+            msgs.append({"role": "user", "content": text})
+            return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        past = "".join(TEMPLATES[tmpl].format(p=u) + " " + a for u, a in history)
+        return past + TEMPLATES[tmpl].format(p=text)
+
+    def fit(ids):
+        """The transcript, LEFT-TRUNCATED to leave room for the reply.
+
+        The window is finite and a conversation is not, so something has to go, and it is the
+        OLDEST turns -- dropping the end would discard the question being asked. Truncation is
+        by token from the left rather than by whole turns, which can cut a turn in half; that
+        is the cheap approximation, and it degrades an old turn rather than losing the new one.
+        Reported when it happens, because a model that has quietly forgotten the start of the
+        conversation looks exactly like a model that is ignoring it."""
+        room = max(max_len - args.max_new_tokens, 1) if max_len else len(ids)
+        if len(ids) <= room:
+            return ids
+        print(f"[chat] transcript {len(ids):,} tokens > {room:,} available: "
+              f"dropping the oldest {len(ids) - room:,}", flush=True)
+        return ids[-room:]
 
     def reply(text):
-        ids = tok(wrap(text), add_special_tokens=False)["input_ids"]
+        """Generate, PRINTING AS IT GOES, and return what was said.
+
+        The stream decodes the whole generation each step and prints only the growth. Decoding
+        the one new token instead would be cheaper and wrong: a byte-level BPE splits a
+        multi-byte character across tokens, so "é" arrives as two ids and would print as two
+        replacement characters."""
+        ids = fit(tok(wrap(text), add_special_tokens=False)["input_ids"])
+        shown = 0
+
+        def stream(out):
+            nonlocal shown
+            s = decode(tok, out)
+            if len(s) > shown:
+                print(s[shown:], end="", flush=True)     # flush: a buffered stream is not one
+                shown = len(s)
+
+        print("Model: ", end="", flush=True)
         gen = generate(model, ids, device, args.max_new_tokens, args.temperature,
-                       args.top_k, args.top_p, eos_id, max_len)
-        return decode(tok, gen).strip()
+                       args.top_k, args.top_p, eos_id, max_len, on_token=stream)
+        print(flush=True)
+        answer = decode(tok, gen).strip()
+        history.append((text, answer))
+        return answer
 
     print(f"[chat] ckpt={args.checkpoint or '(base)'}  device={device}  template={tmpl}  "
           f"(temp={args.temperature} top_k={args.top_k} top_p={args.top_p})", flush=True)
     if args.prompt:
-        print(f"\nYou:   {args.prompt}\nModel: {reply(args.prompt)}", flush=True)
+        print(f"\nYou:   {args.prompt}", flush=True)
+        reply(args.prompt)                     # prints itself, token by token
         return
-    print("Type a prompt; Ctrl-D or 'exit'/'quit' to leave.", flush=True)
+    print("Type a prompt. 'reset' forgets the conversation, "
+          "'history' shows it, Ctrl-D or 'exit'/'quit' leaves.", flush=True)
     while True:
         try:
             text = input("\nYou:   ").strip()
@@ -327,7 +391,23 @@ def main():
             continue
         if text.lower() in ("exit", "quit"):
             break
-        print(f"Model: {reply(text)}", flush=True)
+        # A CONVERSATION HAS TO BE ENDABLE WITHOUT ENDING THE PROCESS. Otherwise the only way to
+        # ask an unrelated question is to reload the checkpoint, which on a big model is a
+        # minute of waiting to clear four lines of context.
+        if text.lower() == "reset":
+            history.clear()
+            print("[chat] conversation cleared", flush=True)
+            continue
+        if text.lower() == "history":
+            if not history:
+                print("[chat] nothing yet", flush=True)
+            for i, (u, a) in enumerate(history, 1):
+                print(f"[chat] {i}. You:   {u}\n[chat]    Model: {a}", flush=True)
+            n = len(tok(wrap(""), add_special_tokens=False)["input_ids"])
+            print(f"[chat] {len(history)} turns, {n:,} tokens of a {max_len:,} window",
+                  flush=True)
+            continue
+        reply(text)
 
 
 if __name__ == "__main__":
