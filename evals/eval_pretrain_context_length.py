@@ -13,11 +13,11 @@ and does it still work past the length it was trained at?
 
 MEMORY IS BUDGETED, NOT HOPED FOR. --vram_budget (20 GiB) is what the whole thing may occupy:
 weights, the KV cache, and the pass in flight. The sequence goes through the cache in chunks,
-and the CHUNK IS SOLVED FOR THE BUDGET AT EACH LENGTH -- smaller at 64k than at 512, because by
+and the CHUNK IS SOLVED FOR THE BUDGET AT EACH LENGTH -- smaller at 32k than at 512, because by
 then the cache has taken the room. A length whose cache ALONE exceeds the budget is reported
 unreachable before anything is allocated, rather than after the allocator says so.
 
-IT RESUMES, and it is built to: the sweep runs to 64k and takes hours. Every measured point is written to
+IT RESUMES, and it is built to: the sweep runs to 32k and takes hours. Every measured point is written to
 cache/evals/eval_context_length/ the moment it exists, and a second run continues from there. The
 cache key is the checkpoint's NAME and step, the corpus's NAME, the probe grids and the
 sampling settings: no path, no device, no timestamp, so two machines agree on what a cached
@@ -30,7 +30,7 @@ InfiniteBench, RULER's QA half) measures instruction tuning and reports the abse
 the absence of context. The three probes here ask only what a language model is: how surprised
 is it by these exact bytes.
 
-    1. CONTEXT CURVE     the same target span, preceded by 512, 1k, 2k ... 64k TOKENS of its
+    1. CONTEXT CURVE     the same target span, preceded by 512, 1k, 2k ... 32k TOKENS of its
                          own document. If the curve keeps falling, the model is USING the extra
                          context; if it flattens at 512 while being fed 8,192, it merely
                          ACCEPTS it. This is the whole distinction, and one number cannot make
@@ -279,13 +279,18 @@ def extend_positions(model, target, log):
     what position 500 of 1,024 meant -- the same fraction of the way through -- which is
     Position Interpolation's idea, applied to a table rather than to a rotation.
 
-    THE CAUSAL MASK BUFFERS GO TOO. GPT-2 and GPT-Neo carry a lower-triangular `bias` sized to
-    the original length; leaving them is what produced
+    THE CAUSAL MASK IS NOT REBUILT, AND MUST NOT BE. GPT-2 and GPT-Neo carry a lower-triangular
+    `bias` buffer sized to the original length, and rebuilding it at the target is a (T x T)
+    tensor -- at 32,768 that is 1.07 billion entries, 4 GiB PER LAYER, 32 GiB across eight of
+    them, which is the very quadratic object the chunked scorer exists to avoid. Trying it is
+    what produced
 
-        RuntimeError: The size of tensor a (2048) must match the size of tensor b (2560)
+        RuntimeError: MPS backend out of memory (tried to allocate 4.00 GiB)
 
-    so every such buffer is rebuilt at the new size. Any model whose mask is built on the fly
-    simply has none to find.
+    The model is loaded with attn_implementation="sdpa" instead, where the causal mask is a flag
+    to scaled_dot_product_attention and no dense buffer is consulted at all. WITHOUT SDPA THE
+    TABLE IS NOT STRETCHED: an eager model would read its stale 2,048-row buffer and fail on
+    shapes, so the extension is refused and reported rather than attempted.
 
     THIS CHANGES THE MODEL, and the figure says so: the label gains "positions interpolated".
     A curve drawn under a published model's name must be that published model."""
@@ -302,6 +307,18 @@ def extend_positions(model, target, log):
     n_old, d = mod.weight.shape
     if target <= n_old:
         return n_old
+    # A DENSE MASK BUFFER IS A REFUSAL. Its presence means the attention path indexes it, and
+    # at the target length it cannot be built -- see the docstring. Better to leave the model
+    # at its native window and say so than to allocate 34 GiB discovering the same thing.
+    impl = str(getattr(getattr(model, "config", None), "_attn_implementation", "")).lower()
+    dense = any(b is not None and b.dim() == 4 and b.shape[-1] == n_old
+                for _n, b in model.named_buffers())
+    if dense and impl not in ("sdpa", "flash_attention_2"):
+        log(f"[context]            NOT extending: this model keeps a dense ({n_old:,} x "
+            f"{n_old:,}) causal mask and is running the {impl or 'eager'} attention path, "
+            f"which would need {target ** 2 * 4 / 2**30:.1f} GiB per layer at {target:,}. "
+            f"It stays at its native window.")
+        return 0
     w = mod.weight.data.detach().float().t().unsqueeze(0)          # (1, d, n_old)
     w = torch.nn.functional.interpolate(w, size=target, mode="linear", align_corners=True)
     new = nn.Embedding(target, d).to(mod.weight.device)
@@ -311,20 +328,12 @@ def extend_positions(model, target, log):
         parent = getattr(parent, part)
     setattr(parent, name.split(".")[-1], new)
 
-    rebuilt = 0
-    for _n, m in model.named_modules():
-        for bname, buf in list(m.named_buffers(recurse=False)):
-            if buf is None or buf.dim() != 4 or buf.shape[-1] != n_old:
-                continue
-            m.register_buffer(bname, torch.tril(torch.ones(
-                target, target, dtype=buf.dtype, device=buf.device)).view(1, 1, target, target))
-            rebuilt += 1
     if hasattr(model, "config"):
         model.config.max_position_embeddings = target
         if hasattr(model.config, "n_positions"):
             model.config.n_positions = target
     log(f"[context]            position table {n_old:,} -> {target:,} rows by linear "
-        f"interpolation" + (f", {rebuilt} causal mask buffer(s) rebuilt" if rebuilt else ""))
+        f"interpolation (the causal mask is sdpa's, so none is materialised)")
     return target
 
 
@@ -338,7 +347,15 @@ def spec_hf(key, repo, device, dtype, log, args):
         return None
     try:
         tk = AutoTokenizer.from_pretrained(repo, cache_dir=config.MODEL_DIR)
-        model = AutoModelForCausalLM.from_pretrained(repo, cache_dir=config.MODEL_DIR)
+        # SDPA WHERE IT EXISTS. scaled_dot_product_attention takes the causal mask as a flag,
+        # so no (T x T) buffer is built and no (T x T) score matrix is materialised either --
+        # which is what makes a 32k forward possible at all. Older architectures without an
+        # sdpa path fall back to eager, and extend_positions then declines to stretch them.
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                repo, cache_dir=config.MODEL_DIR, attn_implementation="sdpa")
+        except Exception:                                          # noqa: BLE001
+            model = AutoModelForCausalLM.from_pretrained(repo, cache_dir=config.MODEL_DIR)
     except Exception as e:                                        # noqa: BLE001
         log(f"[context] {key} skipped: could not load {repo!r} ({e})")
         return None
@@ -355,6 +372,7 @@ def spec_hf(key, repo, device, dtype, log, args):
     # architecture is called, and every rotary model lacks all three.
     learned = any(("wpe" in n) or ("embed_positions" in n) or ("position_embeddings" in n)
                   for n, _ in model.named_parameters())
+    native = n_pos                     # what it was TRAINED at, whatever is done to it after
     extended = 0
     if learned and args.extend_positions and n_pos and args.extend_positions > n_pos:
         extended = extend_positions(model, int(args.extend_positions), log)
@@ -368,7 +386,10 @@ def spec_hf(key, repo, device, dtype, log, args):
         # A LEARNED TABLE IS A WALL; RoPE IS A SLOPE. A model with a position table cannot be
         # run past its rows at all, so max_pos is a hard stop; a rotary model runs and
         # degrades, so its training length is recorded but nothing is refused.
-        "max_pos": n_pos if learned else 0, "train_len": n_pos or 2048,
+        # TRAIN_LEN IS THE NATIVE WINDOW AND STAYS THERE. Stretching the table does not train
+        # the model; reporting "trained at 32,768" of a model trained at 2,048 would put the
+        # extrapolation marker in the wrong place and hide the entire finding.
+        "max_pos": n_pos if learned else 0, "train_len": native or 2048,
         # WHAT THE MODEL SAYS ABOUT ITSELF, kept even for the rotary ones. It is not enforced
         # there -- running past it is the measurement -- but it is what tells a failure beyond
         # this length apart from a failure inside it, which is the difference between a fact to
@@ -413,12 +434,12 @@ def plan_chunk(spec, T, budget_bytes, itemsize, cap, log=None):
                            + chunk x vocab x 4        (logits)
 
     So the budget left for a pass shrinks as T grows, and a chunk of 512 that is comfortable at
-    8k is eight times too large at 64k. Solving for the chunk:
+    8k is four times too large at 32k. Solving for the chunk:
 
         chunk = (budget - weights - cache) / (2 x heads x T x itemsize + 4 x vocab)
 
     with the 2 because the scores and their softmax are alive together. THE CACHE IS THE HARD
-    FLOOR: at 64k it is gigabytes on its own, and when it alone exceeds the budget no chunk
+    FLOOR: at 32k it is gigabytes on its own, and when it alone exceeds the budget no chunk
     size helps -- 0 is returned and the length is reported unreachable BEFORE anything is
     allocated, rather than after the allocator says so.
 
@@ -1111,7 +1132,7 @@ def cache_signature(spec, args, corpus):
     """What a cached POINT depends on -- and nothing else.
 
     THE GRID IS NOT IN HERE, and putting it in was the bug: `context_lengths` was part of the
-    signature, so adding 65,536 to the sweep discarded every point already measured at 512
+    signature, so adding a length to the sweep discarded every point already measured at 512
     through 32,768. Those points had not changed. `curve:512` means "the nats per byte at
     context 512, for this checkpoint, on this corpus, over these documents" -- which of the
     other lengths were also asked for is a property of the RUN, not of the measurement. The same
@@ -1221,16 +1242,16 @@ def parse_args():
                    help="the fixed target span every context length is scored on")
     p.add_argument("--chunk_tokens", type=int, default=512,
                    help="UPPER BOUND on tokens per forward pass; the actual chunk is planned "
-                        "per context length to fit --vram_budget, and is smaller at 64k than "
+                        "per context length to fit --vram_budget, and is smaller at 32k than "
                         "at 512 because the KV cache has taken the room")
     # FORCE A LEARNED TABLE PAST ITS ROWS rather than stopping the curve there. 0 refuses, as
     # before; a number stretches the table to that many rows by interpolation and the model is
     # relabelled in the figure, because it is no longer the published one. The comparison this
     # buys is the interesting one: ZetaGPT needs no such operation at any length.
-    p.add_argument("--extend_positions", type=int, default=65536, metavar="ROWS",
+    p.add_argument("--extend_positions", type=int, default=32768, metavar="ROWS",
                    help="interpolate a learned position table up to this many rows so the model "
                         "can be measured past its native window; 0 = stop the curve at the wall "
-                        "(default: 65536)")
+                        "(default: 32768, the longest context in the sweep)")
     p.add_argument("--vram_budget", type=float, default=20.0, metavar="GiB",
                    help="what the whole thing may occupy: weights + KV cache + the pass in "
                         "flight. The chunk is solved for this, and a length whose CACHE ALONE "
@@ -1258,7 +1279,7 @@ def parse_args():
     # and the doubling is legible on a log axis. 32,768 is reachable only because the sequence
     # is fed through the KV cache in chunks (score_ids); a single pass at that length is a
     # 19 GiB attention matrix.
-    a.context_lengths = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+    a.context_lengths = [512, 1024, 2048, 4096, 8192, 16384, 32768]
     a._budget_bytes = int(a.vram_budget * 2 ** 30)
     a._itemsize = {"fp32": 4, "bf16": 2, "fp16": 2}[a.dtype]
     a.copy_distances = [16, 64, 256, 1024, 4096, 16384]
