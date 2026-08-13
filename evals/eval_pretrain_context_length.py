@@ -1841,13 +1841,17 @@ PASSKEY_DEPTHS = [0.1, 0.5, 0.9]
 DOCUMENTS = 8              # averaged per context length
 TARGET_CHARS = 2000        # the fixed span every context length is scored on
 TRIALS = 4                 # repeats per synthetic point
-# THE RESIDUE COSTS FOUR FORWARD PASSES PER DOCUMENT, not one: F(x) once and F(pi x) once per
-# permutation, each a full pass over T tokens, and unlike the scoring probes none of it can be
-# shared between context lengths. Two documents and two permutations is four passes per length
-# per model -- enough for the expectation to be stable at these lengths, since the norm is
-# already an average over T x d numbers, and few enough that the sweep stays finishable.
+# THE EXPECTATION OVER Pi IS SAMPLED, NOT ENUMERATED. Pi is the uniform distribution over all
+# T! permutations of the positions, and T! is not a number anything can be summed over -- at
+# T = 512 it already exceeds the atoms in the observable universe. rho is an EXPECTATION, so it
+# is estimated the way an expectation is: draw permutations and average. Five draws per
+# document is the default, --num_permut_sampling.
+#
+# Each draw is a full forward pass over T tokens, and none of it can be shared between context
+# lengths, so this is the term that sets what the probe costs: documents x (1 + draws) passes
+# per length per model.
 RESIDUE_DOCUMENTS = 2      # documents per context length for rho(T)
-PERMUTATIONS = 2           # draws from Pi per document
+PERMUTATIONS = 5           # default draws from Pi per document; --num_permut_sampling
 COPY_WORDS = 48            # length of the copied passage
 CHUNK_TOKENS = 512         # upper bound on tokens per forward pass; the chunk is planned
 DTYPE = "fp32"             # the eval reports likelihoods; nothing here is trained
@@ -1878,6 +1882,11 @@ def parse_args():
                    default=True,
                    help=f"measure every point again instead of reusing "
                         f"{os.path.relpath(CACHE_DIR, config.ROOT)}/")
+    p.add_argument("--num_permut_sampling", type=int, default=PERMUTATIONS, metavar="N",
+                   help=f"permutations drawn per document when estimating the positional "
+                        f"residue. Pi is uniform over all T! orderings and rho is an "
+                        f"expectation over it, so it is SAMPLED: N draws, averaged "
+                        f"(default: {PERMUTATIONS})")
     p.add_argument("--plot_only", action="store_true",
                    help="redraw the pdf from the cache and stop; loads no model")
     p.add_argument("--gpu", default="auto", choices=["auto", "cuda", "mps", "cpu"])
@@ -1899,7 +1908,8 @@ def parse_args():
     # and the settings, which are not arguments -- see above
     a.documents, a.target_chars = DOCUMENTS, TARGET_CHARS
     a.trials, a.copy_words, a.seed = TRIALS, COPY_WORDS, SEED
-    a.residue_documents, a.permutations = RESIDUE_DOCUMENTS, PERMUTATIONS
+    a.residue_documents = RESIDUE_DOCUMENTS
+    a.permutations = a.num_permut_sampling
     a.chunk_tokens, a.dtype = CHUNK_TOKENS, DTYPE
     a.extend_positions = True         # not a flag: a length is never refused, ever
     a.context_lengths = list(CONTEXT_LENGTHS)
