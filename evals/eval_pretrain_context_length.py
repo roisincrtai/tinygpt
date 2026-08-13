@@ -175,48 +175,65 @@ def spec_hf(key, repo, device, dtype, log):
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
 def score_span(spec, prefix, span, device, chunk=2048):
-    """-log P(span | prefix), in NATS, and the number of BYTES `span` occupies.
+    """Everything measurable about `span` given `prefix`, in one forward pass.
+
+    Returns (nats, bytes, n_tokens, n_correct, ctx_tokens, ok):
+
+        nats        -log P(span | prefix), summed over the span's tokens
+        bytes       what the span occupies as utf-8 -- the cross-tokenizer denominator
+        n_tokens    how many tokens THIS model spent on it -- the per-token denominator
+        n_correct   how many of those the argmax got right -- next-token accuracy
+        ctx_tokens  the length of the whole sequence, which is the x-axis of every curve
+        ok          False when the model refuses the length (a learned position table with no
+                    row for it, or an allocation that will not fit) -- a fact to plot, not an
+                    error
+
+    FOUR MEASURES FROM ONE PASS, because the forward is the entire cost and computing
+    perplexity, bits per byte and accuracy from separate runs would triple it for numbers that
+    are three views of the same logits.
 
     THE PREFIX AND THE SPAN ARE TOKENISED SEPARATELY and their ids concatenated. Tokenising the
     join would let a merge straddle the boundary, and then the tokens being scored would differ
     from one model to the next by more than the tokenizer -- the span itself would have moved.
     Encoding them apart costs one merge at the seam and buys a span that is exactly the same
-    text for every model, which is the only way four vocabularies land on one axis.
-
-    Returns (nats, bytes, n_tokens, ok). `ok` is False when the model refuses the length -- a
-    learned position table with no row for it -- which is a fact to plot, not an error."""
+    text for every model, which is the only way four vocabularies land on one axis."""
+    nb = len(span.encode("utf-8"))
     pid = spec["encode"](prefix) if prefix else []
     sid = spec["encode"](span)
     if not sid:
-        return 0.0, 0, 0, False
+        return 0.0, 0, 0, 0, len(pid), False
     if spec["max_pos"] and len(pid) + len(sid) > spec["max_pos"]:
-        return None, len(span.encode("utf-8")), len(sid), False
+        return None, nb, len(sid), 0, len(pid) + len(sid), False
     ids = torch.tensor([pid + sid], device=device)
-    n_pre = len(pid)
-    total = 0.0
+    n_pre, T = len(pid), ids.shape[1]
+    total, correct = 0.0, 0
     try:
         if spec["hidden"] is not None and spec["head"] is not None:
             h = spec["hidden"](ids)
             # the vocabulary projection in slices along time, so no (T x vocab) tensor is ever
             # alive -- at 32k and a 150k vocabulary that tensor alone is 19 GiB in fp32
-            for a in range(max(n_pre - 1, 0), ids.shape[1] - 1, chunk):
-                b = min(a + chunk, ids.shape[1] - 1)
+            for a in range(max(n_pre - 1, 0), T - 1, chunk):
+                b = min(a + chunk, T - 1)
                 lg = spec["head"](h[:, a:b]).float()
-                lp = lg.log_softmax(-1).gather(-1, ids[:, a + 1:b + 1].unsqueeze(-1))
-                total += float(-lp.sum())
-                del lg, lp
+                tgt = ids[:, a + 1:b + 1]
+                total += float(-lg.log_softmax(-1).gather(-1, tgt.unsqueeze(-1)).sum())
+                correct += int((lg.argmax(-1) == tgt).sum())
+                del lg, tgt
             del h
         else:
             lg = spec["model"](input_ids=ids).logits[:, :-1].float()
-            lp = lg.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-            total = float(-lp[0, max(n_pre - 1, 0):].sum())
-            del lg, lp
+            a = max(n_pre - 1, 0)
+            tgt = ids[:, a + 1:]
+            total = float(-lg[:, a:].log_softmax(-1).gather(-1, tgt.unsqueeze(-1)).sum())
+            correct = int((lg[:, a:].argmax(-1) == tgt).sum())
+            del lg, tgt
     except (torch.cuda.OutOfMemoryError if torch.cuda.is_available() else RuntimeError) as e:
         if "out of memory" not in str(e).lower():
             raise
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        return None, len(span.encode("utf-8")), len(sid), False
-    return total, len(span.encode("utf-8")), len(sid), True
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return None, nb, len(sid), 0, T, False
+    return total, nb, len(sid), correct, T, True
 
 
 def bpb(nats, nbytes):
@@ -263,34 +280,56 @@ def long_documents(data_dir, want_chars, log, limit=64):
     return docs
 
 
-def probe_context_curve(spec, docs, args, device, log):
-    """Bits per byte on a FIXED target span, given 2^k characters of its own document before it.
+def probe_context_curve(spec, docs, args, device, log, live):
+    """The FIXED target span, given 2^k characters of its own document in front of it.
+
+    FOUR CURVES OUT OF ONE SWEEP, because they are four readings of the same logits and they
+    fail in different ways:
+
+        bits per byte     comparable ACROSS models -- the only unit four tokenizers share
+        perplexity        the number everyone quotes, exp(nats per token), per-tokenizer
+        nats per token    the same thing before the exponential, where small differences read
+        token accuracy    how often the argmax is right, which moves for different reasons than
+                          perplexity does -- a model can sharpen a distribution it already had
+                          roughly right and gain a lot of one and none of the other
 
     The target never moves. Only how much of the document precedes it changes, so a curve that
     falls is the model extracting something from text it did not have before, and a curve that
-    flattens is the model having stopped reading."""
+    flattens is the model having stopped reading.
+
+    THE PDF IS REWRITTEN AFTER EVERY POINT. A sweep over four models and six lengths is hours,
+    and a result that exists only in memory until the end is a result that a killed process
+    throws away."""
     out = []
-    doc = docs[0]
     tail = args.target_chars
     for pre_chars in args.prefix_chars:
-        if pre_chars + tail > len(doc):
+        if pre_chars + tail > len(docs[0]):
             break
         nats = nbytes = 0.0
-        n_ok = 0
+        n_tok = n_cor = ctx = n_ok = 0
         for d in docs[:args.documents]:
             if pre_chars + tail > len(d):
                 continue
             cut = len(d) - tail
             prefix, span = d[max(cut - pre_chars, 0):cut], d[cut:]
-            n, b, _, ok = score_span(spec, prefix, span, device)
+            n, b, t, c, T, ok = score_span(spec, prefix, span, device)
             if not ok:
                 break
-            nats += n; nbytes += b; n_ok += 1
+            nats += n; nbytes += b; n_tok += t; n_cor += c; ctx += T; n_ok += 1
+        npt = (nats / n_tok) if n_ok and n_tok else None
         rec = {"prefix_chars": pre_chars, "documents": n_ok,
-               "bpb": bpb(nats, nbytes) if n_ok else None}
+               "ctx_tokens": round(ctx / n_ok) if n_ok else None,
+               "bpb": bpb(nats, nbytes) if n_ok else None,
+               "nats_per_token": npt,
+               "ppl": math.exp(npt) if npt is not None else None,
+               "acc": (n_cor / n_tok) if n_ok and n_tok else None}
         out.append(rec)
         log(f"[context] {spec['key']:<10} curve  prefix {pre_chars:>7,} chars  "
-            + (f"bpb {rec['bpb']:.4f}  ({n_ok} docs)" if rec["bpb"] else "unreachable"))
+            + (f"ctx {rec['ctx_tokens']:>7,} tok   bpb {rec['bpb']:.4f}   "
+               f"ppl {rec['ppl']:8.2f}   nats/tok {rec['nats_per_token']:.4f}   "
+               f"acc {rec['acc']:.4f}   ({n_ok} docs)"
+               if rec["bpb"] is not None else "unreachable"))
+        live()                                   # the figure, now, not at the end
         if rec["bpb"] is None:
             break
     return out
@@ -308,7 +347,7 @@ def _filler_words(rng, n):
     return " ".join(rng.choice(bank) for _ in range(n))
 
 
-def probe_copy(spec, args, device, log):
+def probe_copy(spec, args, device, log, live):
     """A passage, d words of filler, then THE SAME PASSAGE. Bits per byte on each copy.
 
     THE SECOND COPY IS FREE INFORMATION. A model that can reach back over the filler pays
@@ -327,8 +366,9 @@ def probe_copy(spec, args, device, log):
             rng = random.Random(args.seed * 1009 + dist * 31 + trial)
             passage = _filler_words(rng, args.copy_words)
             filler = _filler_words(rng, dist)
-            n1, b1, _, ok1 = score_span(spec, "", passage, device)
-            n2, b2, _, ok2 = score_span(spec, passage + " " + filler + " ", passage, device)
+            n1, b1, _, _, _, ok1 = score_span(spec, "", passage, device)
+            n2, b2, _, _, _, ok2 = score_span(spec, passage + " " + filler + " ", passage,
+                                              device)
             if not (ok1 and ok2):
                 break
             first_n += n1; first_b += b1; second_n += n2; second_b += b2; reached += 1
@@ -341,6 +381,7 @@ def probe_copy(spec, args, device, log):
         log(f"[context] {spec['key']:<10} copy   filler {dist:>7,} words  "
             + (f"1st {rec['bpb_first']:.3f} -> 2nd {rec['bpb_second']:.3f} bpb   "
                f"gain {rec['gain']:+.3f}" if rec["gain"] is not None else "unreachable"))
+        live()
         if rec["gain"] is None:
             break
     return out
@@ -349,7 +390,7 @@ def probe_copy(spec, args, device, log):
 # --------------------------------------------------------------------------- #
 # probe 3 -- passkey, scored as a likelihood
 # --------------------------------------------------------------------------- #
-def probe_passkey(spec, args, device, log):
+def probe_passkey(spec, args, device, log, live):
     """A five-digit key at a known depth, scored as -log P(the digits | everything before).
 
     NEVER GENERATED, NEVER EXACT-MATCHED. A 133M model that puts a third of its mass on the
@@ -369,7 +410,7 @@ def probe_passkey(spec, args, device, log):
                         + f" The pass key is {key}. Remember it. "
                         + _filler_words(rng, total - before)
                         + " The pass key is")
-                n, b, _, ok = score_span(spec, text, f" {key}", device)
+                n, b, _, _, _, ok = score_span(spec, text, f" {key}", device)
                 if not ok:
                     break
                 nats += n; nbytes += b; reached += 1
@@ -383,12 +424,46 @@ def probe_passkey(spec, args, device, log):
                 f"{depth:.2f}  "
                 + (f"{rec['nats_per_key']:.2f} nats/key (random = 11.51)"
                    if rec["nats_per_key"] is not None else "unreachable"))
+            live()
     return out
 
 
 # --------------------------------------------------------------------------- #
 # the figure
 # --------------------------------------------------------------------------- #
+def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False, marker="o-"):
+    """One metric of probe 1 against CONTEXT LENGTH IN TOKENS.
+
+    x is each model's OWN token count, not a shared axis of characters, because perplexity,
+    nats per token and accuracy are per-token quantities: plotting them against a character
+    count would divide by one thing and index by another. What is held identical across models
+    is the TARGET -- the same span of text is being predicted in every case -- and the x
+    positions differ only because the tokenizers do."""
+    drew = False
+    for m in models:
+        pts = [(r["ctx_tokens"], r[field]) for r in m["curve"]
+               if r.get(field) is not None and r.get("ctx_tokens")]
+        if not pts:
+            continue
+        c = COLOURS.get(m["key"], GREY)
+        ax.plot(*zip(*pts), marker, color=c, lw=1.5, ms=3.4, label=m["name"])
+        drew = True
+        # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
+        # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
+        if any(r.get(field) is None for r in m["curve"]):
+            ax.plot(pts[-1][0], pts[-1][1], "x", color=c, ms=8, mew=1.8)
+        # the training length of each model, where it falls inside the plotted range
+        if m.get("train_len"):
+            ax.axvline(m["train_len"], color=c, lw=0.7, ls=":", alpha=0.45)
+    ax.set_xscale("log", base=2)
+    if logy:
+        ax.set_yscale("log")
+    ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+    ax.set_title(title, loc="left", fontsize=9.5)
+    if drew:
+        ax.legend(fontsize=6.5)
+
+
 def figure(res, out_path):
     import matplotlib
     matplotlib.use("Agg")
@@ -399,67 +474,112 @@ def figure(res, out_path):
         "axes.grid": True, "grid.alpha": 0.25, "axes.spines.top": False,
         "axes.spines.right": False, "legend.frameon": False,
     })
-    fig, ax = plt.subplots(1, 3, figsize=(13.2, 3.9))
+    fig, axes = plt.subplots(2, 3, figsize=(13.2, 7.6))
+    ax = axes.ravel()
     models = res["models"]
 
-    # (1) the context curve
-    for m in models:
-        pts = [(r["prefix_chars"], r["bpb"]) for r in m["curve"] if r["bpb"] is not None]
-        if not pts:
-            continue
-        c = COLOURS.get(m["key"], GREY)
-        ax[0].plot(*zip(*pts), "o-", color=c, lw=1.5, ms=3.4, label=m["name"])
-        # WHERE EACH MODEL STOPPED, and why. A line that ends because the architecture refused
-        # the length must look like it ended; drawing it to the axis edge would hide the result.
-        if len(pts) < len([r for r in m["curve"]]):
-            ax[0].plot(pts[-1][0], pts[-1][1], "x", color=c, ms=8, mew=1.8)
-    ax[0].set_xscale("log", base=2); ax[0].set_yscale("log")
-    ax[0].set_xlabel("characters of the document before the target")
-    ax[0].set_ylabel("bits per byte on the FIXED target span")
-    ax[0].set_title("1. is the extra context used?", loc="left", fontsize=9.5)
-    ax[0].legend(fontsize=7)
+    # ---- row 1: four readings of the same sweep, against context length ---------------- #
+    # DOTTED VERTICALS ARE TRAINING LENGTHS. Everything to the right of a model's own line is
+    # extrapolation, which is the whole question, and it has to be visible without arithmetic.
+    _curve_panel(ax[0], models, "bpb", "context length (tokens)",
+                 "bits per byte on the fixed target",
+                 "1. bits/byte -- the cross-model unit", logy=True)
+    _curve_panel(ax[1], models, "ppl", "context length (tokens)", "perplexity",
+                 "2. perplexity (per tokenizer: shape, not level)", logy=True, marker="s-")
+    _curve_panel(ax[2], models, "nats_per_token", "context length (tokens)", "nats / token",
+                 "3. nats per token", marker="d-")
+    _curve_panel(ax[3], models, "acc", "context length (tokens)",
+                 "next-token accuracy on the target",
+                 "4. token accuracy", marker="v-")
 
-    # (2) copy at distance -- the GAIN is the signal
+    # ---- row 2: the two synthetic probes ----------------------------------------------- #
     for m in models:
         pts = [(r["filler_words"], r["gain"]) for r in m["copy"] if r.get("gain") is not None]
-        if not pts:
-            continue
-        ax[1].plot(*zip(*pts), "s-", color=COLOURS.get(m["key"], GREY), lw=1.5, ms=3.4,
-                   label=m["name"])
-    ax[1].axhline(0.0, color="k", lw=0.8, alpha=0.4)
-    ax[1].set_xscale("log", base=2)
-    ax[1].set_xlabel("filler words between the two copies")
-    ax[1].set_ylabel("bits/byte saved on the second copy")
-    ax[1].set_title("2. can it reach back?", loc="left", fontsize=9.5)
-    ax[1].legend(fontsize=7)
+        if pts:
+            ax[4].plot(*zip(*pts), "s-", color=COLOURS.get(m["key"], GREY), lw=1.5, ms=3.4,
+                       label=m["name"])
+    ax[4].axhline(0.0, color="k", lw=0.8, alpha=0.4)
+    ax[4].set_xscale("log", base=2)
+    ax[4].set_xlabel("filler words between the two copies")
+    ax[4].set_ylabel("bits/byte saved on the second copy")
+    ax[4].set_title("5. can it reach back?", loc="left", fontsize=9.5)
+    if ax[4].get_legend_handles_labels()[0]:
+        ax[4].legend(fontsize=6.5)
 
-    # (3) passkey, averaged over depth
     for m in models:
         by_len = {}
         for r in m["passkey"]:
             if r.get("nats_per_key") is not None:
                 by_len.setdefault(r["filler_words"], []).append(r["nats_per_key"])
         pts = sorted((k, sum(v) / len(v)) for k, v in by_len.items())
-        if not pts:
-            continue
-        ax[2].plot(*zip(*pts), "^-", color=COLOURS.get(m["key"], GREY), lw=1.5, ms=4.0,
-                   label=m["name"])
-    ax[2].axhline(math.log(1e5), color="k", lw=0.8, ls=":", alpha=0.6)
-    ax[2].text(0.02, math.log(1e5), " uniform guess", va="bottom", fontsize=7,
-               transform=ax[2].get_yaxis_transform())
-    ax[2].set_xscale("log", base=2)
-    ax[2].set_xlabel("filler words around the key")
-    ax[2].set_ylabel("nats to name the key  (lower is better)")
-    ax[2].set_title("3. can it retrieve a fact?", loc="left", fontsize=9.5)
-    ax[2].legend(fontsize=7)
+        if pts:
+            ax[5].plot(*zip(*pts), "^-", color=COLOURS.get(m["key"], GREY), lw=1.5, ms=4.0,
+                       label=m["name"])
+    ax[5].axhline(math.log(1e5), color="k", lw=0.8, ls=":", alpha=0.6)
+    ax[5].text(0.02, math.log(1e5), " uniform guess", va="bottom", fontsize=7,
+               transform=ax[5].get_yaxis_transform())
+    ax[5].set_xscale("log", base=2)
+    ax[5].set_xlabel("filler words around the key")
+    ax[5].set_ylabel("nats to name the key  (lower is better)")
+    ax[5].set_title("6. can it retrieve a fact?", loc="left", fontsize=9.5)
+    if ax[5].get_legend_handles_labels()[0]:
+        ax[5].legend(fontsize=6.5)
 
-    fig.suptitle("Context generalization of PRETRAINED models -- likelihood only, "
-                 "nothing generated", y=1.0, fontsize=10)
+    done = res.get("progress", "")
+    fig.suptitle("Context generalization of PRETRAINED models -- likelihood only, nothing "
+                 "generated" + (f"   [{done}]" if done else ""), y=1.0, fontsize=10)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
+    # ATOMIC. The figure is rewritten after every measured point, so a reader may well have it
+    # open; replacing it whole means they never catch it half-written.
+    #
+    # FORMAT IS PASSED EXPLICITLY, because matplotlib infers it from the EXTENSION and the
+    # temporary file ends in `.part` -- which it rejects as an unknown format. Without this the
+    # write raised every time, the guard around the redraw swallowed it, and the pdf silently
+    # stopped updating after the first point. THE ONE THING THIS FEATURE IS FOR.
+    #
+    # AND THE FIGURE IS CLOSED IN A `finally`: closing after a save that raised leaks it, and a
+    # hundred live updates then leak a hundred figures.
+    tmp = out_path + ".part"
+    try:
+        fig.savefig(tmp, format="pdf", bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    os.replace(tmp, out_path)
     return out_path
+
+
+class Live:
+    """The figure and the json, rewritten AFTER EVERY MEASURED POINT.
+
+    NEVER BUFFERED TO THE END. This sweep is four models over six context lengths plus two
+    synthetic probes -- hours, most of it in forwards at 32k -- and a result that exists only in
+    memory until the last line is a result that any interruption destroys. Writing costs about
+    a second against minutes of compute, so the trade is not close.
+
+    It is also the only way to WATCH the thing: open the pdf and the curves grow. A run that
+    produces nothing until it finishes is indistinguishable from a run that has hung."""
+
+    def __init__(self, res, json_path, pdf_path, log):
+        self.res, self.json_path, self.pdf_path, self.log = res, json_path, pdf_path, log
+        self.n = 0
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+
+    def __call__(self, note=""):
+        self.n += 1
+        self.res["progress"] = note or f"{self.n} points measured"
+        tmp = self.json_path + ".part"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.res, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())          # on disk, not in the page cache, before the rename
+        os.replace(tmp, self.json_path)
+        try:
+            figure(self.res, self.pdf_path)
+        except Exception as e:             # noqa: BLE001
+            # A FIGURE MUST NEVER KILL A MEASUREMENT. The numbers are the expensive part and
+            # they are already on disk; a broken draw is reported and the sweep continues.
+            self.log(f"[context] [plot] skipped this update: {type(e).__name__}: {e}")
 
 
 def summarise(res, log):
@@ -552,28 +672,36 @@ def main():
         config.PRETRAIN["model_scheme"], config.PRETRAIN_DIR)
     docs = long_documents(data_dir, max(args.prefix_chars) + args.target_chars, log)
 
-    models = []
-    for spec in specs:
-        log(f"\n[context] === {spec['name']} ===")
+    # THE RESULT OBJECT EXISTS BEFORE THE FIRST MEASUREMENT, and every model's row is appended
+    # to it as soon as that model starts -- so the figure shows a model in progress rather than
+    # appearing only once it is finished.
+    res = {"models": [], "corpus": os.path.relpath(data_dir, config.ROOT),
+           "target_chars": args.target_chars, "trials": args.trials,
+           "copy_words": args.copy_words, "dtype": args.dtype, "seed": args.seed,
+           "progress": "starting"}
+    live = Live(res, args.json, args.out, log)
+    log(f"[context] writing {os.path.relpath(args.out, config.ROOT)} after every point")
+
+    for i, spec in enumerate(specs, 1):
+        log(f"\n[context] === {spec['name']}  ({i}/{len(specs)}) ===")
         m = {k: spec[k] for k in ("key", "name", "params", "train_len", "max_pos",
                                   "positional", "checkpoint", "step", "total")}
-        m["curve"] = probe_context_curve(spec, docs, args, device, log)
-        m["copy"] = probe_copy(spec, args, device, log)
-        m["passkey"] = probe_passkey(spec, args, device, log)
-        models.append(m)
+        m["curve"], m["copy"], m["passkey"] = [], [], []
+        res["models"].append(m)
+        tag = f"{spec['key']} ({i}/{len(specs)})"
+        m["curve"] = probe_context_curve(spec, docs, args, device, log,
+                                         lambda: live(f"{tag}: context curve"))
+        m["copy"] = probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"))
+        m["passkey"] = probe_passkey(spec, args, device, log, lambda: live(f"{tag}: passkey"))
         spec["model"] = None                       # let the weights go before the next model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        live(f"{tag} complete")
 
-    res = {"models": models, "corpus": os.path.relpath(data_dir, config.ROOT),
-           "target_chars": args.target_chars, "trials": args.trials,
-           "copy_words": args.copy_words, "dtype": args.dtype, "seed": args.seed}
-    os.makedirs(os.path.dirname(args.json), exist_ok=True)
-    with open(args.json, "w", encoding="utf-8") as fh:
-        json.dump(res, fh, indent=2)
+    live("complete")
     log(f"\n[context] [json] {os.path.relpath(args.json, config.ROOT)}")
     summarise(res, log)
-    log(f"[context] [figure] {figure(res, args.out)}")
+    log(f"[context] [figure] {os.path.relpath(args.out, config.ROOT)}")
 
 
 if __name__ == "__main__":
