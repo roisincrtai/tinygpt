@@ -1331,6 +1331,23 @@ RUN_KEYS = ("corpus", "target_chars", "documents", "trials", "copy_words", "seed
             "unit")
 
 
+def label_for(key, name, params):
+    """The legend entry for one model: the scheme's name, and for ours its size.
+
+    OURS IS NAMED BY ITS SCHEME -- zetagpt-s, from default_config.SCHEMES via
+    helpers.model_name -- and carries its parameter count, because the whole table is a size
+    ladder and the one row a reader is looking for should say where on it. The baselines carry
+    their published names, which already are how anyone refers to them.
+
+    The size is appended AFTER clean_name, so the parenthetical it removes and the parenthetical
+    this adds cannot be confused: one is a note about method that does not belong in a legend,
+    the other is the model's size, which does."""
+    base = clean_name(name)
+    if key == "zetagpt" and params:
+        return f"{base} ({params / 1e6:.0f}M)"
+    return base
+
+
 def clean_name(name):
     """A model's name, with any parenthetical stripped.
 
@@ -1402,7 +1419,7 @@ def cached_models(args, corpus, log):
         if not (found and points):
             continue
         row.update(meta)
-        row["name"] = clean_name(row.get("name") or key)
+        row["name"] = label_for(key, row.get("name") or key, row.get("params"))
         # AND A CIRCLE EVEN WITHOUT META. A window is a property of the model, not of when its
         # points happened to be written; the table above supplies it when the bucket cannot.
         if not row.get("train_len"):
@@ -1665,7 +1682,7 @@ def main():
         log(f"\n[context] === {spec['name']}  ({i}/{len(specs)}) ===")
         m = {k: spec[k] for k in ("key", "name", "params", "train_len", "max_pos",
                                   "positional", "checkpoint", "step", "total")}
-        m["name"] = clean_name(m["name"])
+        m["name"] = label_for(m["key"], m["name"], m.get("params"))
         m["curve"], m["copy"], m["passkey"] = [], [], []
         at = next((j for j, r in enumerate(res["models"]) if r["key"] == spec["key"]), None)
         if at is None:
