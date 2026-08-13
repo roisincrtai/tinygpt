@@ -982,11 +982,15 @@ def split_at(pts, x0):
         return pts, []
     within = [q for q in pts if q[0] <= x0]
     beyond = [q for q in pts if q[0] > x0]
+    # INTERPOLATE ONLY WHEN x0 IS NOT ALREADY A MEASURED POINT -- but SHARE the boundary in
+    # BOTH cases, which is where this went wrong. When a training length coincides with a
+    # measured length, as 2,048 does for TinyStories and Pythia, the interpolation branch was
+    # skipped and so was the sharing, so `beyond` began at the NEXT length and the figure had a
+    # visible gap between 2^11 and 2^12 -- exactly at the boundary the panel exists to show.
     if within[-1][0] != x0:
         (xa, ya), (xb, yb) = within[-1], beyond[0]
-        y0 = ya + (yb - ya) * (x0 - xa) / (xb - xa)
-        within, beyond = within + [(x0, y0)], [(x0, y0)] + beyond
-    return within, beyond
+        within = within + [(x0, ya + (yb - ya) * (x0 - xa) / (xb - xa))]
+    return within, [within[-1]] + beyond
 
 
 def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
@@ -1126,84 +1130,108 @@ def figure(res, out_path):
 
 
 class Cache:
-    """Measured points, on disk, so a crashed sweep resumes instead of starting again.
+    """Measured points, on disk, so a crashed or changed sweep never measures twice.
 
         cache/evals/eval_context_length/<model>.json
 
-    THIS SWEEP ENDS IN AN ALLOCATION FAILURE BY DESIGN -- attention is quadratic in T, so every
-    curve runs until the machine says no -- and it is hours long. Recomputing the first five
-    points to reach the sixth, every time, is the whole cost of the run spent on arithmetic
-    already done.
+    NOTHING IS EVER OVERWRITTEN. THIS IS THE RULE THE FILE IS BUILT AROUND, and it was broken
+    twice: a signature that did not match left `points` empty and the first put() then wrote
+    that empty dict over the file, destroying every measurement it had just declined to use.
+    --no-resume did the same. Hours of forwards, gone, to record that a setting had changed.
 
-    THE SIGNATURE IS MACHINE-INDEPENDENT, and deliberately: the checkpoint's NAME and step, the
-    corpus's NAME, the probe grids and the sampling settings -- never a path, never a device,
-    never a time. Two machines with the same checkpoint and the same corpus must agree on what
-    a cached point means, or the cache is a source of wrong numbers rather than fast ones. Any
-    change to it discards the file rather than merging into it.
+    SO THE FILE HOLDS BUCKETS, one per signature:
 
-    ONLY SUCCESSFUL POINTS ARE KEPT. An allocation failure is a fact about THIS MACHINE, and
-    writing it into a signature that claims to be machine-independent would tell a larger card
-    that 27k tokens is unreachable because a laptop could not do it. Failures are re-tried on
-    every run; that costs one forward pass, which is the point at which it fails anyway."""
+        {"buckets": {<sig hash>: {"signature": {...}, "points": {...}}, ...}}
+
+    A signature change starts a NEW bucket beside the old ones rather than replacing anything.
+    Change --dtype and come back tomorrow and both sets are there. put() RE-READS the file,
+    edits its own bucket and writes the whole thing back, so a second run measuring a different
+    model, or the same model under different settings, cannot clobber the first.
+
+    A file in the old flat shape is read as a single bucket, so existing caches keep working.
+
+    THE SIGNATURE IS MACHINE-INDEPENDENT -- the checkpoint's NAME and step, the corpus's NAME,
+    the sampling settings; never a path, a device or a time -- and it is compared only on the
+    keys the CURRENT version declares, so narrowing it later cannot invalidate anything.
+
+    ONLY SUCCESSFUL POINTS ARE KEPT. An allocation failure is a fact about one machine, and a
+    machine-independent key must not carry it."""
 
     def __init__(self, key, signature, log, enabled=True):
         self.path = os.path.join(CACHE_DIR, f"{key}.json")
         self.sig, self.log, self.enabled, self.points = signature, log, enabled, {}
+        self.hash = _sig_hash(signature)
+        buckets = self._read()
+        mine, why = _match(buckets, signature)
+        if mine and why:
+            log(f"[context] {key}: {why}")
         if not enabled:
-            if os.path.isfile(self.path):
-                log(f"[context] {key}: --no-resume, ignoring {len(self._read()[1]):,} "
-                    f"cached points")
+            if mine:
+                log(f"[context] {key}: --no-resume, re-measuring "
+                    f"{len(mine.get('points', {})):,} points (they are KEPT on disk until "
+                    f"each is replaced)")
             return
-        old_sig, pts = self._read()
-        if old_sig is None:
-            return
-        # COMPARED ON THE KEYS THE CURRENT SIGNATURE DECLARES, and on nothing else. A stored
-        # signature that also carries keys this version no longer uses is still a match: those
-        # keys were dropped BECAUSE they were found not to affect a measurement, so insisting
-        # they be absent would throw away hours of correct results to enforce a detail of the
-        # file format.
-        #
-        # THIS IS NOT HYPOTHETICAL. `name` was removed from the signature precisely so that
-        # relabelling a model would stop discarding its points -- and a whole-dict comparison
-        # then discarded every cache on disk for having the key the fix had just removed. The
-        # narrowing was right and the comparison was wrong.
-        #
-        # A key the current signature has and the file LACKS is still a discard: its old value
-        # is unknown, so the points cannot be vouched for.
-        differ = [k for k, v in signature.items() if old_sig.get(k) != v]
-        if differ:
-            log(f"[context] {key}: cache discarded, {', '.join(differ)} changed")
-            return
-        extra = [k for k in old_sig if k not in signature]
-        if extra:
-            log(f"[context] {key}: cache written by an older version "
-                f"({', '.join(sorted(extra))} no longer part of the key) -- kept")
-        self.points = pts
-        if pts:
-            log(f"[context] {key}: resuming, {len(pts):,} points already measured")
+        if mine:
+            self.points = dict(mine.get("points", {}))
+            if self.points:
+                log(f"[context] {key}: resuming, {len(self.points):,} points already measured")
+        elif buckets:
+            log(f"[context] {key}: no bucket matches these settings; "
+                f"{len(buckets)} other set(s) on disk are left untouched")
 
     def _read(self):
+        """Every bucket in the file, keyed by signature hash. A file in the old flat shape
+        becomes one bucket; an unreadable file becomes none, and is not written over until a
+        point is actually measured."""
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 d = json.load(fh)
-            return d.get("signature"), d.get("points", {})
         except (OSError, ValueError):
-            return None, {}
+            return {}
+        if "buckets" in d:
+            return d["buckets"]
+        if "signature" in d:                        # the older, single-signature layout
+            return {_sig_hash(d["signature"]): {"signature": d["signature"],
+                                                "points": d.get("points", {})}}
+        return {}
 
     def get(self, pid):
         return self.points.get(pid) if self.enabled else None
 
     def put(self, pid, rec):
-        """Written THE MOMENT the point is measured, atomically. A cache flushed at the end
-        would be empty in exactly the case it exists for."""
+        """Written THE MOMENT the point is measured, atomically, and MERGED rather than
+        replacing: the file is re-read first, so buckets this run knows nothing about survive,
+        and so does a bucket written by a run in another terminal."""
         self.points[pid] = rec
+        buckets = self._read()
+        buckets[self.hash] = {"signature": self.sig, "points": self.points}
         os.makedirs(CACHE_DIR, exist_ok=True)
         tmp = self.path + ".part"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"signature": self.sig, "points": self.points}, fh, indent=1)
+            json.dump({"buckets": buckets}, fh, indent=1)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)
+
+
+def _sig_hash(sig):
+    """A stable id for a signature. Sorted keys so two runs agree, and short so the file stays
+    readable by eye."""
+    import hashlib
+    return hashlib.sha1(json.dumps(sig, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _match(buckets, signature):
+    """The bucket whose signature agrees with `signature` ON THE KEYS IT DECLARES, and a note
+    when it was written by a version that keyed on more than this one does."""
+    for b in buckets.values():
+        old = b.get("signature", {})
+        if any(old.get(k) != v for k, v in signature.items()):
+            continue
+        extra = [k for k in old if k not in signature]
+        return b, (f"cache written by an older version ({', '.join(sorted(extra))} no longer "
+                   f"part of the key) -- kept" if extra else "")
+    return None, ""
 
 
 def cache_signature(spec, args, corpus):
