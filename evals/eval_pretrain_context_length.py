@@ -134,17 +134,49 @@ BASELINES = {
 OUT_PDF = os.path.join(config.PLOT_DIR, "evaluation", "pretrain_context_generalization.pdf")
 OUT_JSON = os.path.join(config.OUTPUT_DIR, "eval", "pretrain_context_generalization.json")
 
-BLUE, ORANGE, GREEN, GREY = "#3b6ea5", "#d1701c", "#2e7d5b", "#8a8a8a"
+# THE PALETTE. Eleven lines on one axis need to be told apart by MORE THAN HUE, so each model
+# gets a colour, a marker and a dash pattern, and keeps all three in every panel -- a reader who
+# has found a line in one panel finds the same line in the next without re-reading the legend.
+#
+# A COLORMAP WAS THE WRONG INSTRUMENT. Sampling `cividis` at eleven points is a SEQUENTIAL scale
+# cut into categories: neighbouring models came out as neighbouring shades of the same
+# blue-to-yellow ramp, indistinguishable in the middle and ugly throughout. A sequential
+# colormap encodes an ordered quantity; these are eleven different objects, which is what a
+# QUALITATIVE palette is for.
+#
+# The colours are Okabe-Ito's colourblind-safe set extended with four more of the same
+# saturation, chosen to stay separable under deuteranopia and to survive being printed in
+# greyscale -- where the markers and dashes carry the distinction on their own.
+OWN = "#12386B"            # ZetaGPT: a deep navy nothing else is near, drawn heavier and on top
+PALETTE = [
+    "#E69F00",             # orange
+    "#56B4E9",             # sky blue
+    "#009E73",             # bluish green
+    "#D55E00",             # vermillion
+    "#CC79A7",             # reddish purple
+    "#6A51A3",             # violet
+    "#8C6D31",             # olive brown
+    "#17A2A2",             # teal
+    "#B03060",             # maroon
+    "#5A5A5A",             # graphite
+]
+MARKERS = ["s", "^", "v", "D", "P", "X", "<", ">", "*", "h"]
+DASHES = [(4, 1.6), (1.4, 1.4), (5, 1.4, 1.2, 1.4), (3, 1.2), (6, 1.6, 1.2, 1.6),
+          (2.4, 1.2), (4, 1.2, 1.2, 1.2), (1.8, 1.8), (5, 2), (3, 1.2, 1.2, 1.2)]
 
 
-def colour_of(key, i, n):
-    """ZetaGPT in blue and drawn heavier; the baselines spread along a colormap in the order
-    they are run, which is smallest first -- so the legend reads as a size ladder rather than
-    as an arbitrary set. Eleven lines need a scale, not eleven remembered names."""
+def style_of(key, i):
+    """Colour, marker and dash for one model -- the same three in every panel.
+
+    ZetaGPT is solid, navy, round-markered and on top; a baseline takes the next entry of each
+    cycle. Three channels rather than one means the figure survives a colourblind reader, a
+    greyscale printer, and two lines that happen to cross."""
     if key == "zetagpt":
-        return BLUE
-    import matplotlib.pyplot as plt
-    return plt.get_cmap("cividis")(0.08 + 0.78 * (i / max(n - 1, 1)))
+        return {"color": OWN, "marker": "o", "linestyle": "-", "lw": 2.6, "ms": 5.0,
+                "zorder": 5, "markeredgecolor": "white", "markeredgewidth": 0.6}
+    j = i % len(PALETTE)
+    return {"color": PALETTE[j], "marker": MARKERS[j], "linestyle": (0, DASHES[j]),
+            "lw": 1.3, "ms": 3.4, "zorder": 2}
 
 
 CACHE_DIR = os.path.join(config.CACHE_DIR, "evals", "eval_context_length")
@@ -230,7 +262,73 @@ def spec_zetagpt(args, device, dtype, log):
     }, model, log)
 
 
-def spec_hf(key, repo, device, dtype, log):
+def extend_positions(model, target, log):
+    """Stretch a learned position table to `target` rows, so a model with a wall can be run past
+    it. Returns the new limit, or 0 when there is nothing to stretch.
+
+    WHY NOT JUST REFUSE. A learned table stops the sweep at 1,024 and the curve ends there,
+    which is true but uninformative: it says the model was BUILT for 1,024, not what happens to
+    a learned scheme asked for more. Interpolating the table is the standard way to ask, and it
+    is the comparison that matters -- ZetaGPT needs no such operation, and the point is what the
+    operation COSTS.
+
+    THE ROWS ARE INTERPOLATED, NOT APPENDED. Appending fresh rows would hand the model positions
+    it has never seen, which is not an extension but a partial re-initialisation. Linear
+    interpolation instead RESCALES the table: old row i lands at i x target / n, and the
+    positions in between are averages of learned neighbours. Position 4,000 of 8,192 then means
+    what position 500 of 1,024 meant -- the same fraction of the way through -- which is
+    Position Interpolation's idea, applied to a table rather than to a rotation.
+
+    THE CAUSAL MASK BUFFERS GO TOO. GPT-2 and GPT-Neo carry a lower-triangular `bias` sized to
+    the original length; leaving them is what produced
+
+        RuntimeError: The size of tensor a (2048) must match the size of tensor b (2560)
+
+    so every such buffer is rebuilt at the new size. Any model whose mask is built on the fly
+    simply has none to find.
+
+    THIS CHANGES THE MODEL, and the figure says so: the label gains "positions interpolated".
+    A curve drawn under a published model's name must be that published model."""
+    import torch.nn as nn
+    emb = None
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.Embedding) and name.split(".")[-1] in (
+                "wpe", "embed_positions", "position_embeddings"):
+            emb = (name, mod)
+            break
+    if emb is None:
+        return 0
+    name, mod = emb
+    n_old, d = mod.weight.shape
+    if target <= n_old:
+        return n_old
+    w = mod.weight.data.detach().float().t().unsqueeze(0)          # (1, d, n_old)
+    w = torch.nn.functional.interpolate(w, size=target, mode="linear", align_corners=True)
+    new = nn.Embedding(target, d).to(mod.weight.device)
+    new.weight.data.copy_(w.squeeze(0).t().to(mod.weight.dtype))
+    parent = model
+    for part in name.split(".")[:-1]:
+        parent = getattr(parent, part)
+    setattr(parent, name.split(".")[-1], new)
+
+    rebuilt = 0
+    for _n, m in model.named_modules():
+        for bname, buf in list(m.named_buffers(recurse=False)):
+            if buf is None or buf.dim() != 4 or buf.shape[-1] != n_old:
+                continue
+            m.register_buffer(bname, torch.tril(torch.ones(
+                target, target, dtype=buf.dtype, device=buf.device)).view(1, 1, target, target))
+            rebuilt += 1
+    if hasattr(model, "config"):
+        model.config.max_position_embeddings = target
+        if hasattr(model.config, "n_positions"):
+            model.config.n_positions = target
+    log(f"[context]            position table {n_old:,} -> {target:,} rows by linear "
+        f"interpolation" + (f", {rebuilt} causal mask buffer(s) rebuilt" if rebuilt else ""))
+    return target
+
+
+def spec_hf(key, repo, device, dtype, log, args):
     """A Hugging Face base model, or None. A baseline that cannot be loaded is reported and
     dropped -- the run continues with whichever rows it has."""
     try:
@@ -257,9 +355,15 @@ def spec_hf(key, repo, device, dtype, log):
     # architecture is called, and every rotary model lacks all three.
     learned = any(("wpe" in n) or ("embed_positions" in n) or ("position_embeddings" in n)
                   for n, _ in model.named_parameters())
+    extended = 0
+    if learned and args.extend_positions and n_pos and args.extend_positions > n_pos:
+        extended = extend_positions(model, int(args.extend_positions), log)
+        if extended:
+            n_pos = extended
     trunk = getattr(model, "transformer", None) or getattr(model, "model", None)
     return _finish({
-        "key": key, "name": repo.split("/")[-1],
+        "key": key,
+        "name": repo.split("/")[-1] + (" (positions interpolated)" if extended else ""),
         "encode": lambda t: tk(t, add_special_tokens=False)["input_ids"],
         # A LEARNED TABLE IS A WALL; RoPE IS A SLOPE. A model with a position table cannot be
         # run past its rows at all, so max_pos is a hard stop; a rotary model runs and
@@ -820,7 +924,7 @@ def probe_passkey(spec, args, device, log, live, cache, out):
 # --------------------------------------------------------------------------- #
 # the figure
 # --------------------------------------------------------------------------- #
-def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False, marker="o-"):
+def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
     """One metric of probe 1 against CONTEXT LENGTH IN TOKENS.
 
     x is each model's OWN token count, not a shared axis of characters, because perplexity,
@@ -835,26 +939,27 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False, marker="o
                for r in m["curve"] if r.get(field) is not None]
         if not pts:
             continue
-        c, own = colour_of(m["key"], i, n), m["key"] == "zetagpt"
-        ax.plot(*zip(*pts), marker, color=c, lw=2.4 if own else 1.2,
-                ms=4.6 if own else 3.0, zorder=3 if own else 2, label=m["name"])
+        st = style_of(m["key"], i)
+        own = m["key"] == "zetagpt"
+        ax.plot(*zip(*pts), label=m["name"], **st)
         drew = True
         # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
         # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
         if any(r.get(field) is None for r in m["curve"]):
-            ax.plot(pts[-1][0], pts[-1][1], "x", color=c, ms=8, mew=1.8)
+            ax.plot(pts[-1][0], pts[-1][1], "x", color=st["color"], ms=8, mew=1.8,
+                    zorder=st["zorder"] + 1)
         # ONLY ZETAGPT'S TRAINING LENGTH IS DRAWN. Eleven dotted verticals is a grid, not a
         # reading; the one that matters is where OUR model stops having been trained and
         # starts extrapolating, and each baseline's own length is in the legend table.
         if own and m.get("train_len"):
-            ax.axvline(m["train_len"], color=c, lw=0.9, ls=":", alpha=0.6)
+            ax.axvline(m["train_len"], color=st["color"], lw=0.9, ls=":", alpha=0.6)
     ax.set_xscale("log", base=2)
     if logy:
         ax.set_yscale("log")
     ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize=9.5)
     if drew:
-        ax.legend(fontsize=5.6, ncol=2, loc="best")
+        ax.legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
 
 
 def figure(res, out_path):
@@ -877,27 +982,24 @@ def figure(res, out_path):
     _curve_panel(ax[0], models, "npb", "context length (tokens)", "nats / byte",
                  "average encoding length per byte (nats / byte)", logy=True)
     _curve_panel(ax[1], models, "ppl", "context length (tokens)", "perplexity",
-                 "perplexity", logy=True, marker="s-")
+                 "perplexity", logy=True)
     _curve_panel(ax[2], models, "nats_per_token", "context length (tokens)", "nats / token",
-                 "average encoding length per token", marker="d-")
+                 "average encoding length per token")
     _curve_panel(ax[3], models, "acc", "context length (tokens)", "accuracy",
-                 "next-token prediction accuracy", marker="v-")
+                 "next-token prediction accuracy")
 
     # ---- row 2: the two synthetic probes ----------------------------------------------- #
     for i, m in enumerate(models):
         pts = [(r["filler_words"], r["gain"]) for r in m["copy"] if r.get("gain") is not None]
         if pts:
-            own = m["key"] == "zetagpt"
-            ax[4].plot(*zip(*pts), "s-", color=colour_of(m["key"], i, len(models)),
-                       lw=2.4 if own else 1.2, ms=4.6 if own else 3.0,
-                       zorder=3 if own else 2, label=m["name"])
+            ax[4].plot(*zip(*pts), label=m["name"], **style_of(m["key"], i))
     ax[4].axhline(0.0, color="k", lw=0.8, alpha=0.4)
     ax[4].set_xscale("log", base=2)
     ax[4].set_xlabel("filler words between the two copies")
     ax[4].set_ylabel("nats / byte saved on the second copy")
     ax[4].set_title("encoding length saved by a repeated passage", loc="left", fontsize=9.5)
     if ax[4].get_legend_handles_labels()[0]:
-        ax[4].legend(fontsize=5.6, ncol=2, loc="best")
+        ax[4].legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
 
     for i, m in enumerate(models):
         by_len = {}
@@ -906,10 +1008,7 @@ def figure(res, out_path):
                 by_len.setdefault(r["filler_words"], []).append(r["nats_per_key"])
         pts = sorted((k, sum(v) / len(v)) for k, v in by_len.items())
         if pts:
-            own = m["key"] == "zetagpt"
-            ax[5].plot(*zip(*pts), "^-", color=colour_of(m["key"], i, len(models)),
-                       lw=2.4 if own else 1.2, ms=4.6 if own else 3.0,
-                       zorder=3 if own else 2, label=m["name"])
+            ax[5].plot(*zip(*pts), label=m["name"], **style_of(m["key"], i))
     ax[5].axhline(math.log(1e5), color="k", lw=0.8, ls=":", alpha=0.6)
     ax[5].text(0.02, math.log(1e5), " uniform guess", va="bottom", fontsize=7,
                transform=ax[5].get_yaxis_transform())
@@ -918,7 +1017,7 @@ def figure(res, out_path):
     ax[5].set_ylabel("nats to name the key")
     ax[5].set_title("encoding length of a buried key", loc="left", fontsize=9.5)
     if ax[5].get_legend_handles_labels()[0]:
-        ax[5].legend(fontsize=5.6, ncol=2, loc="best")
+        ax[5].legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
 
     # NO SUPTITLE. The panels carry their own titles and a figure that goes into a paper is
     # captioned there; a banner across the top is duplication in the document and noise in the
@@ -1009,20 +1108,35 @@ class Cache:
 
 
 def cache_signature(spec, args, corpus):
-    """What a cached point depends on. NO PATH, NO DEVICE, NO TIME -- see Cache."""
+    """What a cached POINT depends on -- and nothing else.
+
+    THE GRID IS NOT IN HERE, and putting it in was the bug: `context_lengths` was part of the
+    signature, so adding 65,536 to the sweep discarded every point already measured at 512
+    through 32,768. Those points had not changed. `curve:512` means "the nats per byte at
+    context 512, for this checkpoint, on this corpus, over these documents" -- which of the
+    other lengths were also asked for is a property of the RUN, not of the measurement. The same
+    went for the copy and passkey grids.
+
+    NOR IS ANYTHING THAT ONLY AFFECTS HOW THE NUMBER IS COMPUTED. --chunk_tokens and
+    --vram_budget decide how much is resident during a forward pass; they do not change the
+    logits, so a cache must survive a change to either. Wiping hours of measurement because the
+    memory budget moved is exactly the failure this cache exists to prevent.
+
+    WHAT IS LEFT is what would make the number different: which model (spec["name"] carries
+    "positions interpolated" when the table was stretched, so an extended model is a different
+    model here), which checkpoint and step, which corpus, how much text is scored, how many
+    documents and trials, the seed, the precision, and the unit.
+
+    NO PATH, NO DEVICE, NO TIME -- so two machines with the same checkpoint agree on what a
+    cached point means."""
     return {
-        "model": spec["key"],
+        "model": spec["key"], "name": spec.get("name", spec["key"]),
         "checkpoint": os.path.basename(str(spec["checkpoint"]).rstrip("/")),
         "step": spec.get("step"),
         "corpus": os.path.basename(str(corpus).rstrip("/")),
         "target_chars": args.target_chars, "documents": args.documents,
         "trials": args.trials, "copy_words": args.copy_words,
         "seed": args.seed, "dtype": args.dtype, "unit": "nats_per_byte",
-        "context_lengths": list(args.context_lengths),
-        "chunk_tokens": args.chunk_tokens, "vram_budget": args.vram_budget,
-        "copy_distances": list(args.copy_distances),
-        "passkey_lengths": list(args.passkey_lengths),
-        "passkey_depths": list(args.passkey_depths),
     }
 
 
@@ -1109,6 +1223,14 @@ def parse_args():
                    help="UPPER BOUND on tokens per forward pass; the actual chunk is planned "
                         "per context length to fit --vram_budget, and is smaller at 64k than "
                         "at 512 because the KV cache has taken the room")
+    # FORCE A LEARNED TABLE PAST ITS ROWS rather than stopping the curve there. 0 refuses, as
+    # before; a number stretches the table to that many rows by interpolation and the model is
+    # relabelled in the figure, because it is no longer the published one. The comparison this
+    # buys is the interesting one: ZetaGPT needs no such operation at any length.
+    p.add_argument("--extend_positions", type=int, default=65536, metavar="ROWS",
+                   help="interpolate a learned position table up to this many rows so the model "
+                        "can be measured past its native window; 0 = stop the curve at the wall "
+                        "(default: 65536)")
     p.add_argument("--vram_budget", type=float, default=20.0, metavar="GiB",
                    help="what the whole thing may occupy: weights + KV cache + the pass in "
                         "flight. The chunk is solved for this, and a length whose CACHE ALONE "
@@ -1167,7 +1289,7 @@ def main():
     specs = []
     for key in want:
         s = (spec_zetagpt(args, device, dtype, log) if key == "zetagpt"
-             else spec_hf(key, BASELINES[key], device, dtype, log))
+             else spec_hf(key, BASELINES[key], device, dtype, log, args))
         if s is not None:
             specs.append(s)
     if not specs:
