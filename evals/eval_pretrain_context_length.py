@@ -131,6 +131,15 @@ BASELINES = {
     "qwen": "Qwen/Qwen2.5-0.5B",                         # 0.5B,   RoPE,      32,768
     "tinyllama": "TinyLlama/TinyLlama_v1.1",             # 1.1B,   RoPE,      2,048
 }
+# THE NATIVE CONTEXT WINDOW OF EACH BASELINE -- where its circle goes. Normally this comes off
+# the loaded model's config and is stored with its points; this table is what a row rebuilt
+# from a bucket written before that used instead of having no circle at all. It is the same
+# number the README's table gives.
+NATIVE_CONTEXT = {
+    "tinystories-1m": 2048, "tinystories-8m": 2048, "tinystories-33m": 2048,
+    "pythia-70m": 2048, "gpt2": 1024, "smollm2-135m": 8192,
+    "gemma3-270m": 32768, "qwen3-0.6b": 32768, "qwen": 32768, "tinyllama": 2048,
+}
 OUT_PDF = os.path.join(config.PLOT_DIR, "evaluation", "pretrain_context_generalization.pdf")
 OUT_JSON = os.path.join(config.OUTPUT_DIR, "eval", "pretrain_context_generalization.json")
 
@@ -1372,21 +1381,35 @@ def cached_models(args, corpus, log):
         except (OSError, ValueError):
             continue
         buckets = d.get("buckets") or ({"flat": d} if "signature" in d else {})
+        # EVERY MATCHING BUCKET, NOT THE FIRST. A model may have several -- an old one written
+        # before the signature was narrowed, a newer one beside it -- and they describe the SAME
+        # measurement, since they agree on every key that decides a value. Taking the first
+        # matching one took whichever the file happened to list first, which for pythia-70m,
+        # tinystories-8m/33m and zetagpt was the OLD bucket: no `meta`, so no training length,
+        # so no circle and no solid/dashed split. Points are merged and the richest meta wins.
+        row = {"key": key, "name": key, "params": 0, "train_len": 0, "max_pos": 0,
+               "positional": "", "checkpoint": "", "step": None, "total": None}
+        points, meta, found = {}, {}, False
         for b in buckets.values():
             sig = b.get("signature", {})
             if any(sig.get(k) != v for k, v in run.items()):
                 continue
-            pts = b.get("points") or {}
-            if not pts:
-                continue
-            row = {"key": key, "name": key, "params": 0, "train_len": 0, "max_pos": 0,
-                   "positional": "", "checkpoint": sig.get("checkpoint", ""),
-                   "step": sig.get("step"), "total": None}
-            row.update({k: v for k, v in (b.get("meta") or {}).items() if v is not None})
-            row["name"] = clean_name(row.get("name") or key)
-            row["curve"], row["copy"], row["passkey"] = rebuild_rows(pts)
-            out[key] = row
-            break
+            found = True
+            points.update(b.get("points") or {})
+            meta.update({k: v for k, v in (b.get("meta") or {}).items() if v is not None})
+            row["checkpoint"] = sig.get("checkpoint", row["checkpoint"])
+            row["step"] = sig.get("step", row["step"])
+        if not (found and points):
+            continue
+        row.update(meta)
+        row["name"] = clean_name(row.get("name") or key)
+        # AND A CIRCLE EVEN WITHOUT META. A window is a property of the model, not of when its
+        # points happened to be written; the table above supplies it when the bucket cannot.
+        if not row.get("train_len"):
+            row["train_len"] = (args.base if key == "zetagpt" else 0) or \
+                NATIVE_CONTEXT.get(key, 0)
+        row["curve"], row["copy"], row["passkey"] = rebuild_rows(points)
+        out[key] = row
     if out:
         log(f"[context] redrawing {len(out)} model(s) from the cache: "
             + ", ".join(f"{k} ({len(v['curve'])}+{len(v['copy'])}+{len(v['passkey'])} pts)"
