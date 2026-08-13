@@ -487,7 +487,13 @@ def setup(args, need_pairs=True, pretokenize_pairs=False, draw_bpe=False):
     # every checkpoint, history and figure this run writes is named after the configuration,
     # so an ablation never overwrites the run it is compared with
     tag = helpers.set_run_tag(model_cfg_from_args(args))
-    for d in (args.model_dir, args.data_dir, CKDIR, PLOTDIR):
+    # WHAT THIS RUN WRITES, and only that. args.data_dir is data/download -- the DOWNLOADED
+    # corpora, which are input: read-only, produced by the download tool and by nothing else.
+    # Creating it here wrote an empty directory into the data root on any machine that had not
+    # downloaded anything, and turned "the corpus is missing" -- which is what happened, and is
+    # actionable -- into "the corpus is empty", which is neither. A stage reads that tree; it
+    # does not make it. Everything a run PRODUCES goes under cache/, checkpoints/ or outputs/.
+    for d in (args.model_dir, CKDIR, PLOTDIR):
         os.makedirs(d, exist_ok=True)
     device = helpers.resolve_device(args.gpu)
     # ASKED FOR AND AVAILABLE ARE DIFFERENT THINGS, and the difference is settled HERE, once,

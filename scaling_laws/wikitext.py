@@ -27,7 +27,18 @@ import os
 
 import default_config as config
 
+# THE TWO ROOTS ARE NOT THE SAME ROOT, and this file used to confuse them.
+#
+#   DIR       data/download/wikitext-103/   the RAW CORPUS. Downloaded, read-only, the input.
+#                                           Nothing this program produces belongs in it.
+#   CACHE_DIR cache/wikitext-103/           what the program PRODUCES from that input.
+#
+# The token cache was being written as data/download/wikitext-103/tokens.train.bin -- generated
+# bytes deposited in the middle of the raw dataset, where they are indistinguishable from what
+# was downloaded, get copied with it, and are deleted by anyone tidying a corpus. Everything
+# derived lives under cache/, which is the rule the corpus token streams already follow.
 DIR = os.path.join(config.DOWNLOAD_DIR, "wikitext-103")
+CACHE_DIR = os.path.join(config.CACHE_DIR, "wikitext-103")
 HF_NAME, HF_CONFIG = "wikitext", "wikitext-103-raw-v1"
 RAW = {"train": "wiki.train.tokens", "valid": "wiki.valid.tokens"}
 
@@ -42,12 +53,22 @@ def signature(tok):
 
 
 def _cache_path(split):
-    return os.path.join(DIR, f"tokens.{split}.bin")
+    return os.path.join(CACHE_DIR, f"tokens.{split}.bin")
+
+
+def _cache_paths(split):
+    """Where to look, in order: the cache, then the OLD place inside the raw corpus.
+
+    A cache that moved must not be a cache that rebuilds. The old file is still perfectly
+    valid -- same format, same signature check -- so it is read where it lies and only the
+    next WRITE goes to the new location. Nothing is deleted from the raw corpus by this
+    program; if the stray file is to go, that is a decision for a person with `rm`."""
+    return [_cache_path(split), os.path.join(DIR, f"tokens.{split}.bin")]
 
 
 def _read_cache(split, sig):
-    p = _cache_path(split)
-    if not os.path.isfile(p):
+    p = next((q for q in _cache_paths(split) if os.path.isfile(q)), None)
+    if p is None:
         return None
     try:
         with open(p, "rb") as fh:
@@ -62,7 +83,7 @@ def _read_cache(split, sig):
 
 
 def _write_cache(split, sig, ids):
-    os.makedirs(DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)     # cache/, NEVER the raw corpus directory
     p = _cache_path(split)
     tmp = p + ".tmp"
     with open(tmp, "wb") as fh:                    # atomic: never leave a half-written cache
