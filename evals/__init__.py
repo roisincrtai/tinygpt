@@ -3,7 +3,6 @@ evals -- measurements taken on a TRAINED model, separate from the stages that tr
 
     python evals/eval.py --stages dpo                held-out evaluation of an aligned stage
     python evals/eval_pretrain_context_length.py     does a PRETRAINED model use a long context
-    python evals/content_extrapolation.py            perplexity at 1x..128x the training length
 
 A stage package (pretrain/, instruct_sft/, cot/, ...) owns an algorithm that produces a
 checkpoint. Everything here owns a QUESTION asked of a checkpoint that already exists: nothing
