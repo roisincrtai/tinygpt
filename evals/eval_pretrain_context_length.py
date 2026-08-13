@@ -1088,13 +1088,15 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
         # sweep happened to pass it.
         ring = ring_at(pts, m.get("train_len"))
         if ring:
-            # THE MODEL'S OWN MARKER, hollow and enlarged -- not a circle for everybody. Eleven
-            # identical rings say only "somebody's training length is here"; the model's own
-            # symbol says WHOSE, matches the markers on its line, and matches its legend entry,
-            # so a reader tracing one curve never has to work out which ring belongs to it.
-            ax.plot([ring[0]], [ring[1]], marker=st["marker"], markersize=11.0,
-                    markerfacecolor="none", markeredgecolor=st["color"], markeredgewidth=1.6,
-                    linestyle="none", zorder=st["zorder"] + 1)
+            # A CIRCLE, FOR EVERY MODEL. One symbol means one thing -- "this is where this
+            # model's context window ends" -- and it means it identically on all eleven curves.
+            # WHAT DIFFERS IS WHERE IT SITS: 1,024 for GPT-2, 2,048 for TinyStories and
+            # TinyLlama, 8,192 for SmolLM2, 32,768 for Qwen and Gemma. The position carries the
+            # information; the shape must not, or the reader is decoding a second alphabet to
+            # learn something the x axis already said.
+            ax.plot([ring[0]], [ring[1]], marker="o", markersize=11.0, markerfacecolor="none",
+                    markeredgecolor=st["color"], markeredgewidth=1.6, linestyle="none",
+                    zorder=st["zorder"] + 1)
         drew = True
         # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
         # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
