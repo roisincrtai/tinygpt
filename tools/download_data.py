@@ -6,7 +6,7 @@ repository that downloads.
     python -m tools.download_data --list              what would be fetched, and where
     python -m tools.download_data --only zetagpt-grpo-cot_gsm8k
     python -m tools.download_data --force             re-fetch even if present
-    python -m tools.download_data --reshard           only split oversized directories
+    python -m tools.download_data --reshard           report oversized dirs (splits nothing)
 
     data/download/zetagpt-tiny_pretrain-corpus_wikitext103/         Tiny's corpus
     data/download/zetagpt-pretrain_fineweb-edu-2BT/   ~10 GB, ~2B tokens
@@ -38,10 +38,12 @@ deliberately on one filesystem so that it cannot silently become a copy -- and i
 files rather than symlinks for the corpus scanner to follow. Deleting the cache afterwards is
 safe: the links keep the data alive.
 
-The repository's own layout is preserved verbatim under the target directory, with ONE
-exception: a dataset carrying `files_per_subdir` has its oversized directories split into
-part_NNNN/ afterwards. See shard() for why, and note that it changes where files sit, never
-which files exist.
+THE REPOSITORY'S OWN LAYOUT IS PRESERVED VERBATIM, with no exception. A downloaded corpus is
+read-only input from the moment it lands: nothing here rearranges it, splits it, renames it or
+adds to it afterwards. `shard()` once split oversized directories into part_NNNN/ and no
+longer does -- it reports and returns; `--reshard` declines out loud. The loaders walk a
+corpus recursively, so a flat directory of thirty thousand files reads exactly as a split one
+does, and the split bought nothing that justified editing the input.
 """
 import argparse
 import json
@@ -280,22 +282,23 @@ def describe(log=print):
 
 
 def shard(name, per_dir, log, dry_run=False):
-    """Split any directory under the dataset that holds more than `per_dir` loose files into
-    part_0000/, part_0001/, ... of at most `per_dir` each.
+    """DISABLED. It reports, and it moves nothing.
 
-    WHY. This corpus arrives as one directory of ~29,500 files. A directory that large is slow
-    to list on most filesystems, slow to complete in a shell, and unpleasant to open in
-    anything; on some it degrades badly enough to be felt on every scan. Splitting costs
-    nothing at read time because the corpus scanner walks RECURSIVELY -- every stage sees the
-    same files in the same order whether they sit in one directory or sixty.
+    A downloaded corpus is left EXACTLY as it was fetched. Its directory structure is part of
+    the dataset -- it is what the repository published, what a signature is computed over, and
+    what every other machine holding the same dataset has -- and rearranging it in place edits
+    the one tree in this project that cannot be regenerated from anything else here. The files
+    are not copied first, they are `os.replace`d, so an interruption leaves a corpus half in
+    `part_0000/` and half beside it, matching neither what was downloaded nor what a re-run
+    expects.
 
-    IDEMPOTENT BY CONSTRUCTION. It shards a directory only when that directory holds more than
-    `per_dir` LOOSE files, and after a pass none does -- the parts hold at most `per_dir` each
-    and the parent holds none. Re-running the download therefore does nothing, and a dataset
-    that arrives already split is left exactly as it is.
+    Nothing needed this. `corpus_files` walks recursively, so a flat directory of thirty
+    thousand files reads exactly as a split one does; the split was cosmetic, and it was
+    cosmetic on the input.
 
-    Names are sorted before splitting, so which file lands in which part is a function of the
-    dataset and not of the order the filesystem happened to return."""
+    The function is kept, reporting what it would once have done, so a caller does not vanish
+    into an AttributeError and so `--reshard` says why it declines instead of appearing to
+    work."""
     root = target(name)
     todo = []
     for here, dirs, files in os.walk(root):
@@ -305,20 +308,13 @@ def shard(name, per_dir, log, dry_run=False):
             todo.append((here, loose))
     if not todo:
         return 0
-    moved = 0
+    log(f"[download] {name}: NOT resharding. {len(todo)} directory(ies) hold more than "
+        f"{per_dir} files, and they stay exactly as downloaded:")
     for here, loose in todo:
-        n_parts = (len(loose) + per_dir - 1) // per_dir
-        log(f"[download] {os.path.relpath(here, config.ROOT)}: {len(loose):,} files -> "
-            f"{n_parts} directories of at most {per_dir}")
-        if dry_run:
-            continue
-        for i in range(0, len(loose), per_dir):
-            part = os.path.join(here, f"part_{i // per_dir:04d}")
-            os.makedirs(part, exist_ok=True)
-            for fn in loose[i:i + per_dir]:
-                os.replace(os.path.join(here, fn), os.path.join(part, fn))
-                moved += 1
-    return moved
+        log(f"[download]   {os.path.relpath(here, config.ROOT)}: {len(loose):,} files")
+    log(f"[download] a downloaded corpus is read-only input. The loaders walk it recursively, "
+        f"so its layout costs nothing.")
+    return 0
 
 
 def free_space(path):
@@ -406,10 +402,9 @@ def fetch(name, force, log):
             f"           re-run this command to resume from there.") from e
     materialise(snapshot, dest, log)
     log(f"[download] {name}: transferred, {size_on_disk(name) / 2**30:.1f} GiB")
-    # THE MARKER IS WRITTEN THE MOMENT THE FETCH RETURNS, before sharding moves anything. If
-    # the process dies during sharding the marker is stale, is_complete() sees the counts still
-    # agree (sharding moves files, it does not add or remove them) and the next run re-shards,
-    # which is idempotent.
+    # THE MARKER IS WRITTEN THE MOMENT THE FETCH RETURNS. Nothing rearranges the corpus after
+    # this point -- shard() reports and moves nothing -- so the tree the marker describes is
+    # the tree that stays on disk.
     write_marker(name, sharded=False)
     per_dir = spec.get("files_per_subdir")
     if per_dir:

@@ -40,6 +40,37 @@ def resolve_device(choice):
     return torch.device(choice)
 
 
+# --------------------------------------------------------------------------- #
+# THE DATA ROOT IS INPUT. Nothing this program writes may land in it.
+# --------------------------------------------------------------------------- #
+def input_only(path, what="write"):
+    """Refuse `path` if it is inside data/. Returns it otherwise, so it can wrap a target.
+
+    data/ holds the corpora as they were fetched from Hugging Face. They are the INPUT to
+    every stage and the one thing in this project that cannot be regenerated from anything
+    else here -- re-fetching means the network, the hours and the exact revision being
+    available again. A stage READS them; nothing derived belongs among them, no file is added
+    beside them, no directory is renamed or resharded under them, and a corpus is never
+    rewritten in place. Everything produced goes to cache/, checkpoints/ or outputs/.
+
+    This is a guard rather than a convention because a convention is a thing that holds until
+    someone adds one line in a hurry. It sits on the WRITE primitives -- the checkpoint save,
+    the history save, the token-store shard writer and its manifest, the pair cache -- so the
+    rule is enforced at the only places it can be broken, whatever calls them.
+
+    The one exception is the download tool, which is what puts the corpora there in the first
+    place and does not go through these primitives."""
+    p = os.path.abspath(path)
+    root = os.path.abspath(config.DATA_DIR)
+    if p == root or p.startswith(root + os.sep):
+        raise SystemExit(
+            f"[guard] refusing to {what} inside the data root: {os.path.relpath(p, config.ROOT)}\n"
+            f"        data/ holds the corpora as downloaded. They are read-only input; only\n"
+            f"        tools/download_data.py may put anything there. Everything this program\n"
+            f"        produces belongs under cache/, checkpoints/ or outputs/.")
+    return path
+
+
 def progress(it, desc="", initial=0, total=None):
     """tqdm over `it`, counting in ABSOLUTE steps.
 
@@ -649,6 +680,7 @@ def _atomic_torch_save(obj, path):
 
     The failure is re-raised with the free space attached, because the underlying iostream error
     names neither the file nor the cause."""
+    input_only(path, "save a checkpoint")
     tmp = path + ".tmp"
     try:
         torch.save(obj, tmp)
@@ -756,6 +788,7 @@ def save_hist(ckdir, stage, records):
     p = hist_path(ckdir, stage)
     tmp = p + ".tmp"
     try:
+        input_only(p, "save a history")
         with open(tmp, "w") as f:
             json.dump(records, f)
         os.replace(tmp, p)
@@ -1764,6 +1797,7 @@ def _pair_read(stem, want_pairs):
 
 def _pair_manifest(stem, sig, st, n_records, n_bytes, complete):
     tmp = f"{stem}_index.json.part"
+    input_only(stem, "write a pair manifest")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"magic": "zetagpt-pairs", "version": 1, "sig": sig,
                    "src_size": st.st_size,
@@ -1829,11 +1863,13 @@ def attach_pair_ids(pairs, src, tok, stage="instruct", split="", log=print, resu
 
     # bytes written after the manifest's mark belong to a pair it does not count
     if os.path.exists(path) and os.path.getsize(path) != valid:
+        input_only(path, "truncate a pair cache")
         with open(path, "r+b") as f:
             f.truncate(valid)
 
     eos = tok.eos_token_id
     n_bytes, n_rec = valid, 3 * done
+    input_only(path, "append to a pair cache")
     with open(path, "ab") as fh:
         for i in progress(range(done, len(pairs)),
                           desc=tag(stage) + f" tokenizing {split or 'pairs'}",

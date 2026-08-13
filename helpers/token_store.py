@@ -113,6 +113,8 @@ def _write_index(stem, sig, dtype, eos, vocab_size, shards, complete, cursor=Non
     written together, in one file, by one rename: a cursor that could land in the manifest
     without the shard counts it belongs to would resume from the wrong document, and the
     corpus would silently gain or lose a stretch of text that nothing downstream could see."""
+    from .utils import input_only
+    input_only(stem, "write a token manifest")
     tmp = index_path(stem) + ".part"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"magic": MAGIC, "version": VERSION, "sig": sig, "dtype": dtype,
@@ -158,6 +160,13 @@ def build(stem, sig, documents, eos, vocab_size, log=print, shard_bytes=SHARD_BY
     Every document is written as it arrives; the manifest, and the cursor with it, catch up
     every `flush_seconds`. A plain iterable is still accepted, and resumes by count."""
     import array
+    from .utils import input_only
+    # BEFORE A DIRECTORY IS CREATED OR A BYTE WRITTEN. Everything below writes, truncates and
+    # deletes relative to `stem`, so one check here covers the shards, the manifest, the
+    # trimming of an uncounted tail and the discarding of stale shards. The corpora in data/
+    # are the input; a token stream that tried to build itself among them would be writing
+    # into the one tree that cannot be regenerated.
+    input_only(stem, "build a token stream")
     dtype = dtype_for(vocab_size)
     isz = _itemsize(dtype)
     typecode = "H" if isz == 2 else "I"
