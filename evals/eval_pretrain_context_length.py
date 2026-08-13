@@ -279,7 +279,7 @@ def spec_zetagpt(args, device, dtype, log):
         # MAX_POS = 0 MEANS "NO ARCHITECTURAL LIMIT", which is the claim under test and not a
         # missing value: there is no position table to run out of and no rotary base to
         # extrapolate, so the only ceiling is the memory of the machine.
-        "max_pos": 0, "train_len": int(cfg.get("block_size", 512)),
+        "max_pos": 0, "train_len": args.base or int(cfg.get("block_size", 512)),
         "step": ck.get("step"), "total": ck.get("total"),
         "checkpoint": os.path.relpath(path, config.ROOT),
         "positional": "none (state space recurrence)",
@@ -330,8 +330,9 @@ def extend_positions(model, target, log):
     plan_chunk accounted for. It is reported when it happens. On the sdpa path -- which is every
     model in BASELINES on a current transformers -- none of it occurs.
 
-    THIS CHANGES THE MODEL, and the figure says so: the label gains "positions interpolated".
-    A curve drawn under a published model's name must be that published model."""
+    THIS CHANGES THE MODEL, and the run says so in the log every time it happens. It is not put
+    in the legend: the legend identifies a row, and a note about method in that slot is both
+    longer than the panel and the same note for every learned table."""
     import torch.nn as nn
     emb = None
     for name, mod in model.named_modules():
@@ -389,16 +390,16 @@ def spec_hf(key, repo, device, dtype, log, args):
         log(f"[context] {key} skipped: transformers not importable ({e})")
         return None
     try:
-        tk = AutoTokenizer.from_pretrained(repo, cache_dir=config.MODEL_DIR)
+        tk = AutoTokenizer.from_pretrained(repo, cache_dir=args.model_dir)
         # SDPA WHERE IT EXISTS. scaled_dot_product_attention takes the causal mask as a flag,
         # so no (T x T) buffer is built and no (T x T) score matrix is materialised either --
         # which is what makes a 32k forward possible at all. Older architectures without an
         # sdpa path fall back to eager, and extend_positions then declines to stretch them.
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                repo, cache_dir=config.MODEL_DIR, attn_implementation="sdpa")
+                repo, cache_dir=args.model_dir, attn_implementation="sdpa")
         except Exception:                                          # noqa: BLE001
-            model = AutoModelForCausalLM.from_pretrained(repo, cache_dir=config.MODEL_DIR)
+            model = AutoModelForCausalLM.from_pretrained(repo, cache_dir=args.model_dir)
     except Exception as e:                                        # noqa: BLE001
         log(f"[context] {key} skipped: could not load {repo!r} ({e})")
         return None
@@ -437,7 +438,11 @@ def spec_hf(key, repo, device, dtype, log, args):
     trunk = getattr(model, "transformer", None) or getattr(model, "model", None)
     return _finish({
         "key": key,
-        "name": repo.split("/")[-1] + (" (positions interpolated)" if grows else ""),
+        # THE NAME IS THE MODEL'S NAME. I had it carrying "(positions interpolated)", which is
+        # a note about method in a slot that exists to identify a row -- and at eleven rows it
+        # was longer than the panel. What was done to a learned table is the same for every
+        # learned table, is stated in the log when it happens, and belongs in the caption.
+        "name": repo.split("/")[-1],
         "encode": lambda t: tk(t, add_special_tokens=False)["input_ids"],
         # NOTHING IS REFUSED FOR ITS LENGTH. A learned table is stretched by `ensure` when a
         # longer sequence arrives and a rotary model needs nothing, so the only things that can
@@ -1083,9 +1088,13 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
         # sweep happened to pass it.
         ring = ring_at(pts, m.get("train_len"))
         if ring:
-            ax.plot([ring[0]], [ring[1]], marker="o", markersize=9.5, markerfacecolor="none",
-                    markeredgecolor=st["color"], markeredgewidth=1.5, linestyle="none",
-                    zorder=st["zorder"] + 1)
+            # THE MODEL'S OWN MARKER, hollow and enlarged -- not a circle for everybody. Eleven
+            # identical rings say only "somebody's training length is here"; the model's own
+            # symbol says WHOSE, matches the markers on its line, and matches its legend entry,
+            # so a reader tracing one curve never has to work out which ring belongs to it.
+            ax.plot([ring[0]], [ring[1]], marker=st["marker"], markersize=11.0,
+                    markerfacecolor="none", markeredgecolor=st["color"], markeredgewidth=1.6,
+                    linestyle="none", zorder=st["zorder"] + 1)
         drew = True
         # WHERE A MODEL STOPPED, and that it did. A line ending because the architecture
         # refused the length must LOOK like it ended -- an x, not a line run to the axis edge.
@@ -1394,11 +1403,10 @@ def cache_signature(spec, args, corpus):
     NO PATH, NO DEVICE, NO TIME -- so two machines with the same checkpoint agree on what a
     cached point means."""
     return {
-        # THE LABEL IS NOT IN THE KEY. It carried "(positions interpolated)", so enabling the
-        # extension would have discarded every point already measured -- and those points are
-        # still correct: a stretched table is identical to a native one BELOW the native
-        # window, and above it the native model recorded nothing, because a refused length is
-        # never cached. There is nothing for the two to disagree about.
+        # THE LABEL IS NOT IN THE KEY, and now the label does not vary either. It once carried
+        # "(positions interpolated)", so turning the extension on discarded every point already
+        # measured -- for a change that alters nothing below the native window and nothing
+        # above it either, since a refused length was never cached.
         "model": spec["key"],
         "checkpoint": os.path.basename(str(spec["checkpoint"]).rstrip("/")),
         "step": spec.get("step"),
@@ -1506,12 +1514,26 @@ def parse_args():
     p.add_argument("--checkpoint", default=os.path.join(
         config.CHECKPOINT_DIR, "pretrain", "checkpoint_zetagpt-s_ssm_pretrain.pt"),
         help="the ZetaGPT checkpoint to measure")
+    p.add_argument("--only", action="append", choices=["zetagpt"] + list(BASELINES),
+                   help="measure just this model; repeatable. The figure still redraws every "
+                        "model in the cache, so this narrows the WORK and not the result")
+    p.add_argument("--data_dir", default=CORPUS_DIR,
+                   help="corpus whose HELD-OUT split is scored (validation/test by name); a "
+                        "corpus with none is refused. WikiText articles do not reach 32k -- "
+                        "point this at PG-19 or arXiv for the full sweep")
+    p.add_argument("--base", type=int, default=0,
+                   help="ZetaGPT's training length, which sets where its curve turns from solid "
+                        "to dashed; 0 = the checkpoint's own block_size. A checkpoint part-way "
+                        "through the context schedule has been trained SHORTER than its "
+                        "block_size says, and only you know how far it got")
     # RESUME IS THE DEFAULT, because this sweep is hours long and the normal case is a second
     # run. --no-resume re-measures every point; nothing on disk is deleted either way.
     p.add_argument("--no-resume", "--no_resume", dest="resume", action="store_false",
                    default=True,
                    help=f"measure every point again instead of reusing "
                         f"{os.path.relpath(CACHE_DIR, config.ROOT)}/")
+    p.add_argument("--plot_only", action="store_true",
+                   help="redraw the pdf from the cache and stop; loads no model")
     p.add_argument("--gpu", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     p.add_argument("--max_vram", type=float, default=20.0, metavar="GiB",
                    help="what the whole thing may occupy: weights + KV cache + the pass in "
@@ -1519,12 +1541,20 @@ def parse_args():
                         "whose KV CACHE ALONE exceeds it is reported before anything is "
                         "allocated (default: 20)")
     a = p.parse_args()
-    # the settings, attached so the probes read one object
-    a.data_dir, a.documents, a.target_chars = CORPUS_DIR, DOCUMENTS, TARGET_CHARS
+    # THE DIRECTORIES COME FROM default_config, ASSIGNED AFTER PARSING -- which is what
+    # helpers.common.parse_args does (args.model_dir = config.MODEL_DIR, args.data_dir =
+    # config.DOWNLOAD_DIR). A path that the configuration already fixes is not a per-run
+    # choice, and one place deciding it is what keeps a figure and a checkpoint in the same
+    # tree.
+    a.model_dir = config.MODEL_DIR                      # saved_models/, the Hub cache
+    a.plot_dir = os.path.join(config.PLOT_DIR, "evaluation")
+    a.out = os.path.join(a.plot_dir, "pretrain_context_generalization.pdf")
+    a.json = os.path.join(config.OUTPUT_DIR, "eval", "pretrain_context_generalization.json")
+    # and the settings, which are not arguments -- see above
+    a.documents, a.target_chars = DOCUMENTS, TARGET_CHARS
     a.trials, a.copy_words, a.seed = TRIALS, COPY_WORDS, SEED
     a.chunk_tokens, a.dtype = CHUNK_TOKENS, DTYPE
     a.extend_positions = True         # not a flag: a length is never refused, ever
-    a.out, a.json = OUT_PDF, OUT_JSON
     a.context_lengths = list(CONTEXT_LENGTHS)
     a.copy_distances = list(COPY_DISTANCES)
     a.passkey_lengths = list(PASSKEY_LENGTHS)
@@ -1538,12 +1568,29 @@ def main():
     args = parse_args()
     def log(m): print(m, flush=True)
 
+    if args.plot_only:
+        # STRAIGHT FROM THE CACHE, which is where the measurements live. There is no separate
+        # json to be stale against it, and no model is loaded to redraw a figure.
+        seeded = cached_models(args, args.data_dir, log)
+        if not seeded:
+            raise SystemExit("[context] --plot_only: nothing measured yet under these settings")
+        order = ["zetagpt"] + list(BASELINES)
+        res = {"models": [seeded[k] for k in order if k in seeded],
+               "corpus": os.path.relpath(args.data_dir, config.ROOT),
+               "target_chars": args.target_chars, "trials": args.trials,
+               "copy_words": args.copy_words, "dtype": args.dtype, "seed": args.seed,
+               "progress": "redrawn"}
+        Live(res, args.json, args.out, log)("redrawn from the cache")
+        summarise(res, log)
+        log(f"[context] [figure] {os.path.relpath(args.out, config.ROOT)}")
+        return
+
     from helpers import resolve_device
     device = resolve_device(args.gpu)
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[args.dtype]
     log(f"[context] device={device} dtype={args.dtype} seed={args.seed}")
 
-    want = ["zetagpt"] + list(BASELINES)
+    want = list(args.only) if args.only else ["zetagpt"] + list(BASELINES)
     data_dir = args.data_dir
     # WHAT IS ALREADY ON DISK, FIRST. Rows are rebuilt from the cache before a single model is
     # loaded, so the figure carries every measurement ever taken under these settings -- and a
