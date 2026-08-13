@@ -213,7 +213,7 @@ def spec_hf(key, repo, device, dtype, log):
 # scoring: nats over an exact span, and the bytes that span covers
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def score_ids(spec, pid, sid, device, chunk):
+def score_ids(spec, pid, sid, device, chunk, desc=""):
     """Score `sid` given `pid`, FEEDING THE SEQUENCE THROUGH THE MODEL'S KV CACHE IN CHUNKS.
 
     THIS IS WHAT MAKES 32k REACHABLE. A single forward over T tokens materialises attention as
@@ -235,8 +235,15 @@ def score_ids(spec, pid, sid, device, chunk):
     n_pre = len(pid)
     state = spec["new_state"]()
     total, correct = 0.0, 0
+    # RULE1: A LOOP THAT CAN TAKE MORE THAN A SECOND REPORTS WHILE IT RUNS. At 32,768 tokens
+    # and a chunk of 512 this is 64 forward passes, each one slower than the last because the
+    # cache it attends to keeps growing -- minutes for ONE document, in silence, which is
+    # indistinguishable from a hang. The bar is self-erasing (progress passes leave=False), so
+    # it shows the work and leaves no trace between the lines of the result.
+    steps = progress(range(0, T, chunk), desc=desc or f"[context] {spec['key']} {T:,} tok",
+                     total=-(-T // chunk))
     try:
-        for a in range(0, T, chunk):
+        for a in steps:
             b = min(a + chunk, T)
             x = torch.tensor([ids_all[a:b]], device=device)
             logits, state = spec["forward_chunk"](x, state)
@@ -249,6 +256,10 @@ def score_ids(spec, pid, sid, device, chunk):
             tgt = torch.tensor([ids_all[lo + 1:hi + 1]], device=device)
             total += float(-lg.log_softmax(-1).gather(-1, tgt.unsqueeze(-1)).sum())
             correct += int((lg.argmax(-1) == tgt).sum())
+            n_done = hi - max(n_pre - 1, 0)
+            if hasattr(steps, "set_postfix_str") and n_done:
+                steps.set_postfix_str(f"{n_done:,} scored, "
+                                      f"{total / max(n_done, 1):.3f} nats/tok")
             del lg, tgt, logits
     except (RuntimeError, MemoryError) as e:
         # RUNNING OUT OF MEMORY IS THE EXPECTED END OF A CURVE, not a failure of the run: even
@@ -258,6 +269,9 @@ def score_ids(spec, pid, sid, device, chunk):
             raise
         empty_cache()
         return None, len(sid), 0, T, False
+    finally:
+        if hasattr(steps, "close"):
+            steps.close()
     return total, len(sid), correct, T, True
 
 
@@ -269,7 +283,7 @@ def empty_cache():
 
 
 @torch.no_grad()
-def score_span(spec, prefix, span, device, chunk=512):
+def score_span(spec, prefix, span, device, chunk=512, desc=""):
     """score_ids, for callers that hold text rather than ids.
 
     THE PREFIX AND THE SPAN ARE TOKENISED SEPARATELY and their ids concatenated. Tokenising the
@@ -282,7 +296,7 @@ def score_span(spec, prefix, span, device, chunk=512):
     if not sid:
         return 0.0, 0, 0, 0, 0, False
     pid = spec["encode"](prefix) if prefix else []
-    n, t, c, T, ok = score_ids(spec, pid, sid, device, chunk)
+    n, t, c, T, ok = score_ids(spec, pid, sid, device, chunk, desc=desc)
     return n, nb, t, c, T, ok
 
 
@@ -330,7 +344,7 @@ def long_documents(data_dir, want_chars, log, limit=64):
     return docs
 
 
-def probe_context_curve(spec, docs, args, device, log, live, cache):
+def probe_context_curve(spec, docs, args, device, log, live, cache, out):
     """The FIXED target span at CONTEXT LENGTHS OF 512, 1k, 2k, ... 32k TOKENS.
 
     THE X AXIS IS EXACTLY 2^n FOR EVERY MODEL. The document is tokenised once per model, the
@@ -356,17 +370,25 @@ def probe_context_curve(spec, docs, args, device, log, live, cache):
     THE PDF IS REWRITTEN AFTER EVERY POINT, and every point is cached. A sweep to 32k is hours,
     and a result that exists only in memory until the end is a result an interruption throws
     away."""
-    out = []
     tail = args.target_chars
     # tokenised ONCE per document, not once per length: the same ids are re-cut for every L,
     # and re-encoding 130k characters seven times is minutes spent on an answer already held
     encoded = []
-    for d in docs[:args.documents]:
+    # AND THIS LOOP REPORTS TOO. It is a byte-level BPE over eight documents of ~130,000
+    # characters -- tens of seconds before the first forward pass, with nothing on screen to
+    # say the run had started.
+    chosen = docs[:args.documents]
+    for d in progress(chosen, desc=f"[context] {spec['key']} tokenising documents",
+                      total=len(chosen)):
         if len(d) <= tail:
             continue
         cut = len(d) - tail
         encoded.append((spec["encode"](d[:cut]), spec["encode"](d[cut:]),
                         len(d[cut:].encode("utf-8"))))
+    if encoded:
+        log(f"[context] {spec['key']:<10} {len(encoded)} documents tokenised, "
+            f"longest prefix {max(len(p) for p, _, _ in encoded):,} tokens, "
+            f"target {len(encoded[0][1]):,} tokens / {encoded[0][2]:,} bytes")
     if not encoded:
         log(f"[context] {spec['key']:<10} curve  no document longer than the target span")
         return out
@@ -382,16 +404,25 @@ def probe_context_curve(spec, docs, args, device, log, live, cache):
             continue
         nats = 0.0
         nbytes = n_tok = n_cor = ctx = n_ok = 0
-        for pre_ids, span_ids, span_bytes in encoded:
+        docs_bar = progress(list(enumerate(encoded, 1)),
+                            desc=f"[context] {spec['key']} ctx {L:,}", total=len(encoded))
+        for i_doc, (pre_ids, span_ids, span_bytes) in docs_bar:
             room = L - len(span_ids)
             if room < 0:                       # the target alone is longer than this context
                 continue
             n, t, c, T, ok = score_ids(spec, pre_ids[-room:] if room else [], span_ids,
-                                       device, args.chunk_tokens)
+                                       device, args.chunk_tokens,
+                                       desc=f"[context] {spec['key']} ctx {L:,} "
+                                            f"doc {i_doc}/{len(encoded)}")
             if not ok:
                 n_ok = 0
                 break
             nats += n; nbytes += span_bytes; n_tok += t; n_cor += c; ctx += T; n_ok += 1
+            if hasattr(docs_bar, "set_postfix_str"):
+                docs_bar.set_postfix_str(f"bpb {bpb(nats, nbytes):.4f}, "
+                                         f"acc {n_cor / max(n_tok, 1):.3f}")
+        if hasattr(docs_bar, "close"):
+            docs_bar.close()
         npt = (nats / n_tok) if n_ok and n_tok else None
         rec = {"context_length": L, "documents": n_ok,
                "ctx_tokens": round(ctx / n_ok) if n_ok else L,
@@ -424,7 +455,7 @@ def _filler_words(rng, n):
     return " ".join(rng.choice(bank) for _ in range(n))
 
 
-def probe_copy(spec, args, device, log, live, cache):
+def probe_copy(spec, args, device, log, live, cache, out):
     """A passage, d words of filler, then THE SAME PASSAGE. Bits per byte on each copy.
 
     THE SECOND COPY IS FREE INFORMATION. A model that can reach back over the filler pays
@@ -435,7 +466,6 @@ def probe_copy(spec, args, device, log, live, cache):
     The passage is drawn from the same word bank, so the first copy is not itself hard; what
     is being measured is the DIFFERENCE, and a difficult passage would only add noise to both
     ends of it."""
-    out = []
     for dist in args.copy_distances:
         hit = cache.get(f"copy:{dist}")
         if hit is not None:
@@ -447,16 +477,26 @@ def probe_copy(spec, args, device, log, live, cache):
             continue
         first_n = first_b = second_n = second_b = 0.0
         reached = 0
-        for trial in range(args.trials):
+        trials = progress(range(args.trials), total=args.trials,
+                          desc=f"[context] {spec['key']} copy filler {dist:,}")
+        for trial in trials:
             rng = random.Random(args.seed * 1009 + dist * 31 + trial)
             passage = _filler_words(rng, args.copy_words)
             filler = _filler_words(rng, dist)
-            n1, b1, _, _, _, ok1 = score_span(spec, "", passage, device)
+            tag = f"[context] {spec['key']} copy filler {dist:,} trial {trial + 1}"
+            n1, b1, _, _, _, ok1 = score_span(spec, "", passage, device,
+                                              args.chunk_tokens, desc=tag + " (1st copy)")
             n2, b2, _, _, _, ok2 = score_span(spec, passage + " " + filler + " ", passage,
-                                              device)
+                                              device, args.chunk_tokens,
+                                              desc=tag + " (2nd copy)")
             if not (ok1 and ok2):
                 break
             first_n += n1; first_b += b1; second_n += n2; second_b += b2; reached += 1
+            if hasattr(trials, "set_postfix_str"):
+                trials.set_postfix_str(
+                    f"gain {bpb(first_n, first_b) - bpb(second_n, second_b):+.3f} bpb")
+        if hasattr(trials, "close"):
+            trials.close()
         rec = {"filler_words": dist, "trials": reached,
                "bpb_first": bpb(first_n, first_b) if reached else None,
                "bpb_second": bpb(second_n, second_b) if reached else None}
@@ -477,14 +517,13 @@ def probe_copy(spec, args, device, log, live, cache):
 # --------------------------------------------------------------------------- #
 # probe 3 -- passkey, scored as a likelihood
 # --------------------------------------------------------------------------- #
-def probe_passkey(spec, args, device, log, live, cache):
+def probe_passkey(spec, args, device, log, live, cache, out):
     """A five-digit key at a known depth, scored as -log P(the digits | everything before).
 
     NEVER GENERATED, NEVER EXACT-MATCHED. A 133M model that puts a third of its mass on the
     right key has found it; exact match would call that a zero and the whole probe would read
     as a flat floor for every small model. The likelihood is graded, and it is the same
     quantity for a model that would have got it right."""
-    out = []
     for total in args.passkey_lengths:
         for depth in args.passkey_depths:
             pid = f"key:{total}:{depth:.2f}"
@@ -497,7 +536,9 @@ def probe_passkey(spec, args, device, log, live, cache):
                 continue
             nats = nbytes = 0.0
             reached = 0
-            for trial in range(args.trials):
+            trials = progress(range(args.trials), total=args.trials,
+                              desc=f"[context] {spec['key']} key {total:,} @ {depth:.2f}")
+            for trial in trials:
                 rng = random.Random(args.seed * 7919 + total * 17 + int(depth * 100) + trial)
                 key = f"{rng.randrange(10000, 100000)}"
                 before = int(total * depth)
@@ -505,10 +546,17 @@ def probe_passkey(spec, args, device, log, live, cache):
                         + f" The pass key is {key}. Remember it. "
                         + _filler_words(rng, total - before)
                         + " The pass key is")
-                n, b, _, _, _, ok = score_span(spec, text, f" {key}", device)
+                n, b, _, _, _, ok = score_span(
+                    spec, text, f" {key}", device, args.chunk_tokens,
+                    desc=f"[context] {spec['key']} key {total:,} @ {depth:.2f} "
+                         f"trial {trial + 1}")
                 if not ok:
                     break
                 nats += n; nbytes += b; reached += 1
+                if hasattr(trials, "set_postfix_str"):
+                    trials.set_postfix_str(f"{nats / reached:.2f} nats/key")
+            if hasattr(trials, "close"):
+                trials.close()
             rec = {"filler_words": total, "depth": depth, "trials": reached,
                    "bpb": bpb(nats, nbytes) if reached else None,
                    # per-key nats is the readable form: -log P over the five digits, so 0 is
@@ -885,11 +933,15 @@ def main():
         tag = f"{spec['key']} ({i}/{len(specs)})"
         cache = Cache(spec["key"], cache_signature(spec, args, data_dir), log,
                       enabled=args.resume)
-        m["curve"] = probe_context_curve(spec, docs, args, device, log,
-                                         lambda: live(f"{tag}: context curve"), cache)
-        m["copy"] = probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"), cache)
-        m["passkey"] = probe_passkey(spec, args, device, log,
-                                     lambda: live(f"{tag}: passkey"), cache)
+        # THE PROBES APPEND TO THE VERY LISTS THE FIGURE READS. Assigning their return value
+        # instead -- m["curve"] = probe_...(...) -- binds only when the probe RETURNS, so every
+        # live() call inside it redrew a figure whose curve was still empty and the pdf gained
+        # nothing until a whole model was finished. The list has to be shared, not returned.
+        probe_context_curve(spec, docs, args, device, log,
+                            lambda: live(f"{tag}: context curve"), cache, m["curve"])
+        probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"), cache, m["copy"])
+        probe_passkey(spec, args, device, log, lambda: live(f"{tag}: passkey"), cache,
+                      m["passkey"])
         spec["model"] = None                       # let the weights go before the next model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
