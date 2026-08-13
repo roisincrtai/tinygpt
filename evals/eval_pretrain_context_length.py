@@ -27,9 +27,8 @@ FOR BASE MODELS, WHICH MEANS EVERYTHING IS SCORED BY LIKELIHOOD AND NOTHING IS G
 pretrained model cannot be asked a question -- it has never been shown that answering is what
 one does with a question -- so every long-context benchmark built on instructions (LongBench,
 InfiniteBench, RULER's QA half) measures instruction tuning and reports the absence of it as
-the absence of context. Three of the four probes here ask only what a language model is: how
-surprised is it by these exact bytes. The fourth does not even ask that -- it reads the model
-as a function and measures a symmetry of it.
+the absence of context. The three probes here ask only what a language model is: how surprised
+is it by these exact bytes.
 
     1. CONTEXT CURVE     the same target span, preceded by 512, 1k, 2k ... 32k TOKENS of its
                          own document. If the curve keeps falling, the model is USING the extra
@@ -37,24 +36,14 @@ as a function and measures a symmetry of it.
                          ACCEPTS it. This is the whole distinction, and one number cannot make
                          it -- only the same targets under a growing prefix can.
 
-    2. POSITIONAL        rho(T) = E_pi E_x [ ||F(pi x) - pi F(x)||_2 / ||F(x)||_2 / T ], over
-       RESIDUE           permutations pi of the T positions. A model that used no positional
-                         information at all would commute with pi and score zero; the distance
-                         from zero is how much of its output depends on WHERE a token sat
-                         rather than on WHICH token it was. It needs no targets, no corpus
-                         statistics and no tokenizer agreement, so it is the one number here
-                         that compares a learned table, a rotation and a state-space recurrence
-                         on the same axis -- and it says at which lengths the positional
-                         content survives.
-
-    3. COPY AT DISTANCE  a random passage, then d tokens of filler, then THE SAME PASSAGE. The
+    2. COPY AT DISTANCE  a random passage, then d tokens of filler, then THE SAME PASSAGE. The
                          second copy is free information: a model that can reach back d tokens
                          pays almost nothing for it, one that cannot pays full price. No
                          semantics, no vocabulary effects, no corpus confound -- it isolates
                          retrieval from language modelling, which is exactly what a positional
                          scheme is or is not providing.
 
-    4. PASSKEY           a five-digit key buried at a known depth, and the continuation
+    3. PASSKEY           a five-digit key buried at a known depth, and the continuation
                          "The pass key is". Scored as the likelihood of the digits, never as
                          generated text: a weak model that puts 30% on the right key scores 30%
                          here and zero under exact match, and the graded number is the one that
@@ -364,12 +353,15 @@ def spec_zetagpt(args, device, dtype, log):
         "forward_chunk": lambda x, st: (
             model.head(model.hidden_states(input_ids=x, cache=st)),
             st),
-        # THE TRUNK'S OUTPUT, BEFORE THE VOCABULARY PROJECTION -- what the residue is measured
-        # on. The head is a fixed linear map of it, so it carries the same positional content
-        # in d numbers per token instead of |V|; at 32,768 tokens that is the difference
-        # between 268 MB and 6 TB, and the residue is a ratio, so the projection would cancel
-        # in the leading order anyway.
-        "hidden_chunk": lambda x, st: (model.hidden_states(input_ids=x, cache=st), st),
+# ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+# Kept, not deleted. Uncomment this block and the four other blocks marked
+# 'COMMENTED OUT: token-wise positional residue' to put the probe back.
+#         # THE TRUNK'S OUTPUT, BEFORE THE VOCABULARY PROJECTION -- what the residue is measured
+#         # on. The head is a fixed linear map of it, so it carries the same positional content
+#         # in d numbers per token instead of |V|; at 32,768 tokens that is the difference
+#         # between 268 MB and 6 TB, and the residue is a ratio, so the projection would cancel
+#         # in the leading order anyway.
+#         "hidden_chunk": lambda x, st: (model.hidden_states(input_ids=x, cache=st), st),
     }, model, log)
 
 
@@ -567,12 +559,15 @@ def spec_hf(key, repo, device, dtype, log, args):
         "new_state": lambda: None,
         "forward_chunk": lambda x, st: (lambda o: (o.logits, o.past_key_values))(
             model(input_ids=x, past_key_values=st, use_cache=True)),
-        # The LAST hidden state, which is the trunk's output: the same object ZetaGPT's
-        # hidden_chunk returns, so the residue compares like with like across architectures
-        # whose vocabularies have nothing in common.
-        "hidden_chunk": lambda x, st: (lambda o: (o.hidden_states[-1], o.past_key_values))(
-            model(input_ids=x, past_key_values=st, use_cache=True,
-                  output_hidden_states=True)),
+# ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+# Kept, not deleted. Uncomment this block and the four other blocks marked
+# 'COMMENTED OUT: token-wise positional residue' to put the probe back.
+#         # The LAST hidden state, which is the trunk's output: the same object ZetaGPT's
+#         # hidden_chunk returns, so the residue compares like with like across architectures
+#         # whose vocabularies have nothing in common.
+#         "hidden_chunk": lambda x, st: (lambda o: (o.hidden_states[-1], o.past_key_values))(
+#             model(input_ids=x, past_key_values=st, use_cache=True,
+#                   output_hidden_states=True)),
     }, model, log)
 
 
@@ -973,140 +968,141 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
     return out
 
 
-# --------------------------------------------------------------------------- #
-# probe 2 -- token-wise positional residue
-# --------------------------------------------------------------------------- #
-def hidden_all(spec, ids, device, chunk, desc=""):
-    """F(x) for the whole sequence: a (T, d) float32 tensor ON THE CPU, or None.
-
-    Chunked through the KV cache exactly as score_ids is, and for the same reason -- the
-    attention matrix is (heads x chunk x T) instead of (T x T) -- and exact for the same
-    reason: causality means a position's output depends only on what precedes it, so where the
-    sequence is cut changes what is resident and not what is computed.
-
-    Kept on the CPU because the residue needs the WHOLE of F(x) at once, at arbitrary
-    positions, to compare against F(pi x) position by position: (32,768 x 2,048) in float32 is
-    268 MB, twice over, which is a great deal of a card and nothing at all of a host."""
-    T = len(ids)
-    if spec.get("ensure"):
-        spec["ensure"](T)
-    if spec["max_pos"] and T > spec["max_pos"]:
-        return None
-    if isinstance(chunk, tuple):
-        chunk, budget, itemsize = chunk
-    else:
-        budget, itemsize = 0, 4
-    if budget:
-        chunk, _why = plan_chunk(spec, T, budget, itemsize, chunk)
-        if chunk <= 0:
-            return None
-    state = spec["new_state"]()
-    parts = []
-    # RULE1: sixty-four forward passes, each slower than the last, is not something to do in
-    # silence.
-    steps = progress(range(0, T, chunk), desc=desc or f"[context] {spec['key']} F(x) {T:,} tok",
-                     total=-(-T // chunk))
-    try:
-        for a in steps:
-            x = torch.tensor([ids[a:min(a + chunk, T)]], device=device)
-            h, state = spec["hidden_chunk"](x, state)
-            parts.append(h[0].detach().float().cpu())
-            del h, x
-    except (RuntimeError, MemoryError, IndexError) as e:
-        dm = spec.get("declared_max") or 0
-        if not (is_alloc_error(e) or (dm and T > dm)):
-            raise
-        empty_cache()
-        return None
-    finally:
-        if hasattr(steps, "close"):
-            steps.close()
-    return torch.cat(parts, 0) if parts else None
-
-
-def probe_residue(spec, docs, args, device, log, live, cache, out):
-    """rho(T), the TOKEN-WISE POSITIONAL RESIDUE.
-
-        rho(T) = E_{pi ~ Pi} E_x [ || F(pi x) - pi F(x) ||_2 / || F(x) ||_2 / T ]
-
-    WHAT IT MEASURES. F is the model read as a map from a sequence of T tokens to a sequence of
-    T output vectors. pi is a permutation of the T positions, drawn uniformly. `pi x` permutes
-    the INPUT; `pi F(x)` permutes the OUTPUT of the unpermuted input. A model that used no
-    positional information whatsoever -- a bag of tokens -- would commute with pi exactly and
-    score zero. Everything above zero is output that depends on WHERE a token sat rather than
-    on WHICH token it was: the positional content of the representation, measured without
-    reference to any positional encoding, which is what makes it comparable between a model
-    that has a position table, one that rotates its queries, and one that has neither.
-
-    It is a residue rather than a score: nothing here says a larger value is better. It says
-    how much of what the model computes is positional, and at which context lengths that holds
-    up -- a model whose residue collapses towards zero as T grows is one whose representation
-    is becoming order-blind out there, whatever its perplexity says.
-
-    Norms are over the whole (T, d) output, the ratio makes it scale-free, and the 1/T makes it
-    per token -- all three exactly as written above."""
-    for L in args.context_lengths:
-        hit = cache.get(f"residue:{L}")
-        if hit is not None:
-            out.append(hit)
-            log(f"[context] {spec['key']:<10} residue {L:>7,} tok  rho {hit['rho']:.3e}   "
-                f"({hit['perms']} permutations x {hit['docs']} documents)  (cached)")
-            live()
-            continue
-        acc, n = 0.0, 0
-        plan = (args.chunk_tokens, args._budget_bytes, args._itemsize)
-        texts = docs[:args.residue_documents]
-        pairs = progress(range(len(texts) * args.permutations),
-                         total=len(texts) * args.permutations,
-                         desc=f"[context] {spec['key']} residue {L:,}")
-        broke = False
-        for k in pairs:
-            d, p = divmod(k, args.permutations)
-            ids = prefix_ids(spec, texts[d], L)
-            if ids is None or len(ids) < L:
-                continue                      # this document cannot fill T; it is not a failure
-            ids = ids[:L]
-            H = hidden_all(spec, ids, device, plan,
-                           desc=f"[context] {spec['key']} residue {L:,} doc {d + 1} F(x)")
-            if H is None:
-                broke = True
-                break
-            den = float(torch.linalg.vector_norm(H))
-            if den <= 0:
-                del H
-                continue
-            g = torch.Generator().manual_seed(args.seed * 7919 + L * 13 + d * 101 + p)
-            pi = torch.randperm(L, generator=g)
-            # (pi x)_t = x_{pi(t)} and (pi F(x))_t = F(x)_{pi(t)} -- one permutation applied to
-            # the input in the first term and to the output in the second, which is what makes
-            # the difference a failure of EQUIVARIANCE rather than of anything else.
-            Hp = hidden_all(spec, [ids[i] for i in pi.tolist()], device, plan,
-                            desc=f"[context] {spec['key']} residue {L:,} doc {d + 1} F(pi x)")
-            if Hp is None:
-                del H
-                broke = True
-                break
-            acc += float(torch.linalg.vector_norm(Hp - H[pi])) / den / L
-            n += 1
-            del H, Hp
-            empty_cache()
-            if hasattr(pairs, "set_postfix_str"):
-                pairs.set_postfix_str(f"rho {acc / max(n, 1):.3e}")
-        if hasattr(pairs, "close"):
-            pairs.close()
-        rec = {"context": L, "docs": args.residue_documents,
-               "perms": args.permutations, "samples": n,
-               "rho": (acc / n) if n else None}
-        out.append(rec)
-        log(f"[context] {spec['key']:<10} residue {L:>7,} tok  "
-            + (f"rho {rec['rho']:.3e}   over {n} (document, permutation) pairs"
-               if rec["rho"] is not None else "unreachable"))
-        if rec["rho"] is not None:
-            cache.put(f"residue:{L}", rec)
-        live()
-        if broke and rec["rho"] is None:
-            break
-    return out
+# ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+# # --------------------------------------------------------------------------- #
+# # probe 2 -- token-wise positional residue
+# # --------------------------------------------------------------------------- #
+# def hidden_all(spec, ids, device, chunk, desc=""):
+#     """F(x) for the whole sequence: a (T, d) float32 tensor ON THE CPU, or None.
+#
+#     Chunked through the KV cache exactly as score_ids is, and for the same reason -- the
+#     attention matrix is (heads x chunk x T) instead of (T x T) -- and exact for the same
+#     reason: causality means a position's output depends only on what precedes it, so where the
+#     sequence is cut changes what is resident and not what is computed.
+#
+#     Kept on the CPU because the residue needs the WHOLE of F(x) at once, at arbitrary
+#     positions, to compare against F(pi x) position by position: (32,768 x 2,048) in float32 is
+#     268 MB, twice over, which is a great deal of a card and nothing at all of a host."""
+#     T = len(ids)
+#     if spec.get("ensure"):
+#         spec["ensure"](T)
+#     if spec["max_pos"] and T > spec["max_pos"]:
+#         return None
+#     if isinstance(chunk, tuple):
+#         chunk, budget, itemsize = chunk
+#     else:
+#         budget, itemsize = 0, 4
+#     if budget:
+#         chunk, _why = plan_chunk(spec, T, budget, itemsize, chunk)
+#         if chunk <= 0:
+#             return None
+#     state = spec["new_state"]()
+#     parts = []
+#     # RULE1: sixty-four forward passes, each slower than the last, is not something to do in
+#     # silence.
+#     steps = progress(range(0, T, chunk), desc=desc or f"[context] {spec['key']} F(x) {T:,} tok",
+#                      total=-(-T // chunk))
+#     try:
+#         for a in steps:
+#             x = torch.tensor([ids[a:min(a + chunk, T)]], device=device)
+#             h, state = spec["hidden_chunk"](x, state)
+#             parts.append(h[0].detach().float().cpu())
+#             del h, x
+#     except (RuntimeError, MemoryError, IndexError) as e:
+#         dm = spec.get("declared_max") or 0
+#         if not (is_alloc_error(e) or (dm and T > dm)):
+#             raise
+#         empty_cache()
+#         return None
+#     finally:
+#         if hasattr(steps, "close"):
+#             steps.close()
+#     return torch.cat(parts, 0) if parts else None
+#
+#
+# def probe_residue(spec, docs, args, device, log, live, cache, out):
+#     """rho(T), the TOKEN-WISE POSITIONAL RESIDUE.
+#
+#         rho(T) = E_{pi ~ Pi} E_x [ || F(pi x) - pi F(x) ||_2 / || F(x) ||_2 / T ]
+#
+#     WHAT IT MEASURES. F is the model read as a map from a sequence of T tokens to a sequence of
+#     T output vectors. pi is a permutation of the T positions, drawn uniformly. `pi x` permutes
+#     the INPUT; `pi F(x)` permutes the OUTPUT of the unpermuted input. A model that used no
+#     positional information whatsoever -- a bag of tokens -- would commute with pi exactly and
+#     score zero. Everything above zero is output that depends on WHERE a token sat rather than
+#     on WHICH token it was: the positional content of the representation, measured without
+#     reference to any positional encoding, which is what makes it comparable between a model
+#     that has a position table, one that rotates its queries, and one that has neither.
+#
+#     It is a residue rather than a score: nothing here says a larger value is better. It says
+#     how much of what the model computes is positional, and at which context lengths that holds
+#     up -- a model whose residue collapses towards zero as T grows is one whose representation
+#     is becoming order-blind out there, whatever its perplexity says.
+#
+#     Norms are over the whole (T, d) output, the ratio makes it scale-free, and the 1/T makes it
+#     per token -- all three exactly as written above."""
+#     for L in args.context_lengths:
+#         hit = cache.get(f"residue:{L}")
+#         if hit is not None:
+#             out.append(hit)
+#             log(f"[context] {spec['key']:<10} residue {L:>7,} tok  rho {hit['rho']:.3e}   "
+#                 f"({hit['perms']} permutations x {hit['docs']} documents)  (cached)")
+#             live()
+#             continue
+#         acc, n = 0.0, 0
+#         plan = (args.chunk_tokens, args._budget_bytes, args._itemsize)
+#         texts = docs[:args.residue_documents]
+#         pairs = progress(range(len(texts) * args.permutations),
+#                          total=len(texts) * args.permutations,
+#                          desc=f"[context] {spec['key']} residue {L:,}")
+#         broke = False
+#         for k in pairs:
+#             d, p = divmod(k, args.permutations)
+#             ids = prefix_ids(spec, texts[d], L)
+#             if ids is None or len(ids) < L:
+#                 continue                      # this document cannot fill T; it is not a failure
+#             ids = ids[:L]
+#             H = hidden_all(spec, ids, device, plan,
+#                            desc=f"[context] {spec['key']} residue {L:,} doc {d + 1} F(x)")
+#             if H is None:
+#                 broke = True
+#                 break
+#             den = float(torch.linalg.vector_norm(H))
+#             if den <= 0:
+#                 del H
+#                 continue
+#             g = torch.Generator().manual_seed(args.seed * 7919 + L * 13 + d * 101 + p)
+#             pi = torch.randperm(L, generator=g)
+#             # (pi x)_t = x_{pi(t)} and (pi F(x))_t = F(x)_{pi(t)} -- one permutation applied to
+#             # the input in the first term and to the output in the second, which is what makes
+#             # the difference a failure of EQUIVARIANCE rather than of anything else.
+#             Hp = hidden_all(spec, [ids[i] for i in pi.tolist()], device, plan,
+#                             desc=f"[context] {spec['key']} residue {L:,} doc {d + 1} F(pi x)")
+#             if Hp is None:
+#                 del H
+#                 broke = True
+#                 break
+#             acc += float(torch.linalg.vector_norm(Hp - H[pi])) / den / L
+#             n += 1
+#             del H, Hp
+#             empty_cache()
+#             if hasattr(pairs, "set_postfix_str"):
+#                 pairs.set_postfix_str(f"rho {acc / max(n, 1):.3e}")
+#         if hasattr(pairs, "close"):
+#             pairs.close()
+#         rec = {"context": L, "docs": args.residue_documents,
+#                "perms": args.permutations, "samples": n,
+#                "rho": (acc / n) if n else None}
+#         out.append(rec)
+#         log(f"[context] {spec['key']:<10} residue {L:>7,} tok  "
+#             + (f"rho {rec['rho']:.3e}   over {n} (document, permutation) pairs"
+#                if rec["rho"] is not None else "unreachable"))
+#         if rec["rho"] is not None:
+#             cache.put(f"residue:{L}", rec)
+#         live()
+#         if broke and rec["rho"] is None:
+#             break
+#     return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1361,10 +1357,6 @@ def figure(res, out_path):
     # drawn dashed is extrapolation, which is the whole question, and it is visible without
     # arithmetic and without a rule per model.
     #
-    # NATS PER TOKEN IS NOT DRAWN, though it is still measured and still in the json. It is
-    # log(perplexity): the same curve on a different axis, and a panel that repeats its
-    # neighbour is a panel spent. Nats per BYTE is a different quantity -- it divides by the
-    # text rather than by the tokenisation -- which is why that one stays.
     _curve_panel(ax[0], models, "npb", "context length (tokens)", "nats / byte",
                  "average encoding length per byte (nats / byte)", logy=True)
     _curve_panel(ax[1], models, "ppl", "context length (tokens)", "perplexity",
@@ -1372,42 +1364,49 @@ def figure(res, out_path):
     _curve_panel(ax[2], models, "acc", "context length (tokens)", "accuracy",
                  "next-token prediction accuracy")
 
-    # ---- row 2: the residue, then the two synthetic probes ----------------------------- #
-    # HOW MUCH OF WHAT THE MODEL COMPUTES IS POSITIONAL.
-    #
-    #     rho(T) = E_{pi ~ Pi} E_x [ || F(pi x) - pi F(x) ||_2 / || F(x) ||_2 / T ]
-    #
-    # Zero is a model that commutes with every permutation of its input -- a bag of tokens,
-    # order-blind. The distance from zero is positional content, measured without asking the
-    # model what positional encoding it has, which is the only way to put a learned table, a
-    # rotation and a state-space recurrence on one axis. Log y: the values run over decades.
-    drew = False
-    for i, m in enumerate(models):
-        pts = [(r["context"], r["rho"]) for r in m.get("residue", []) if r.get("rho")]
-        if not pts:
-            continue
-        st = style_of(m["key"], i)
-        # the same solid / dashed / ring convention as row 1, and for the same reason: past a
-        # model's training length this is extrapolation, whatever the quantity being plotted.
-        within, beyond = split_at(pts, m.get("train_len"))
-        if within:
-            ax[3].plot(*zip(*within), linestyle=SOLID, label=m["name"], **st)
-        if beyond:
-            ax[3].plot(*zip(*beyond), linestyle=BEYOND,
-                       **({**st, "label": m["name"]} if not within else st))
-        ring = ring_at(pts, m.get("train_len"))
-        if ring:
-            ax[3].plot([ring[0]], [ring[1]], marker="o", markersize=11.0,
-                       markerfacecolor="none", markeredgecolor=st["color"],
-                       markeredgewidth=1.6, linestyle="none", zorder=st["zorder"] + 1)
-        drew = True
-    ax[3].set_xscale("log", base=2)
-    ax[3].set_yscale("log")
-    ax[3].set_xlabel("context length (tokens)")
-    ax[3].set_ylabel(r"$\rho(T)$")
-    ax[3].set_title("token-wise positional residue", loc="left", fontsize=9.5)
-    if drew:
-        ax[3].legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
+    # ---- row 2: the two synthetic probes ----------------------------------------------- #
+    # ax[3] carries nats per token while the residue is commented out, which is what this
+    # panel drew before the residue existed. Uncomment the block below and delete this call
+    # to put the residue back in the slot.
+    _curve_panel(ax[3], models, "nats_per_token", "context length (tokens)", "nats / token",
+                 "average encoding length per token")
+
+# ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+#     # HOW MUCH OF WHAT THE MODEL COMPUTES IS POSITIONAL.
+#     #
+#     #     rho(T) = E_{pi ~ Pi} E_x [ || F(pi x) - pi F(x) ||_2 / || F(x) ||_2 / T ]
+#     #
+#     # Zero is a model that commutes with every permutation of its input -- a bag of tokens,
+#     # order-blind. The distance from zero is positional content, measured without asking the
+#     # model what positional encoding it has, which is the only way to put a learned table, a
+#     # rotation and a state-space recurrence on one axis. Log y: the values run over decades.
+#     drew = False
+#     for i, m in enumerate(models):
+#         pts = [(r["context"], r["rho"]) for r in m.get("residue", []) if r.get("rho")]
+#         if not pts:
+#             continue
+#         st = style_of(m["key"], i)
+#         # the same solid / dashed / ring convention as row 1, and for the same reason: past a
+#         # model's training length this is extrapolation, whatever the quantity being plotted.
+#         within, beyond = split_at(pts, m.get("train_len"))
+#         if within:
+#             ax[3].plot(*zip(*within), linestyle=SOLID, label=m["name"], **st)
+#         if beyond:
+#             ax[3].plot(*zip(*beyond), linestyle=BEYOND,
+#                        **({**st, "label": m["name"]} if not within else st))
+#         ring = ring_at(pts, m.get("train_len"))
+#         if ring:
+#             ax[3].plot([ring[0]], [ring[1]], marker="o", markersize=11.0,
+#                        markerfacecolor="none", markeredgecolor=st["color"],
+#                        markeredgewidth=1.6, linestyle="none", zorder=st["zorder"] + 1)
+#         drew = True
+#     ax[3].set_xscale("log", base=2)
+#     ax[3].set_yscale("log")
+#     ax[3].set_xlabel("context length (tokens)")
+#     ax[3].set_ylabel(r"$\rho(T)$")
+#     ax[3].set_title("token-wise positional residue", loc="left", fontsize=9.5)
+#     if drew:
+#         ax[3].legend(fontsize=6.2, ncol=2, loc="best", handlelength=2.6)
 
     for i, m in enumerate(models):
         pts = [(r["filler_words"], r["gain"]) for r in m["copy"] if r.get("gain") is not None]
@@ -1641,6 +1640,8 @@ def rebuild_rows(points):
     yields an empty residue list and every other panel of that row draws exactly as it did."""
     curve, res, cp, pk = [], [], [], []
     for pid, rec in points.items():
+        # residue points already on disk are still READ and still sorted, so a cache written
+        # while the probe was active is not lost and comes straight back when it is uncommented
         (curve if pid.startswith("curve:") else
          res if pid.startswith("residue:") else
          cp if pid.startswith("copy:") else pk).append(rec)
@@ -1841,17 +1842,18 @@ PASSKEY_DEPTHS = [0.1, 0.5, 0.9]
 DOCUMENTS = 8              # averaged per context length
 TARGET_CHARS = 2000        # the fixed span every context length is scored on
 TRIALS = 4                 # repeats per synthetic point
-# THE EXPECTATION OVER Pi IS SAMPLED, NOT ENUMERATED. Pi is the uniform distribution over all
-# T! permutations of the positions, and T! is not a number anything can be summed over -- at
-# T = 512 it already exceeds the atoms in the observable universe. rho is an EXPECTATION, so it
-# is estimated the way an expectation is: draw permutations and average. Five draws per
-# document is the default, --num_permut_sampling.
-#
-# Each draw is a full forward pass over T tokens, and none of it can be shared between context
-# lengths, so this is the term that sets what the probe costs: documents x (1 + draws) passes
-# per length per model.
-RESIDUE_DOCUMENTS = 2      # documents per context length for rho(T)
-PERMUTATIONS = 5           # default draws from Pi per document; --num_permut_sampling
+# ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+# # THE EXPECTATION OVER Pi IS SAMPLED, NOT ENUMERATED. Pi is the uniform distribution over all
+# # T! permutations of the positions, and T! is not a number anything can be summed over -- at
+# # T = 512 it already exceeds the atoms in the observable universe. rho is an EXPECTATION, so it
+# # is estimated the way an expectation is: draw permutations and average. Five draws per
+# # document is the default, --num_permut_sampling.
+# #
+# # Each draw is a full forward pass over T tokens, and none of it can be shared between context
+# # lengths, so this is the term that sets what the probe costs: documents x (1 + draws) passes
+# # per length per model.
+# RESIDUE_DOCUMENTS = 2      # documents per context length for rho(T)
+# PERMUTATIONS = 5           # default draws from Pi per document; --num_permut_sampling
 COPY_WORDS = 48            # length of the copied passage
 CHUNK_TOKENS = 512         # upper bound on tokens per forward pass; the chunk is planned
 DTYPE = "fp32"             # the eval reports likelihoods; nothing here is trained
@@ -1882,11 +1884,12 @@ def parse_args():
                    default=True,
                    help=f"measure every point again instead of reusing "
                         f"{os.path.relpath(CACHE_DIR, config.ROOT)}/")
-    p.add_argument("--num_permut_sampling", type=int, default=PERMUTATIONS, metavar="N",
-                   help=f"permutations drawn per document when estimating the positional "
-                        f"residue. Pi is uniform over all T! orderings and rho is an "
-                        f"expectation over it, so it is SAMPLED: N draws, averaged "
-                        f"(default: {PERMUTATIONS})")
+    # ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+#     p.add_argument("--num_permut_sampling", type=int, default=PERMUTATIONS, metavar="N",
+#                    help=f"permutations drawn per document when estimating the positional "
+#                         f"residue. Pi is uniform over all T! orderings and rho is an "
+#                         f"expectation over it, so it is SAMPLED: N draws, averaged "
+#                         f"(default: {PERMUTATIONS})")
     p.add_argument("--plot_only", action="store_true",
                    help="redraw the pdf from the cache and stop; loads no model")
     p.add_argument("--gpu", default="auto", choices=["auto", "cuda", "mps", "cpu"])
@@ -1908,8 +1911,9 @@ def parse_args():
     # and the settings, which are not arguments -- see above
     a.documents, a.target_chars = DOCUMENTS, TARGET_CHARS
     a.trials, a.copy_words, a.seed = TRIALS, COPY_WORDS, SEED
-    a.residue_documents = RESIDUE_DOCUMENTS
-    a.permutations = a.num_permut_sampling
+    # ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+#     a.residue_documents = RESIDUE_DOCUMENTS
+#     a.permutations = a.num_permut_sampling
     a.chunk_tokens, a.dtype = CHUNK_TOKENS, DTYPE
     a.extend_positions = True         # not a flag: a length is never refused, ever
     a.context_lengths = list(CONTEXT_LENGTHS)
@@ -1992,7 +1996,8 @@ def main():
                                   "positional", "checkpoint", "step", "total")}
         m["name"] = label_for(m["key"], m["name"], m.get("params"),
                               m.get("positional"))
-        m["curve"], m["residue"], m["copy"], m["passkey"] = [], [], [], []
+        m["curve"], m["copy"], m["passkey"] = [], [], []
+        m["residue"] = []          # left in place: the figure reads it with .get and skips
         at = next((j for j, r in enumerate(res["models"]) if r["key"] == spec["key"]), None)
         if at is None:
             res["models"].append(m)
@@ -2010,8 +2015,9 @@ def main():
         # nothing until a whole model was finished. The list has to be shared, not returned.
         probe_context_curve(spec, docs, args, device, log,
                             lambda: live(f"{tag}: context curve"), cache, m["curve"])
-        probe_residue(spec, docs, args, device, log,
-                      lambda: live(f"{tag}: positional residue"), cache, m["residue"])
+        # ---- COMMENTED OUT: token-wise positional residue ---------------------------------- #
+#         probe_residue(spec, docs, args, device, log,
+#                       lambda: live(f"{tag}: positional residue"), cache, m["residue"])
         probe_copy(spec, args, device, log, lambda: live(f"{tag}: copy"), cache, m["copy"])
         probe_passkey(spec, args, device, log, lambda: live(f"{tag}: passkey"), cache,
                       m["passkey"])
