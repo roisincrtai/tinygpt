@@ -255,6 +255,7 @@ def spec_zetagpt(args, device, dtype, log):
         "shape": {"n_layer": int(cfg["n_layer"]), "n_head": int(cfg["n_head"]),
                   # no grouped-query attention here: every head keeps its own K and V
                   "kv_per_token": 2 * int(cfg["n_embd"]), "vocab": len(tok)},
+        "ensure": lambda T: None,      # nothing to grow: no position index exists
         "new_state": lambda: KVCache(len(model.blocks)),
         "forward_chunk": lambda x, st: (
             model.head(model.hidden_states(input_ids=x, cache=st)),
@@ -307,18 +308,19 @@ def extend_positions(model, target, log):
     n_old, d = mod.weight.shape
     if target <= n_old:
         return n_old
-    # A DENSE MASK BUFFER IS A REFUSAL. Its presence means the attention path indexes it, and
-    # at the target length it cannot be built -- see the docstring. Better to leave the model
-    # at its native window and say so than to allocate 34 GiB discovering the same thing.
+    # A DENSE CAUSAL MASK IS REBUILT, NOT USED AS A REASON TO REFUSE. With sdpa there is none --
+    # the mask is a flag to scaled_dot_product_attention. An eager path indexes a real buffer,
+    # so it is rebuilt as BOOL (one byte an entry, not four) at the length being asked for.
     impl = str(getattr(getattr(model, "config", None), "_attn_implementation", "")).lower()
-    dense = any(b is not None and b.dim() == 4 and b.shape[-1] == n_old
-                for _n, b in model.named_buffers())
+    dense = [(m, bn, b) for m in model.modules()
+             for bn, b in m.named_buffers(recurse=False)
+             if b is not None and b.dim() == 4 and b.shape[-1] == n_old]
     if dense and impl not in ("sdpa", "flash_attention_2"):
-        log(f"[context]            NOT extending: this model keeps a dense ({n_old:,} x "
-            f"{n_old:,}) causal mask and is running the {impl or 'eager'} attention path, "
-            f"which would need {target ** 2 * 4 / 2**30:.1f} GiB per layer at {target:,}. "
-            f"It stays at its native window.")
-        return 0
+        for m, bn, b in dense:
+            m.register_buffer(bn, torch.tril(torch.ones(
+                target, target, dtype=torch.bool, device=b.device)).view(1, 1, target, target))
+        log(f"[context]            {len(dense)} dense causal mask(s) rebuilt at {target:,} "
+            f"as bool ({target * target * len(dense) / 2**30:.2f} GiB)")
     w = mod.weight.data.detach().float().t().unsqueeze(0)          # (1, d, n_old)
     w = torch.nn.functional.interpolate(w, size=target, mode="linear", align_corners=True)
     new = nn.Embedding(target, d).to(mod.weight.device)
@@ -373,23 +375,37 @@ def spec_hf(key, repo, device, dtype, log, args):
     learned = any(("wpe" in n) or ("embed_positions" in n) or ("position_embeddings" in n)
                   for n, _ in model.named_parameters())
     native = n_pos                     # what it was TRAINED at, whatever is done to it after
-    extended = 0
-    if learned and args.extend_positions and n_pos and args.extend_positions > n_pos:
-        extended = extend_positions(model, int(args.extend_positions), log)
-        if extended:
-            n_pos = extended
+    state = {"rows": n_pos}
+    grows = bool(learned and args.extend_positions)
+
+    def ensure(T):
+        """Make the model able to take T tokens. ON DEMAND, and never a refusal.
+
+        AN AUTOREGRESSIVE MODEL HAS NO INHERENT LENGTH. A learned position table is a table and
+        a table can be stretched; refusing the length instead was a limit this script invented
+        and then went on to measure. Every length asked for is attempted, and the table grows to
+        meet it -- to the next power of two past T, so a sweep of doubling lengths interpolates
+        once per doubling rather than once per point."""
+        if not grows or T <= state["rows"]:
+            return
+        want = 1 << max(T - 1, 1).bit_length()
+        state["rows"] = max(state["rows"], extend_positions(model, want, log) or state["rows"])
     trunk = getattr(model, "transformer", None) or getattr(model, "model", None)
     return _finish({
         "key": key,
-        "name": repo.split("/")[-1] + (" (positions interpolated)" if extended else ""),
+        "name": repo.split("/")[-1] + (" (positions interpolated)" if grows else ""),
         "encode": lambda t: tk(t, add_special_tokens=False)["input_ids"],
-        # A LEARNED TABLE IS A WALL; RoPE IS A SLOPE. A model with a position table cannot be
-        # run past its rows at all, so max_pos is a hard stop; a rotary model runs and
-        # degrades, so its training length is recorded but nothing is refused.
-        # TRAIN_LEN IS THE NATIVE WINDOW AND STAYS THERE. Stretching the table does not train
-        # the model; reporting "trained at 32,768" of a model trained at 2,048 would put the
+        # NOTHING IS REFUSED FOR ITS LENGTH. A learned table is stretched by `ensure` when a
+        # longer sequence arrives and a rotary model needs nothing, so the only things that can
+        # end a curve are MEMORY and the CORPUS -- both of which are facts about the run rather
+        # than limits this script imposed. --extend_positions 0 puts the wall back, for a run
+        # that wants to see where a table would have stopped.
+        #
+        # TRAIN_LEN IS THE NATIVE WINDOW AND STAYS THERE. Stretching a table does not train a
+        # model; reporting "trained at 32,768" of a model trained at 2,048 would put the
         # extrapolation marker in the wrong place and hide the entire finding.
-        "max_pos": n_pos if learned else 0, "train_len": native or 2048,
+        "max_pos": 0 if grows else (n_pos if learned else 0),
+        "train_len": native or 2048, "ensure": ensure,
         # WHAT THE MODEL SAYS ABOUT ITSELF, kept even for the rotary ones. It is not enforced
         # there -- running past it is the measurement -- but it is what tells a failure beyond
         # this length apart from a failure inside it, which is the difference between a fact to
@@ -498,6 +514,10 @@ def score_ids(spec, pid, sid, device, chunk, desc=""):
 
     Returns (nats, tokens, correct, T, ok)."""
     T = len(pid) + len(sid)
+    # GROW THE MODEL TO THE LENGTH rather than turn the length away. A no-op for anything with
+    # no position index, and for a table already large enough.
+    if spec.get("ensure"):
+        spec["ensure"](T)
     if spec["max_pos"] and T > spec["max_pos"]:
         return None, len(sid), 0, T, False
     # THE CHUNK IS PLANNED FOR THIS LENGTH, not carried over from a shorter one. `chunk` may
@@ -1151,7 +1171,12 @@ def cache_signature(spec, args, corpus):
     NO PATH, NO DEVICE, NO TIME -- so two machines with the same checkpoint agree on what a
     cached point means."""
     return {
-        "model": spec["key"], "name": spec.get("name", spec["key"]),
+        # THE LABEL IS NOT IN THE KEY. It carried "(positions interpolated)", so enabling the
+        # extension would have discarded every point already measured -- and those points are
+        # still correct: a stretched table is identical to a native one BELOW the native
+        # window, and above it the native model recorded nothing, because a refused length is
+        # never cached. There is nothing for the two to disagree about.
+        "model": spec["key"],
         "checkpoint": os.path.basename(str(spec["checkpoint"]).rstrip("/")),
         "step": spec.get("step"),
         "corpus": os.path.basename(str(corpus).rstrip("/")),
