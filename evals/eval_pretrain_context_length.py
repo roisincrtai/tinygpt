@@ -315,18 +315,20 @@ def extend_positions(model, target, log):
     what position 500 of 1,024 meant -- the same fraction of the way through -- which is
     Position Interpolation's idea, applied to a table rather than to a rotation.
 
-    THE CAUSAL MASK IS NOT REBUILT, AND MUST NOT BE. GPT-2 and GPT-Neo carry a lower-triangular
-    `bias` buffer sized to the original length, and rebuilding it at the target is a (T x T)
-    tensor -- at 32,768 that is 1.07 billion entries, 4 GiB PER LAYER, 32 GiB across eight of
-    them, which is the very quadratic object the chunked scorer exists to avoid. Trying it is
-    what produced
+    THE CAUSAL MASK, WHERE THERE IS ONE. GPT-2 and GPT-Neo carry a lower-triangular `bias`
+    buffer sized to the original length, and it must match the new one or the forward fails on
+    its own shapes:
 
-        RuntimeError: MPS backend out of memory (tried to allocate 4.00 GiB)
+        RuntimeError: The size of tensor a (2048) must match the size of tensor b (2560)
 
-    The model is loaded with attn_implementation="sdpa" instead, where the causal mask is a flag
-    to scaled_dot_product_attention and no dense buffer is consulted at all. WITHOUT SDPA THE
-    TABLE IS NOT STRETCHED: an eager model would read its stale 2,048-row buffer and fail on
-    shapes, so the extension is refused and reported rather than attempted.
+    So the models are loaded with attn_implementation="sdpa", where the mask is a FLAG to
+    scaled_dot_product_attention and no buffer exists to go stale. Only where sdpa is
+    unavailable is a buffer rebuilt, and then as BOOL -- one byte an entry rather than four.
+
+    THAT REBUILD IS QUADRATIC AND IS NOT IN THE MEMORY BUDGET. At 32,768 a bool mask is 1 GiB
+    per buffer, and a model with one per layer pays that per layer, on top of everything
+    plan_chunk accounted for. It is reported when it happens. On the sdpa path -- which is every
+    model in BASELINES on a current transformers -- none of it occurs.
 
     THIS CHANGES THE MODEL, and the figure says so: the label gains "positions interpolated".
     A curve drawn under a published model's name must be that published model."""
@@ -358,7 +360,10 @@ def extend_positions(model, target, log):
             f"as bool ({target * target * len(dense) / 2**30:.2f} GiB)")
     w = mod.weight.data.detach().float().t().unsqueeze(0)          # (1, d, n_old)
     w = torch.nn.functional.interpolate(w, size=target, mode="linear", align_corners=True)
-    new = nn.Embedding(target, d).to(mod.weight.device)
+    # DEVICE AND DTYPE BOTH. nn.Embedding is created in the default fp32; moving only the
+    # device would leave an fp32 table inside a bf16 model, and the first forward would fail on
+    # a dtype it never had to see. --dtype bf16 was the only run that would have found this.
+    new = nn.Embedding(target, d).to(device=mod.weight.device, dtype=mod.weight.dtype)
     new.weight.data.copy_(w.squeeze(0).t().to(mod.weight.dtype))
     parent = model
     for part in name.split(".")[:-1]:
@@ -370,7 +375,8 @@ def extend_positions(model, target, log):
         if hasattr(model.config, "n_positions"):
             model.config.n_positions = target
     log(f"[context]            position table {n_old:,} -> {target:,} rows by linear "
-        f"interpolation (the causal mask is sdpa's, so none is materialised)")
+        f"interpolation" + ("" if dense and impl not in ("sdpa", "flash_attention_2")
+                            else f" ({impl or 'eager'}: no dense causal mask to rebuild)"))
     return target
 
 
@@ -880,7 +886,7 @@ def _filler_words(rng, n):
 
 
 def probe_copy(spec, args, device, log, live, cache, out):
-    """A passage, d words of filler, then THE SAME PASSAGE. Bits per byte on each copy.
+    """A passage, d words of filler, then THE SAME PASSAGE. Nats per byte on each copy.
 
     THE SECOND COPY IS FREE INFORMATION. A model that can reach back over the filler pays
     almost nothing for it; one that cannot pays what it paid the first time. The GAIN --
@@ -1036,7 +1042,6 @@ def _curve_panel(ax, models, field, xlabel, ylabel, title, logy=False):
     is the TARGET -- the same span of text is being predicted in every case -- and the x
     positions differ only because the tokenizers do."""
     drew = False
-    n = len(models)
     for i, m in enumerate(models):
         pts = [(r.get("context_length") or r["ctx_tokens"], r[field])
                for r in m["curve"] if r.get(field) is not None]
@@ -1097,8 +1102,9 @@ def figure(res, out_path):
     models = res["models"]
 
     # ---- row 1: four readings of the same sweep, against context length ---------------- #
-    # DOTTED VERTICALS ARE TRAINING LENGTHS. Everything to the right of a model's own line is
-    # extrapolation, which is the whole question, and it has to be visible without arithmetic.
+    # SOLID WITHIN THE TRAINED CONTEXT, DASHED BEYOND IT, RINGED AT THE BOUNDARY. Everything
+    # drawn dashed is extrapolation, which is the whole question, and it is visible without
+    # arithmetic and without a rule per model.
     _curve_panel(ax[0], models, "npb", "context length (tokens)", "nats / byte",
                  "average encoding length per byte (nats / byte)", logy=True)
     _curve_panel(ax[1], models, "ppl", "context length (tokens)", "perplexity",
