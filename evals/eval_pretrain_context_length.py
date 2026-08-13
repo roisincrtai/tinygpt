@@ -26,8 +26,8 @@ InfiniteBench, RULER's QA half) measures instruction tuning and reports the abse
 the absence of context. The three probes here ask only what a language model is: how surprised
 is it by these exact bytes.
 
-    1. CONTEXT CURVE     the same target span, preceded by 128, 256, ... tokens of its own
-                         document. If the curve keeps falling, the model is USING the extra
+    1. CONTEXT CURVE     the same target span, preceded by 512, 1k, 2k ... 32k TOKENS of its
+                         own document. If the curve keeps falling, the model is USING the extra
                          context; if it flattens at 512 while being fed 8,192, it merely
                          ACCEPTS it. This is the whole distinction, and one number cannot make
                          it -- only the same targets under a growing prefix can.
@@ -61,6 +61,20 @@ IS A WALL: GPT-2 has 1,024 rows and no row 1,025, so past it the model cannot be
 all, and the sweep reports that rather than a bad number. RoPE IS A SLOPE: the rotary models
 run past their training length and degrade. ZetaGPT refers to no position index anywhere, so
 its sweep ends where memory ends and not where the architecture does.
+
+THE CORPUS IS A HELD-OUT SPLIT, AND ONLY A HELD-OUT SPLIT. --data_dir defaults to
+data/download/zetagpt-tiny_pretrain-corpus_wikitext103, of which only validation-*.parquet and
+test-*.parquet are read; a corpus with no such files is REFUSED rather than scored. It is not
+the pretraining corpus, deliberately: FineWeb-Edu ships as one undifferentiated set of shards
+and every one of them is trained on, so scoring there would measure memorisation and report it
+as generalisation. That the held-out text comes from a different distribution is a feature --
+the claim under test is about LENGTH, not about domain.
+
+DOCUMENTS ARE USED WHOLE AND NEVER CONCATENATED, and a document that cannot fill the context is
+not scored at that length: stitching short articles into a long one manufactures a context
+whose distant half cannot be exploited by anyone, and a curve drawn over it is flat for reasons
+that have nothing to do with the models. Where no document is long enough the sweep stops and
+says that the CORPUS ended it.
 
 Nothing here is fetched by this script except the comparison weights, through transformers'
 own cache (config.MODEL_DIR). A model that cannot be loaded is SKIPPED AND REPORTED, never
@@ -482,7 +496,7 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
             live()
             continue
         nats = 0.0
-        nbytes = n_tok = n_cor = ctx = n_ok = 0
+        nbytes = n_tok = n_cor = ctx = n_ok = short = 0
         docs_bar = progress(list(enumerate(chosen, 1)),
                             desc=f"[context] {spec['key']} ctx {L:,}", total=len(chosen))
         for i_doc, d in docs_bar:
@@ -491,6 +505,13 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
             if room < 0:                       # the target alone is longer than this context
                 continue
             pre_ids = prefix_ids(spec, d[:len(d) - tail], room)
+            # THE DOCUMENT MUST BE ABLE TO FILL THE CONTEXT. prefix_ids returns what it has,
+            # so a short article would be scored at its own length while the axis said 32,768 --
+            # a curve whose x values are fiction. Short documents are skipped at this length,
+            # and if none is long enough the sweep stops and says which.
+            if len(pre_ids) < room:
+                short += 1
+                continue
             n, t, c, T, ok = score_ids(spec, pre_ids, span_ids, device, args.chunk_tokens,
                                        desc=f"[context] {spec['key']} ctx {L:,} "
                                             f"doc {i_doc}/{len(chosen)}")
@@ -514,7 +535,10 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
         log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   "
             + (f"bpb {rec['bpb']:.4f}   ppl {rec['ppl']:8.2f}   "
                f"nats/tok {rec['nats_per_token']:.4f}   acc {rec['acc']:.4f}   "
-               f"({n_ok} docs)" if rec["bpb"] is not None else "unreachable"))
+               f"({n_ok} docs" + (f", {short} too short)" if short else ")")
+               if rec["bpb"] is not None else
+               (f"no document reaches {L:,} tokens -- the CORPUS ends the sweep, "
+                f"not the model" if short and not n_ok else "unreachable")))
         if rec["bpb"] is not None:
             cache.put(f"curve:{L}", rec)
         live()
@@ -929,10 +953,16 @@ def parse_args():
     p.add_argument("--only", action="append",
                    choices=["zetagpt"] + list(BASELINES),
                    help="evaluate just this model; repeatable. Default: all four")
-    p.add_argument("--data_dir", default="",
-                   help="corpus of LONG documents for probe 1; empty = the scheme's own "
-                        "pretraining corpus. Nothing is concatenated, so a corpus of short "
-                        "documents caps the sweep and says so")
+    # WIKITEXT-103's VALIDATION SPLIT BY DEFAULT, and not the pretraining corpus, because it is
+    # the only downloaded corpus that HOLDS ANYTHING OUT. Scoring a model on its own training
+    # text measures memorisation; that a held-out set comes from a different distribution than
+    # FineWeb-Edu is a feature here rather than a flaw, since the claim under test is about
+    # length rather than about domain.
+    p.add_argument("--data_dir",
+                   default=config.dataset_dir("zetagpt-tiny_pretrain-corpus_wikitext103"),
+                   help="corpus for probe 1; only its HELD-OUT files are read "
+                        "(validation/test/eval by name) and a corpus with none is refused. "
+                        "Nothing is concatenated, so short documents cap the sweep and say so")
     p.add_argument("--documents", type=int, default=8, help="documents averaged in probe 1")
     p.add_argument("--target_chars", type=int, default=2000,
                    help="the fixed target span every context length is scored on")
@@ -997,8 +1027,7 @@ def main():
     if not specs:
         raise SystemExit("[context] no model could be loaded")
 
-    data_dir = args.data_dir or config.PRETRAIN_CORPUS.get(
-        config.PRETRAIN["model_scheme"], config.PRETRAIN_DIR)
+    data_dir = args.data_dir
     # a token is ~4 characters, so the longest context wants roughly 4x its tokens in text
     docs = long_documents(data_dir, max(args.context_lengths) * 4 + args.target_chars, log)
 
