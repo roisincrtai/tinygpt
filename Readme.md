@@ -219,6 +219,30 @@ corpus, and every artefact is named after the scheme
 `CONTEXT_WINDOW=256,512` pins a schedule, `BATCH=64` the batch, and `EXTRA_SET="--set
 MODEL.n_layer=6"` any other architectural value.
 
+## Shannon's limit entropy
+
+Shannon's 1951 estimate of the entropy of written English was **0.6–1.3 bits/char**.
+
+A training loss is in nats per *token*, so it reaches that scale in two steps — divide by
+`ln 2` for bits, then by how many characters a token spells:
+
+```
+bits/token = loss / ln 2
+bits/char  = bits/token / (characters per token)
+```
+
+At a loss of 2.3, with a byte-level BPE averaging 4.2 characters per token on English:
+
+```
+2.3 / 0.6931  = 3.318 bits/token
+3.318 / 4.2   = 0.79  bits/char
+```
+
+Characters per token is the only assumption, and it is measurable rather than assumed: divide
+the bytes of the validation split by the tokens it encodes to. Doing that makes the figure
+**bits per byte**, which is comparable across models with different tokenizers — unlike
+perplexity, which is per token and therefore per vocabulary.
+
 ## Niche among compact language models
 
 | Model | Params | Architecture | Positional encoding | Pretrain context |
