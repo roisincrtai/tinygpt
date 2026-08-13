@@ -1585,8 +1585,16 @@ def build_token_stream(root, tok, max_words=200, exclude_dirs=(), log=print,
                 log(f"[{stage}] token stream: {st.describe()}")
                 return st, len(files)
             # continue INTO it, under the signature it was written with, so the store resumes
-            # rather than judging it stale and deleting the shards
-            path, sig = alt, idx.get("sig", sig)
+            # rather than judging it stale and deleting the shards.
+            #
+            # `or sig` RATHER THAN A get() DEFAULT, and the difference is shards. A default
+            # only applies when the key is ABSENT; a manifest carrying "sig": null hands back
+            # None, which token_store.build compares against the signature it was given, finds
+            # unequal, calls stale -- and deletes every shard of a corpus that took hours,
+            # which is the one outcome adoption exists to prevent. Falling back to this run's
+            # own signature makes the comparison equal instead, so the worst case is a stream
+            # continued under a name rather than a stream destroyed.
+            path, sig = alt, (idx.get("sig") or sig)
 
     # A tokenizer without encode_ordinary (the gpt2 student's, say) falls back to __call__;
     # the distinction only exists for tokenizers that HAVE registered specials to protect.
