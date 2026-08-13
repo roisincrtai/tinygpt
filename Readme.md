@@ -307,10 +307,13 @@ Talk to a trained checkpoint:
 python chat.py                                # the most aligned checkpoint present
 ```
 
-It streams token by token, and it keeps the conversation: every prompt is the whole transcript
-so far, in the same `\n\nHuman: … \n\nAssistant:` form stage 6 trains on, so a follow-up like
-"and why?" is answerable. When the transcript outgrows the window the oldest turns are dropped
-and it says so. `reset` clears the conversation, `history` prints it with its token count.
+It streams token by token, in colour when the output is a terminal, and it keeps the
+conversation: every prompt is the whole transcript so far, in the same
+`\n\nHuman: … \n\nAssistant:` form stage 6 trains on, so a follow-up like "and why?" is
+answerable. There is **no length cap** — a reply ends at `<|endoftext|>` or at the context
+window, and at nothing else. The transcript is trimmed from the oldest end only when it would
+leave the reply less than half the window, and it says so when it does. `reset` clears the
+conversation, `history` prints it with its token count.
 
 ## Citation
 

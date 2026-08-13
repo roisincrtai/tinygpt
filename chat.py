@@ -22,11 +22,20 @@ the state dict:
     python chat.py --checkpoint checkpoints/rlhf/checkpoint_zetagpt-s_ssm_instruct-rlhf.pt \
         --prompt "Where?" --temperature 0
 
-Prompts are wrapped to match the training format. No KV cache (the prefix is recomputed
-each step), matching the project.
+IT IS A CONVERSATION, NOT A SEQUENCE OF PROMPTS. Every turn is prompted with the whole
+transcript so far, wrapped in the training format -- rlhf_hh's "\n\nHuman: ... \n\nAssistant:",
+the same text stage 6 is fine-tuned on -- so a follow-up like "and why?" has something to refer
+to. `reset` clears it, `history` prints it. The transcript is left-truncated only when it would
+leave the reply less than half the window.
+
+IT STREAMS, token by token, in colour when the output is a terminal. And it has NO LENGTH CAP:
+a reply ends at <|endoftext|> or at the context window, and at nothing else.
+
+Decoding is incremental, through the KV cache (helpers/kv_cache.py).
 """
 import os
 import argparse
+import sys
 
 import torch
 import torch.nn.functional as F
@@ -41,6 +50,27 @@ TEMPLATES = {
     "hh":   "\n\nHuman: {p}\n\nAssistant:",
     "shp":  "POST: {p}\n\nRESPONSE: ",
 }
+
+
+class C:
+    """ANSI colours, or nothing at all.
+
+    OFF WHENEVER THE OUTPUT IS NOT A TERMINAL, and off when NO_COLOR is set (the convention:
+    any value, however empty, means no colour). `python chat.py > transcript.txt` must produce a
+    transcript and not a file full of escape sequences, and that decision belongs here rather
+    than at each print -- a colour that has to be remembered at forty call sites is a colour
+    that leaks into a log."""
+    _on = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None \
+        and os.environ.get("TERM", "") != "dumb"
+    YOU = "\033[1;36m" if _on else ""          # bold cyan  -- what you typed
+    MODEL = "\033[0;32m" if _on else ""        # green      -- what the model said
+    INFO = "\033[2;37m" if _on else ""         # dim grey   -- the harness talking
+    OFF = "\033[0m" if _on else ""
+
+    @classmethod
+    def info(cls, m):
+        print(f"{cls.INFO}{m}{cls.OFF}", flush=True)
+
 
 def _stage_checkpoints(stage="*"):
     """Every checkpoint under checkpoints/<stage>/, oldest first.
@@ -93,7 +123,10 @@ def parse_args():
     ap.add_argument("--template", default="", choices=["", "none", "hh", "shp", "chat"],
                     help="prompt wrapper; '' = auto (hh/shp by dataset, else the model's chat template "
                          "if it has one, else none)")
-    ap.add_argument("--max_new_tokens", "-n", type=int, default=200)
+    # THERE IS NO LENGTH CAP. The model stops when it emits <|endoftext|> or when the context
+    # window is full, and nothing else stops it -- the same rule the CoT stage was put on. A cap
+    # here was a number invented by the harness, and every reply that ran into it was cut in the
+    # middle of a sentence and read as the model losing its thread.
     # "--temp" is spelled out as an alias: argparse's prefix matching makes the abbreviation
     # ambiguous against --template, and failing on `--temp 1` is a poor greeting.
     ap.add_argument("--temperature", "--temp", "-t", type=float, default=0.8,
@@ -294,8 +327,8 @@ def main():
     model, tok, max_len = build_from_checkpoint(sd, cfg, args, device, ck)
     if sd is not None:
         miss, unexp = model.load_state_dict(sd, strict=False)
-        print(f"[chat] loaded {args.checkpoint} "
-              f"(missing={len(miss)} unexpected={len(unexp)})", flush=True)
+        C.info(f"[chat] loaded {args.checkpoint} "
+               f"(missing={len(miss)} unexpected={len(unexp)})")
     model.eval()
     eos_id = getattr(tok, "eos_token_id", None)
 
@@ -333,60 +366,76 @@ def main():
         return past + TEMPLATES[tmpl].format(p=text)
 
     def fit(ids):
-        """The transcript, LEFT-TRUNCATED to leave room for the reply.
+        """The transcript, LEFT-TRUNCATED only if it would leave the reply no room.
 
-        The window is finite and a conversation is not, so something has to go, and it is the
-        OLDEST turns -- dropping the end would discard the question being asked. Truncation is
-        by token from the left rather than by whole turns, which can cut a turn in half; that
-        is the cheap approximation, and it degrades an old turn rather than losing the new one.
-        Reported when it happens, because a model that has quietly forgotten the start of the
-        conversation looks exactly like a model that is ignoring it."""
-        room = max(max_len - args.max_new_tokens, 1) if max_len else len(ids)
-        if len(ids) <= room:
+        The window is finite and a conversation is not, so eventually something has to go, and
+        it is the OLDEST turns -- dropping the end would discard the question being asked.
+        Truncation is by token from the left rather than by whole turns, which can cut a turn in
+        half; that is the cheap approximation, and it degrades an old turn rather than losing
+        the new one.
+
+        THE TRANSCRIPT MAY TAKE AT MOST HALF THE WINDOW, so the reply always has the other half.
+        That is a derived rule and not a knob: there is no length cap to set here any more, and
+        a conversation that has grown to fill the context would otherwise leave the model a
+        handful of tokens to answer in and look as though it had stopped talking. Reported when
+        it happens, because a model that has quietly forgotten the start of the conversation
+        looks exactly like a model that is ignoring it."""
+        if not max_len or len(ids) <= max_len // 2:
             return ids
-        print(f"[chat] transcript {len(ids):,} tokens > {room:,} available: "
-              f"dropping the oldest {len(ids) - room:,}", flush=True)
+        room = max(max_len // 2, 1)
+        C.info(f"[chat] transcript {len(ids):,} tokens: keeping the last {room:,} so the reply "
+               f"has the other half of the {max_len:,} window")
         return ids[-room:]
 
     def reply(text):
         """Generate, PRINTING AS IT GOES, and return what was said.
+
+        THE BUDGET IS WHATEVER THE WINDOW LEAVES. The model stops at <|endoftext|> or when the
+        context is full, and at nothing else.
 
         The stream decodes the whole generation each step and prints only the growth. Decoding
         the one new token instead would be cheaper and wrong: a byte-level BPE splits a
         multi-byte character across tokens, so "é" arrives as two ids and would print as two
         replacement characters."""
         ids = fit(tok(wrap(text), add_special_tokens=False)["input_ids"])
+        budget = max(max_len - len(ids), 1) if max_len else 4096
         shown = 0
 
         def stream(out):
             nonlocal shown
             s = decode(tok, out)
             if len(s) > shown:
-                print(s[shown:], end="", flush=True)     # flush: a buffered stream is not one
+                # COLOURED PER CHUNK rather than opened once and closed at the end: an
+                # interrupted generation would otherwise leave the terminal green.
+                print(f"{C.MODEL}{s[shown:]}{C.OFF}", end="", flush=True)
                 shown = len(s)
 
-        print("Model: ", end="", flush=True)
-        gen = generate(model, ids, device, args.max_new_tokens, args.temperature,
+        print(f"{C.MODEL}Model: {C.OFF}", end="", flush=True)
+        gen = generate(model, ids, device, budget, args.temperature,
                        args.top_k, args.top_p, eos_id, max_len, on_token=stream)
         print(flush=True)
         answer = decode(tok, gen).strip()
         history.append((text, answer))
         return answer
 
-    print(f"[chat] ckpt={args.checkpoint or '(base)'}  device={device}  template={tmpl}  "
-          f"(temp={args.temperature} top_k={args.top_k} top_p={args.top_p})", flush=True)
+    C.info(f"[chat] ckpt={args.checkpoint or '(base)'}  device={device}  template={tmpl}  "
+           f"(temp={args.temperature} top_k={args.top_k} top_p={args.top_p})")
+    C.info(f"[chat] window {max_len:,} tokens; a reply stops at <|endoftext|> or at the window, "
+           f"and nowhere else")
     if args.prompt:
-        print(f"\nYou:   {args.prompt}", flush=True)
+        print(f"\n{C.YOU}You:   {args.prompt}{C.OFF}", flush=True)
         reply(args.prompt)                     # prints itself, token by token
         return
-    print("Type a prompt. 'reset' forgets the conversation, "
-          "'history' shows it, Ctrl-D or 'exit'/'quit' leaves.", flush=True)
+    C.info("Type a prompt. 'reset' forgets the conversation, 'history' shows it, "
+           "Ctrl-D or 'exit'/'quit' leaves.")
     while True:
         try:
-            text = input("\nYou:   ").strip()
+            text = input(f"\n{C.YOU}You:   ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            print(C.OFF)
             break
+        finally:
+            sys.stdout.write(C.OFF); sys.stdout.flush()
         if not text:
             continue
         if text.lower() in ("exit", "quit"):
@@ -396,16 +445,16 @@ def main():
         # minute of waiting to clear four lines of context.
         if text.lower() == "reset":
             history.clear()
-            print("[chat] conversation cleared", flush=True)
+            C.info("[chat] conversation cleared")
             continue
         if text.lower() == "history":
             if not history:
-                print("[chat] nothing yet", flush=True)
+                C.info("[chat] nothing yet")
             for i, (u, a) in enumerate(history, 1):
-                print(f"[chat] {i}. You:   {u}\n[chat]    Model: {a}", flush=True)
+                print(f"{C.INFO}[chat] {i}.{C.OFF} {C.YOU}You:   {u}{C.OFF}", flush=True)
+                print(f"{C.INFO}[chat]    {C.OFF}{C.MODEL}Model: {a}{C.OFF}", flush=True)
             n = len(tok(wrap(""), add_special_tokens=False)["input_ids"])
-            print(f"[chat] {len(history)} turns, {n:,} tokens of a {max_len:,} window",
-                  flush=True)
+            C.info(f"[chat] {len(history)} turns, {n:,} tokens of a {max_len:,} window")
             continue
         reply(text)
 
