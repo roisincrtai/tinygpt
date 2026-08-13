@@ -54,9 +54,9 @@ smallest first: TinyStories 1M/8M/33M, Pythia-70M, GPT-2 small, SmolLM2-135M, Ge
 Qwen3-0.6B-Base, Qwen2.5-0.5B, TinyLlama v1.1. So the table stops being a literature survey
 and becomes a measurement.
 
-EVERY FIGURE IS BITS PER BYTE OVER AN IDENTICAL SPAN OF CHARACTERS. Those models have as many
+EVERY FIGURE IS NATS PER BYTE OVER AN IDENTICAL SPAN OF CHARACTERS. Those models have as many
 tokenizers between them, and perplexity is per TOKEN: a vocabulary that cuts text into fewer,
-longer pieces reports a lower perplexity for identical predictions. Bits per byte divides that
+longer pieces reports a lower perplexity for identical predictions. Nats per byte divides that
 out -- the same sentence is the same number of bytes to everyone -- and it is the only unit in
 which these rows may share an axis.
 
@@ -467,9 +467,14 @@ def score_span(spec, prefix, span, device, chunk=512, desc=""):
     return n, nb, t, c, T, ok
 
 
-def bpb(nats, nbytes):
-    """Nats over a span -> BITS PER BYTE, the one unit four tokenizers share."""
-    return None if nats is None or not nbytes else nats / math.log(2) / nbytes
+def npb(nats, nbytes):
+    """Nats over a span -> NATS PER BYTE, the one unit every tokenizer shares.
+
+    NATS, NOT BITS. The loss is in nats, so dividing by the byte count and stopping there is
+    the whole conversion; going on to divide by ln 2 introduces a second unit for no gain and
+    makes every figure disagree with every log line. One unit, and it is the one the objective
+    is already written in."""
+    return None if nats is None or not nbytes else nats / nbytes
 
 
 # --------------------------------------------------------------------------- #
@@ -577,7 +582,7 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
     FOUR CURVES OUT OF ONE SWEEP, because they are four readings of the same logits and they
     fail in different ways:
 
-        bits per byte     comparable ACROSS models -- the only unit four tokenizers share
+        nats per byte     comparable ACROSS models -- the only unit every tokenizer shares
         perplexity        the number everyone quotes, exp(nats per token), per-tokenizer
         nats per token    the same thing before the exponential, where small differences read
         token accuracy    how often the argmax is right, which moves for different reasons than
@@ -606,7 +611,7 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
         hit = cache.get(f"curve:{L}")
         if hit is not None:
             out.append(hit)
-            log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   bpb {hit['bpb']:.4f}   "
+            log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   npb {hit['npb']:.4f}   "
                 f"ppl {hit['ppl']:8.2f}   nats/tok {hit['nats_per_token']:.4f}   "
                 f"acc {hit['acc']:.4f}   (cached)")
             live()
@@ -652,29 +657,29 @@ def probe_context_curve(spec, docs, args, device, log, live, cache, out):
                 break
             nats += n; nbytes += span_bytes; n_tok += t; n_cor += c; ctx += T; n_ok += 1
             if hasattr(docs_bar, "set_postfix_str"):
-                docs_bar.set_postfix_str(f"bpb {bpb(nats, nbytes):.4f}, "
+                docs_bar.set_postfix_str(f"npb {npb(nats, nbytes):.4f}, "
                                          f"acc {n_cor / max(n_tok, 1):.3f}")
         if hasattr(docs_bar, "close"):
             docs_bar.close()
         npt = (nats / n_tok) if n_ok and n_tok else None
         rec = {"context_length": L, "documents": n_ok,
                "ctx_tokens": round(ctx / n_ok) if n_ok else L,
-               "bpb": bpb(nats, nbytes) if n_ok else None,
+               "npb": npb(nats, nbytes) if n_ok else None,
                "nats_per_token": npt,
                "ppl": math.exp(npt) if npt is not None else None,
                "acc": (n_cor / n_tok) if n_ok and n_tok else None}
         out.append(rec)
         log(f"[context] {spec['key']:<10} curve  ctx {L:>7,} tok   "
-            + (f"bpb {rec['bpb']:.4f}   ppl {rec['ppl']:8.2f}   "
+            + (f"npb {rec['npb']:.4f}   ppl {rec['ppl']:8.2f}   "
                f"nats/tok {rec['nats_per_token']:.4f}   acc {rec['acc']:.4f}   "
                f"({n_ok} docs" + (f", {short} too short)" if short else ")")
-               if rec["bpb"] is not None else
+               if rec["npb"] is not None else
                (f"no document reaches {L:,} tokens -- the CORPUS ends the sweep, "
                 f"not the model" if short and not n_ok else "unreachable")))
-        if rec["bpb"] is not None:
+        if rec["npb"] is not None:
             cache.put(f"curve:{L}", rec)
         live()
-        if rec["bpb"] is None:
+        if rec["npb"] is None:
             break
     return out
 
@@ -696,7 +701,7 @@ def probe_copy(spec, args, device, log, live, cache, out):
 
     THE SECOND COPY IS FREE INFORMATION. A model that can reach back over the filler pays
     almost nothing for it; one that cannot pays what it paid the first time. The GAIN --
-    first minus second -- is the retrieval signal, in bits per byte, and it is the cleanest
+    first minus second -- is the retrieval signal, in nats per byte, and it is the cleanest
     statement of what a positional mechanism buys: no semantics, no vocabulary, no corpus.
 
     The passage is drawn from the same word bank, so the first copy is not itself hard; what
@@ -707,7 +712,7 @@ def probe_copy(spec, args, device, log, live, cache, out):
         if hit is not None:
             out.append(hit)
             log(f"[context] {spec['key']:<10} copy   filler {dist:>7,} words  "
-                f"1st {hit['bpb_first']:.3f} -> 2nd {hit['bpb_second']:.3f} bpb   "
+                f"1st {hit['npb_first']:.3f} -> 2nd {hit['npb_second']:.3f} npb   "
                 f"gain {hit['gain']:+.3f}   (cached)")
             live()
             continue
@@ -732,17 +737,17 @@ def probe_copy(spec, args, device, log, live, cache, out):
             first_n += n1; first_b += b1; second_n += n2; second_b += b2; reached += 1
             if hasattr(trials, "set_postfix_str"):
                 trials.set_postfix_str(
-                    f"gain {bpb(first_n, first_b) - bpb(second_n, second_b):+.3f} bpb")
+                    f"gain {npb(first_n, first_b) - npb(second_n, second_b):+.3f} npb")
         if hasattr(trials, "close"):
             trials.close()
         rec = {"filler_words": dist, "trials": reached,
-               "bpb_first": bpb(first_n, first_b) if reached else None,
-               "bpb_second": bpb(second_n, second_b) if reached else None}
-        rec["gain"] = (None if rec["bpb_first"] is None
-                       else rec["bpb_first"] - rec["bpb_second"])
+               "npb_first": npb(first_n, first_b) if reached else None,
+               "npb_second": npb(second_n, second_b) if reached else None}
+        rec["gain"] = (None if rec["npb_first"] is None
+                       else rec["npb_first"] - rec["npb_second"])
         out.append(rec)
         log(f"[context] {spec['key']:<10} copy   filler {dist:>7,} words  "
-            + (f"1st {rec['bpb_first']:.3f} -> 2nd {rec['bpb_second']:.3f} bpb   "
+            + (f"1st {rec['npb_first']:.3f} -> 2nd {rec['npb_second']:.3f} npb   "
                f"gain {rec['gain']:+.3f}" if rec["gain"] is not None else "unreachable"))
         if rec["gain"] is not None:
             cache.put(f"copy:{dist}", rec)
@@ -797,7 +802,7 @@ def probe_passkey(spec, args, device, log, live, cache, out):
             if hasattr(trials, "close"):
                 trials.close()
             rec = {"filler_words": total, "depth": depth, "trials": reached,
-                   "bpb": bpb(nats, nbytes) if reached else None,
+                   "npb": npb(nats, nbytes) if reached else None,
                    # per-key nats is the readable form: -log P over the five digits, so 0 is
                    # certainty and ln(10^5) = 11.5 is a model guessing uniformly at random
                    "nats_per_key": (nats / reached) if reached else None}
@@ -869,9 +874,9 @@ def figure(res, out_path):
     # ---- row 1: four readings of the same sweep, against context length ---------------- #
     # DOTTED VERTICALS ARE TRAINING LENGTHS. Everything to the right of a model's own line is
     # extrapolation, which is the whole question, and it has to be visible without arithmetic.
-    _curve_panel(ax[0], models, "bpb", "context length (tokens)",
-                 "bits per byte on the fixed target",
-                 "1. bits/byte -- the cross-model unit", logy=True)
+    _curve_panel(ax[0], models, "npb", "context length (tokens)",
+                 "nats per byte on the fixed target",
+                 "1. nats/byte -- the cross-model unit", logy=True)
     _curve_panel(ax[1], models, "ppl", "context length (tokens)", "perplexity",
                  "2. perplexity (per tokenizer: shape, not level)", logy=True, marker="s-")
     _curve_panel(ax[2], models, "nats_per_token", "context length (tokens)", "nats / token",
@@ -891,7 +896,7 @@ def figure(res, out_path):
     ax[4].axhline(0.0, color="k", lw=0.8, alpha=0.4)
     ax[4].set_xscale("log", base=2)
     ax[4].set_xlabel("filler words between the two copies")
-    ax[4].set_ylabel("bits/byte saved on the second copy")
+    ax[4].set_ylabel("nats/byte saved on the second copy")
     ax[4].set_title("5. can it reach back?", loc="left", fontsize=9.5)
     if ax[4].get_legend_handles_labels()[0]:
         ax[4].legend(fontsize=5.6, ncol=2, loc="best")
@@ -1014,7 +1019,7 @@ def cache_signature(spec, args, corpus):
         "corpus": os.path.basename(str(corpus).rstrip("/")),
         "target_chars": args.target_chars, "documents": args.documents,
         "trials": args.trials, "copy_words": args.copy_words,
-        "seed": args.seed, "dtype": args.dtype,
+        "seed": args.seed, "dtype": args.dtype, "unit": "nats_per_byte",
         "context_lengths": list(args.context_lengths),
         "chunk_tokens": args.chunk_tokens, "vram_budget": args.vram_budget,
         "copy_distances": list(args.copy_distances),
@@ -1060,7 +1065,7 @@ def summarise(res, log):
     from helpers import table
     rows = []
     for m in res["models"]:
-        curve = [r for r in m["curve"] if r["bpb"] is not None]
+        curve = [r for r in m["curve"] if r["npb"] is not None]
         gains = [r["gain"] for r in m["copy"] if r.get("gain") is not None]
         keys = [r["nats_per_key"] for r in m["passkey"] if r.get("nats_per_key") is not None]
         far = max((r["filler_words"] for r in m["copy"]
@@ -1070,10 +1075,10 @@ def summarise(res, log):
             ("  positional", m["positional"]),
             ("  parameters", f"{m['params'] / 1e6:.1f}M"),
             ("  trained at", f"{m['train_len']:,} tokens"),
-            ("  best bpb / at", f"{min(r['bpb'] for r in curve):.4f} at "
+            ("  best npb / at", f"{min(r['npb'] for r in curve):.4f} at "
                                 f"{max(r.get('context_length') or 0 for r in curve):,} tokens"
                                 if curve else "-"),
-            ("  furthest copy", f"{far:,} filler words still worth over 0.05 bpb"),
+            ("  furthest copy", f"{far:,} filler words still worth over 0.05 npb"),
             ("  best key", f"{min(keys):.2f} nats (uniform = 11.51)" if keys else "-"),
             ("", ""),
         ]

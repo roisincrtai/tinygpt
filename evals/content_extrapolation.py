@@ -34,7 +34,7 @@ READ THE TWO ROWS FOR SHAPE, NOT FOR LEVEL. The models have DIFFERENT TOKENIZERS
 so a model whose tokenizer cuts text into fewer, longer pieces reports a higher perplexity for
 identical predictions. The levels are not comparable and the script does not pretend they are:
 each row is drawn on its own axis, the curve is also reported RELATIVE TO ITS OWN 1x, and
-BITS PER BYTE is recorded in the JSON as the one cross-tokenizer figure that does compare.
+NATS PER BYTE is recorded in the JSON as the one cross-tokenizer figure that does compare.
 
 THE ONE THING THAT MAKES A CURVE MEAN ANYTHING is that every context length must score THE
 SAME TARGET TOKENS. The obvious implementation -- chop the stream into windows of T and
@@ -472,7 +472,10 @@ def sweep(spec, stream, runnable, anchors, args, device, dtype, log):
         if fix_cnt:
             rec["nll_fixed"] = fix_nll / fix_cnt
             rec["ppl_fixed"] = math.exp(min(rec["nll_fixed"], 60.0))
-            rec["bpb_fixed"] = fix_nll / (LN2 * max(fix_bytes, 1))
+            # NATS per byte: the loss is already in nats, so the byte count is the whole
+            # conversion. Dividing by ln 2 as well would put the figures in a second
+            # unit from every other number this project reports.
+            rec["npb_fixed"] = fix_nll / max(fix_bytes, 1)
             rec["nll_all"] = win_nll / max(win_cnt, 1)
             rec["ppl_all"] = math.exp(min(rec["nll_all"], 60.0))
             rec["fixed_targets"], rec["fixed_bytes"] = fix_cnt, fix_bytes
@@ -480,7 +483,7 @@ def sweep(spec, stream, runnable, anchors, args, device, dtype, log):
                             "nll": (b_sum[i] / b_cnt[i]) if b_cnt[i] else None,
                             "n": b_cnt[i]} for i in range(args.pos_bins)]
             log(f"[extrapolation] {spec['key']}: T={T:>7,}  probes={rec['probes']:<2d} "
-                f"ppl_fixed={rec['ppl_fixed']:>10.3f}  bpb={rec['bpb_fixed']:>6.3f}  "
+                f"ppl_fixed={rec['ppl_fixed']:>10.3f}  npb={rec['npb_fixed']:>6.3f}  "
                 f"ppl_window={rec['ppl_all']:>10.3f}  (attn ~{est:.2f} GiB)")
         results.append(rec)
     return results
@@ -623,7 +626,7 @@ def _k(T):
 def summarise(res, log):
     """The table the report would quote: per model, the curve and what it did relative to
     its own 1x. Levels are NOT compared across models -- different tokenizers -- so the
-    cross-model column is bits per byte, which is."""
+    cross-model column is nats per byte, which is."""
     for m in res["models"]:
         rows = [r for r in m["results"] if r.get("ppl_fixed") is not None]
         log("")
@@ -632,7 +635,7 @@ def summarise(res, log):
         log(f"  tokenizer {m['tokenizer']}   trained at {m['train_len']:,} tokens   "
             f"probes {m['probes']}   stream {m['stream_tokens']:,} tokens")
         log("")
-        log(f"  {'T':>9} {'x train':>9} {'ppl (fixed)':>13} {'vs 1x':>8} {'bits/byte':>10}"
+        log(f"  {'T':>9} {'x train':>9} {'ppl (fixed)':>13} {'vs 1x':>8} {'nats/byte':>10}"
             f" {'ppl (window)':>13}")
         ref = rows[0]["ppl_fixed"] if rows else float("nan")
         for r in m["results"]:
@@ -642,13 +645,13 @@ def summarise(res, log):
                     f"   {r['status']}")
                 continue
             log(f"  {r['T']:>9,} {x:>9} {r['ppl_fixed']:>13.3f} {r['ppl_fixed'] / ref:>8.3f} "
-                f"{r['bpb_fixed']:>10.4f} {r['ppl_all']:>13.3f}")
+                f"{r['npb_fixed']:>10.4f} {r['ppl_all']:>13.3f}")
         log("-" * 88)
     log("")
     log("  ppl (fixed) is the result: identical target tokens at every length, differing only")
     log("  in how much context precedes them. PERPLEXITY IS NOT COMPARABLE BETWEEN THE MODELS")
     log("  -- different tokenizers, and perplexity is per token -- so compare the 'vs 1x'")
-    log("  column, or bits/byte, which is tokenizer-independent.")
+    log("  column, or nats/byte, which is tokenizer-independent.")
 
 
 def main():

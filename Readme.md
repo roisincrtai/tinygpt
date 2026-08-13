@@ -239,9 +239,19 @@ At a loss of 2.3, with a byte-level BPE averaging 4.2 characters per token on En
 ```
 
 Characters per token is the only assumption, and it is measurable rather than assumed: divide
-the bytes of the validation split by the tokens it encodes to. Doing that makes the figure
-**bits per byte**, which is comparable across models with different tokenizers — unlike
-perplexity, which is per token and therefore per vocabulary.
+the bytes of the validation split by the tokens it encodes to.
+
+**This project reports nats per byte, not bits.** The loss is already in nats, so the byte
+count is the whole conversion and `ln 2` never enters:
+
+```
+nats/byte = loss / (bytes per token)
+```
+
+Like bits per byte it is comparable across models with different tokenizers — unlike
+perplexity, which is per token and therefore per vocabulary — and it is in the unit the
+objective is written in, so a figure and a training log never disagree. Shannon's 0.6–1.3
+bits/char is quoted above in his own unit; multiply by `ln 2` for nats.
 
 ## Niche among compact language models
 
