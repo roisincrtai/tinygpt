@@ -65,6 +65,10 @@ tokens per step constant, and the run says so in its log. Checkpoints written be
 existed are covered too: the budget they were saved under is in the checkpoint, and the
 schedule is a pure function of it, so the window at that step is recoverable exactly.
 
+### Training dynamics
+
+<img src="doc/images/zetagpt-s_training_dynamics-1.png" alt="ZetaGPT-S pretraining dynamics: loss, next-token accuracy and perplexity" width="100%">
+
 ### Context generalization
 
 <img src="doc/images/pretrain_context_generalization-1.png" alt="Context generalization of ZetaGPT-S against compact baselines" width="100%">
