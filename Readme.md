@@ -65,6 +65,25 @@ tokens per step constant, and the run says so in its log. Checkpoints written be
 existed are covered too: the budget they were saved under is in the checkpoint, and the
 schedule is a pure function of it, so the window at that step is recoverable exactly.
 
+### Context generalization
+
+<img src="doc/images/pretrain_context_generalization-1.png" alt="Context generalization of ZetaGPT-S against compact baselines" width="100%">
+
+**The curve stays flat past the window it was trained at.** This checkpoint is not finished: it
+is part-way through the context schedule and has so far trained only at **2,048 tokens**, the
+ring on its curve, so everything to the right of it is extrapolation — the model is being run
+at lengths it has never seen. Perplexity is 50.6 at 512, 44.5 at 2,048 and **43.9 at 4,096**,
+twice its training window, and next-token accuracy is 0.344, 0.355 and 0.357 across the same
+three. Out at 16,384 — eight times the trained length — it reads 188.5 and 0.239, a gradual
+decline rather than a collapse. Against the compact baselines the contrast is in the shape:
+GPT-2 goes from 25.4 at its 1,024 window to 296.6 at 16,384, SmolLM2-135M from 14.4 to 2,549.7,
+SmolLM2-360M from 11.3 to 1,100.8, and TinyLlama v1.1 from 7.5 at 2,048 to 3,885.2 at 4,096
+with accuracy falling from 0.559 to 0.045 in a single doubling. Those models are strong inside
+their windows and stop working outside them; this one, trained to a quarter of the distance,
+degrades smoothly all the way out.
+
+The vector original is [`doc/images/pretrain_context_generalization.pdf`](doc/images/pretrain_context_generalization.pdf).
+
 ### Mix-Precision Training
 
 **bfloat16 activations, fp32 weights and fp32 optimiser state.** Every stage, on by default
